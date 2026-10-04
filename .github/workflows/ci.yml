@@ -28,6 +28,24 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest
 
+  terraform:
+    name: terraform fmt and validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.11.0"
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff infra
+      - name: Validate each stack (no AWS credentials needed)
+        run: |
+          for stack in infra/bootstrap infra/live; do
+            terraform -chdir=$stack init -backend=false -input=false
+            terraform -chdir=$stack validate
+          done
+
   integration:
     name: integration tests and resume proof
     runs-on: ubuntu-latest
