@@ -21,6 +21,15 @@ Live dashboards get expensive in two ways: a database query per viewer, and mana
 
 The API builds one snapshot per second and holds it in memory. Every viewer gets those same bytes, cached for one second at the edge. One viewer or five hundred, ClickHouse does the same work. Viewers only add bandwidth.
 
+**Measured locally, 2026-10-04.** Simulated viewers polled `live.json` every 2 s through the nginx cache in `deploy/nginx/` for 60 s:
+
+| Viewers | Edge requests | Served from cache | Reached the API |
+|---|---|---|---|
+| 100 | 2,996 | 99% | 31 (0.5 a second) |
+| 1,000 | 21,628 | 99.9% | 31 (0.5 a second) |
+
+The API's load stayed flat while viewers grew tenfold. It took one fix to get there: nginx's cache lock only covers new entries, so at each expiry every request in flight went to the API (0.6 a second at 100 viewers, 0.9 at 1,000). `proxy_cache_use_stale updating` lets one request refresh while the rest get the copy being replaced. nginx expires entries on whole seconds, so locally a copy lives 1 to 2 s. CloudFront gets measured in M3.
+
 ## Diagram
 
 ```mermaid
