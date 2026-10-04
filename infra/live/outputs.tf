@@ -22,3 +22,8 @@ output "snapshots_bucket" {
   description = "Where the api writes the fallback snapshot."
   value       = module.snapshots.id
 }
+
+output "deploy_role_arn" {
+  description = "Set as the AWS_DEPLOY_ROLE_ARN variable on the GitHub production environment."
+  value       = aws_iam_role.deploy.arn
+}

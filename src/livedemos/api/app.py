@@ -24,6 +24,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from livedemos import __version__
 from livedemos.api import metrics
 from livedemos.api.activity import ActivityService, BadRequest, parse_request
+from livedemos.api.fallback import FallbackWriter
 from livedemos.api.snapshot import Snapshotter
 from livedemos.clickhouse import ClickHouse, ClickHouseError
 from livedemos.config import ApiSettings, ClickHouseSettings, api_settings, clickhouse_settings
@@ -50,7 +51,19 @@ def create_app(
             stale_after_s=settings.stale_after_s,
         )
         stop = asyncio.Event()
-        task = asyncio.create_task(snapshotter.run(stop))
+        tasks = [asyncio.create_task(snapshotter.run(stop))]
+        if settings.snapshot_bucket:
+            import boto3  # only in production; credentials come from the instance role
+
+            writer = FallbackWriter(
+                snapshotter,
+                boto3.client("s3"),
+                bucket=settings.snapshot_bucket,
+                interval_s=settings.snapshot_interval_s,
+                max_snapshot_age_s=settings.max_snapshot_age_s,
+                stale_after_s=settings.stale_after_s,
+            )
+            tasks.append(asyncio.create_task(writer.run(stop)))
         app.state.ch = ch
         app.state.snapshotter = snapshotter
         app.state.activity = ActivityService(ch, ttl_s=settings.activity_cache_ttl_s)
@@ -59,7 +72,7 @@ def create_app(
             yield
         finally:
             stop.set()
-            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             await ch.aclose()
 
     app = FastAPI(

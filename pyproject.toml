@@ -6,6 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.35",
     "fastapi>=0.115",
     "httpx>=0.28",
     "httpx-sse>=0.4",
@@ -53,6 +54,10 @@ python_version = "3.12"
 strict = true
 packages = ["livedemos"]
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

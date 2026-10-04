@@ -16,9 +16,26 @@ docker compose -f compose.yaml -f compose.prod.yaml ps
 
 ## Deploy
 
-Push to `main`. The deploy workflow builds the image, records its tag in SSM and runs
-`deploy/host/deploy.sh <sha>` on the host. To roll back, run the workflow by hand with
-an earlier commit SHA.
+Push to `main`. When CI passes, `.github/workflows/deploy.yml` builds the arm64 image,
+pushes it to GHCR tagged with the commit SHA, records the tag in SSM, runs
+`deploy/host/deploy.sh <sha>` on the host through SSM Run Command, and waits for
+`/readyz` through CloudFront. It fails loudly if that isn't green within 2 minutes.
+
+To roll back, run the workflow by hand (Actions > deploy > Run workflow) with an
+earlier commit SHA. Every run is listed under the repo's Deployments.
+
+GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token for the
+`livedemos-deploy` role, which only trusts this repo's `production` environment.
+
+### First deploy (once)
+
+1. `make tf-plan tf-apply`, then `terraform -chdir=infra/live output deploy_role_arn`.
+2. GitHub > Settings > Environments > `production`: add the variable
+   `AWS_DEPLOY_ROLE_ARN` with that value, and limit deployment branches to `main`.
+3. Run the deploy workflow. The first image push creates the GHCR package as private,
+   so this first deploy fails at the pull.
+4. GitHub > Packages > `portfolio-live-demos` > Package settings: make it public. The
+   host pulls without credentials. Re-run the deploy.
 
 ## Rotate a secret
 
