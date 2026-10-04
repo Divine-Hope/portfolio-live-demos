@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+dist/
+build/
+*.egg-info/
+
+# Local hand-off copies
+*.pending

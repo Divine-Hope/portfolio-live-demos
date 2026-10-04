@@ -1,0 +1,32 @@
+{
+  "$schema": "/mediawiki/recentchange/1.0.0",
+  "meta": {
+    "uri": "https://en.wikipedia.org/wiki/User:AlexNewArtBot/GermanySearchResult",
+    "request_id": "00000000-0000-0000-0000-000000000000",
+    "id": "a9f74d36-fc99-4887-b2be-484b18fd538e",
+    "dt": "2026-10-04T19:46:13.321Z",
+    "domain": "en.wikipedia.org",
+    "stream": "mediawiki.recentchange",
+    "topic": "eqiad.mediawiki.recentchange",
+    "partition": 0,
+    "offset": 0
+  },
+  "id": 0,
+  "type": "edit",
+  "namespace": 2,
+  "title": "User:AlexNewArtBot/GermanySearchResult",
+  "title_url": "https://en.wikipedia.org/wiki/User:AlexNewArtBot/GermanySearchResult",
+  "comment": "(comment removed)",
+  "timestamp": 1791143164,
+  "user": "ExampleUser",
+  "bot": true,
+  "notify_url": "https://en.wikipedia.org/w/index.php",
+  "minor": false,
+  "length": {"old": 0, "new": 0},
+  "revision": {"old": 0, "new": 0},
+  "server_url": "https://en.wikipedia.org",
+  "server_name": "en.wikipedia.org",
+  "server_script_path": "/w",
+  "wiki": "enwiki",
+  "parsedcomment": "(comment removed)"
+}

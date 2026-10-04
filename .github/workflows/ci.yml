@@ -1,0 +1,106 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: lint, types, unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest
+
+  integration:
+    name: integration tests and resume proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: ci-admin
+    steps:
+      - uses: actions/checkout@v4
+      # Started by hand (not as a service) so it runs with our low-memory config and users.
+      - name: Start ClickHouse with the project's config
+        run: |
+          docker run -d --name clickhouse -p 8123:8123 \
+            -e CLICKHOUSE_USER=admin -e CLICKHOUSE_PASSWORD=ci-admin \
+            -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+            -e CLICKHOUSE_INGEST_PASSWORD=ci-ingest -e CLICKHOUSE_API_PASSWORD=ci-api \
+            -v "$PWD/clickhouse/config.d/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro" \
+            -v "$PWD/clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro" \
+            clickhouse/clickhouse-server:25.8
+          for i in $(seq 1 60); do curl -fsS localhost:8123/ping && break; sleep 1; done
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run pytest -m integration -v
+      - name: ClickHouse logs on failure
+        if: failure()
+        run: docker logs clickhouse | tail -100
+
+  image:
+    name: container image and compose file
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: cp .env.example .env && docker compose config --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: livedemos:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  stack:
+    name: whole stack, offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack against the fake stream
+        run: cp .env.example .env && make up-offline
+      - name: Wait for live data
+        run: |
+          for i in $(seq 1 60); do
+            status=$(curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' || true)
+            [ "$status" = "live" ] && exit 0
+            sleep 2
+          done
+          echo "no live data after 120 s"; exit 1
+      - run: make smoke
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Browser tests for the widget (keyboard, screen reader, axe, reduced motion)
+        run: |
+          uv run --locked --group e2e playwright install --with-deps chromium
+          uv run --locked --group e2e pytest -m e2e -v
+      - run: docker compose --profile offline ps
+      - name: Logs on failure
+        if: failure()
+        run: docker compose --profile offline logs --tail 100
+

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live demos, local preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #F7F9FC; color: #0E2238; font-family: "DM Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; display: flex; flex-direction: column; gap: 20px; }
+  h1 { margin: 0; font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; font-size: clamp(32px, 5vw, 52px); }
+  .lede { margin: 0; font-size: 17px; line-height: 1.55; max-width: 720px; color: #2A3A4F; }
+  .tag { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: #4A5A70; }
+  .grid { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+  .host { flex: 7 1 560px; min-width: 0; border: 2px solid #0E2238; border-radius: 18px; overflow: hidden; background: var(--host-bg, #fff); box-shadow: 6px 6px 0 #0E2238; }
+  .host.dark { --host-bg: #0B1B2E; --host-bar: #0E2238; --host-text: #F7F9FC; --host-muted: #A9BBD3; --host-line: #2A4766; --host-brand: #8FC1FF; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 12px 16px; background: var(--host-bar, #F7F9FC); color: var(--host-text, #0E2238); border-bottom: 1px solid var(--host-line, #DCE3EE); }
+  .brand { display: inline-flex; gap: 8px; align-items: center; font-family: "Bricolage Grotesque", sans-serif; font-weight: 800; }
+  .brand i { width: 18px; height: 18px; border-radius: 5px; background: var(--host-brand, #1D4ED8); display: inline-block; }
+  .nav { display: flex; gap: 14px; font-size: 13px; color: var(--host-muted, #4A5A70); }
+  .nav b { color: var(--host-text, #0E2238); border-bottom: 2px solid var(--host-brand, #1D4ED8); }
+  .chip { font-family: "IBM Plex Mono", monospace; font-size: 10px; padding: 4px 8px; border-radius: 999px; border: 1px dashed var(--host-muted, #4A5A70); color: var(--host-muted, #4A5A70); }
+  .toggle { font: inherit; font-size: 12px; padding: 8px 12px; min-height: 36px; border-radius: 999px; border: 1px solid var(--host-line, #DCE3EE); background: transparent; color: var(--host-text, #0E2238); cursor: pointer; }
+  iframe { display: block; width: 100%; height: 700px; border: 0; }
+  .side { flex: 5 1 340px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+  .panel { padding: 16px; border: 2px solid #0E2238; border-radius: 16px; background: #fff; display: flex; flex-direction: column; gap: 10px; }
+  .panel h2 { margin: 0; font-size: 15px; }
+  pre { margin: 0; padding: 12px 14px; border-radius: 10px; background: #0E2238; color: #D3DEEC; font-family: "IBM Plex Mono", monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+  pre.req { background: #EAF1FB; color: #0E2238; }
+  .run { align-self: flex-start; font: inherit; font-size: 13px; font-weight: 700; padding: 10px 14px; border-radius: 999px; border: 2px solid #0E2238; background: #fff; cursor: pointer; }
+  .fresh { display: flex; gap: 10px; align-items: center; font-weight: 500; }
+  .fresh i { width: 10px; height: 10px; border-radius: 50%; background: #9DB4D3; display: inline-block; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="tag">Local preview of the live demos page</span>
+  <h1>Live demos</h1>
+  <p class="lede">The widget on the left is the real embed, running against your local stack. The host app around it is a stand-in, the way analytics ships inside someone else's product.</p>
+  <div class="grid">
+    <div class="host" id="host">
+      <div class="bar">
+        <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
+          <span class="brand"><i></i>Northwind</span>
+          <span class="nav"><span>Home</span><span>Projects</span><b>Insights</b></span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="chip">demo host app</span>
+          <button type="button" class="toggle" id="toggle">Dark theme</button>
+        </div>
+      </div>
+      <iframe id="widget" src="/embed/wikipedia/?lang=all&theme=light" title="Wikipedia edits, live"></iframe>
+    </div>
+    <div class="side">
+      <div class="panel">
+        <div class="fresh"><i id="fresh-dot"></i><span id="fresh">Waiting for the widget.</span></div>
+        <span class="tag">Freshness is measured from the source timestamp, not from when you opened the page.</span>
+      </div>
+      <div class="panel">
+        <h2>Query it</h2>
+        <pre class="req" id="req"></pre>
+        <button type="button" class="run" id="run">Run it</button>
+        <pre id="res">Press "Run it" to send the request.</pre>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  const host = document.getElementById("host");
+  const frame = document.getElementById("widget");
+  const toggle = document.getElementById("toggle");
+  let dark = false;
+  let lang = "all";
+  toggle.addEventListener("click", () => {
+    dark = !dark;
+    host.classList.toggle("dark", dark);
+    toggle.textContent = dark ? "Light theme" : "Dark theme";
+    frame.contentWindow.postMessage({ type: "livedemos:theme", theme: dark ? "dark" : "light" }, location.origin);
+  });
+
+  const requestPath = () => `/v1/wikipedia/activity?lang=${lang === "all" ? "en,pt,de" : lang}&window=5m`;
+  const showRequest = () => { document.getElementById("req").textContent = `GET ${requestPath()}`; };
+  showRequest();
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== frame.contentWindow || event.data?.type !== "livedemos:state") return;
+    lang = event.data.lang;
+    showRequest();
+    const age = event.data.last_event_age_s;
+    const live = age != null && age <= 60;
+    document.getElementById("fresh-dot").style.background = live ? "#15803D" : "#D97706";
+    document.getElementById("fresh").textContent =
+      age == null ? "Waiting for the first events." : `${live ? "Live" : "Paused"} · last event ${Math.round(age)}s ago`;
+  });
+
+  document.getElementById("run").addEventListener("click", async () => {
+    const out = document.getElementById("res");
+    out.textContent = "Running…";
+    try {
+      const response = await fetch(requestPath());
+      out.textContent = JSON.stringify(await response.json(), null, 2);
+    } catch (error) {
+      out.textContent = `Request failed: ${error}`;
+    }
+  });
+</script>
+</body>
+</html>

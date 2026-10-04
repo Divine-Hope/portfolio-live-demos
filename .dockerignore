@@ -1,0 +1,12 @@
+.git
+.venv
+.env
+**/__pycache__
+.mypy_cache
+.pytest_cache
+.ruff_cache
+docs
+web
+tests
+deploy
+clickhouse

@@ -1,0 +1,56 @@
+<!--
+  ClickHouse tuned for a 2 GB host (EC2 t4g.small) that also runs ingest, the API and an
+  observability agent. Defaults assume a big server; these keep the footprint small and
+  predictable. Measured in the "measured week" before choosing the instance size.
+-->
+<clickhouse>
+    <!-- Hard ceiling for the whole server. Queries fail before the kernel OOM-kills us. -->
+    <max_server_memory_usage>943718400</max_server_memory_usage> <!-- 900 MiB -->
+
+    <!-- Caches sized for a dataset of a few GB, not hundreds. -->
+    <mark_cache_size>67108864</mark_cache_size> <!-- 64 MiB -->
+    <index_mark_cache_size>16777216</index_mark_cache_size> <!-- 16 MiB -->
+    <uncompressed_cache_size>16777216</uncompressed_cache_size> <!-- 16 MiB, off by default -->
+    <max_concurrent_queries>32</max_concurrent_queries>
+
+    <!-- Fewer background threads: one writer, small parts, little to merge. -->
+    <background_pool_size>4</background_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <background_common_pool_size>2</background_common_pool_size>
+    <background_schedule_pool_size>16</background_schedule_pool_size>
+    <background_move_pool_size>1</background_move_pool_size>
+    <background_fetches_pool_size>1</background_fetches_pool_size>
+    <background_buffer_flush_schedule_pool_size>1</background_buffer_flush_schedule_pool_size>
+    <background_message_broker_schedule_pool_size>1</background_message_broker_schedule_pool_size>
+    <background_distributed_schedule_pool_size>1</background_distributed_schedule_pool_size>
+
+    <merge_tree>
+        <merge_max_block_size>1024</merge_max_block_size>
+        <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool>
+        <!-- Must fit inside background_pool_size * ratio (8). -->
+        <number_of_free_entries_in_pool_to_lower_max_size_of_merge>0</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
+        <number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>
+        <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
+    </merge_tree>
+
+    <!-- System log tables cost memory and disk. Our own metrics cover what we need. -->
+    <query_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <query_metric_log remove="1"/>
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <part_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+    <iceberg_metadata_log remove="1"/>
+    <blob_storage_log remove="1"/>
+    <backup_log remove="1"/>
+
+    <logger>
+        <level>warning</level>
+    </logger>
+</clickhouse>

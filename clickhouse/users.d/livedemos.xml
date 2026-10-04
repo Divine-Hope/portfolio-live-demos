@@ -1,0 +1,59 @@
+<!--
+  Two application users, least privilege:
+    ingest  writes to the demos database and runs migrations
+    api     read-only, with tight per-query limits (it faces the public internet)
+  Passwords come from environment variables, never from this file.
+-->
+<clickhouse>
+    <profiles>
+        <writer>
+            <max_threads>2</max_threads>
+            <max_insert_threads>1</max_insert_threads>
+            <max_memory_usage>300000000</max_memory_usage>
+            <max_execution_time>30</max_execution_time>
+            <!-- A retried, deduplicated insert must not double-count in the rollup either. -->
+            <deduplicate_blocks_in_dependent_materialized_views>1</deduplicate_blocks_in_dependent_materialized_views>
+            <log_queries>0</log_queries>
+        </writer>
+        <reader>
+            <!-- readonly=2: no writes; the client may change settings, but only within
+                 the constraints below, so it can tighten limits and never raise them. -->
+            <readonly>2</readonly>
+            <max_threads>2</max_threads>
+            <max_memory_usage>200000000</max_memory_usage>
+            <max_execution_time>3</max_execution_time>
+            <max_result_rows>10000</max_result_rows>
+            <queue_max_wait_ms>1000</queue_max_wait_ms>
+            <log_queries>0</log_queries>
+            <constraints>
+                <readonly><const/></readonly>
+                <max_threads><max>2</max></max_threads>
+                <max_memory_usage><max>200000000</max></max_memory_usage>
+                <max_execution_time><max>3</max></max_execution_time>
+                <max_result_rows><max>10000</max></max_result_rows>
+            </constraints>
+        </reader>
+    </profiles>
+
+    <users>
+        <ingest>
+            <password from_env="CLICKHOUSE_INGEST_PASSWORD"/>
+            <profile>writer</profile>
+            <quota>default</quota>
+            <networks><ip>::/0</ip></networks>
+            <grants>
+                <query>GRANT CREATE DATABASE ON demos.*</query>
+                <query>GRANT CREATE TABLE, CREATE VIEW, ALTER, SELECT, INSERT ON demos.*</query>
+            </grants>
+        </ingest>
+        <api>
+            <password from_env="CLICKHOUSE_API_PASSWORD"/>
+            <profile>reader</profile>
+            <quota>default</quota>
+            <networks><ip>::/0</ip></networks>
+            <grants>
+                <query>GRANT SELECT ON demos.*</query>
+            </grants>
+        </api>
+    </users>
+</clickhouse>

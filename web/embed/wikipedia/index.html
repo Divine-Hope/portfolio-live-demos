@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wikipedia edits, live</title>
+<!-- Where the data API lives. Empty means same origin. Overridable with ?api= in dev. -->
+<meta name="livedemos-api" content="">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./widget.css">
+</head>
+<body>
+<main class="widget" aria-labelledby="title">
+  <header class="head">
+    <h1 id="title" class="title">Wikipedia edits</h1>
+    <div class="filters" role="group" aria-label="Language">
+      <span class="muted small">Language</span>
+      <button type="button" class="pill" data-lang="all">All</button>
+      <button type="button" class="pill" data-lang="en">English</button>
+      <button type="button" class="pill" data-lang="pt">Portuguese</button>
+      <button type="button" class="pill" data-lang="de">German</button>
+    </div>
+  </header>
+
+  <section class="metrics" aria-label="Last 5 minutes">
+    <div class="card metric">
+      <div class="label">Edits, last 5 min
+        <button type="button" class="info" aria-expanded="false" aria-controls="def-edits" aria-label="What counts as an edit">ⓘ</button>
+      </div>
+      <div class="value" id="m-edits">n/a</div>
+      <p class="def" id="def-edits" hidden>Edits and new pages on the selected Wikipedias in the last 5 minutes, all namespaces, after removing Wikimedia's test events.</p>
+    </div>
+    <div class="card metric">
+      <div class="label">Pages edited
+        <button type="button" class="info" aria-expanded="false" aria-controls="def-pages" aria-label="What counts as a page">ⓘ</button>
+      </div>
+      <div class="value" id="m-pages">n/a</div>
+      <p class="def" id="def-pages" hidden>Distinct pages with at least one edit in the last 5 minutes.</p>
+    </div>
+    <div class="card metric">
+      <div class="label">Bot edits
+        <button type="button" class="info" aria-expanded="false" aria-controls="def-bots" aria-label="How bot edits are counted">ⓘ</button>
+      </div>
+      <div class="value" id="m-bots">n/a</div>
+      <p class="def" id="def-bots" hidden>Share of those edits flagged as bot activity by Wikipedia itself.</p>
+    </div>
+  </section>
+
+  <section class="card chart-card" aria-labelledby="chart-label">
+    <div class="row muted small"><span id="chart-label">Edits per minute, last hour</span><span>now</span></div>
+    <div class="bars" id="bars" role="img" aria-label="Edits per minute, last hour. Waiting for data."></div>
+  </section>
+
+  <section class="card list-card" aria-labelledby="list-label">
+    <div class="muted small list-head">
+      <span id="list-label">Most-edited articles, last 5 minutes</span>
+      <button type="button" class="info" aria-expanded="false" aria-controls="def-list" aria-label="What most-edited means">ⓘ</button>
+    </div>
+    <p class="def" id="def-list" hidden>Count of edits per article (main namespace) in the last 5 minutes. Edits are not page views.</p>
+    <ol class="list" id="list" tabindex="-1"></ol>
+  </section>
+
+  <footer class="foot">
+    <p class="status" id="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></p>
+    <p class="sr-only" id="status-live" role="status"></p>
+    <p class="note muted">This demo serves one public dataset. In a real product, each customer gets a signed context, and the API only ever returns their own data.</p>
+  </footer>
+</main>
+<script src="./widget.js"></script>
+</body>
+</html>
