@@ -24,7 +24,7 @@ The API builds one snapshot per second and holds it in memory. Every viewer gets
 ## Diagram
 
 ```mermaid
-flowchart LR
+flowchart TB
     WM["Wikimedia EventStreams<br/>(SSE, resumable)"]
 
     subgraph EC2["One EC2 t4g.small, Docker Compose"]

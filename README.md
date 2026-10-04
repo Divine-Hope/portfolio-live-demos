@@ -1,5 +1,7 @@
 # Live data demos
 
+[![ci](https://github.com/Divine-Hope/portfolio-live-demos/actions/workflows/ci.yml/badge.svg)](https://github.com/Divine-Hope/portfolio-live-demos/actions/workflows/ci.yml)
+
 Small data products I run in public. Each one takes a public event stream, stores and models it, and serves it to a widget you can embed in any page, the way analytics ships inside a product.
 
 First up: what's being edited on English, Portuguese and German Wikipedia, right now.
@@ -16,7 +18,7 @@ First up: what's being edited on English, Portuguese and German Wikipedia, right
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     WM["Wikimedia EventStreams"] -- "SSE, resumable" --> ING["ingest"]
     ING -- "1 s batches" --> CH[("ClickHouse")]
     CH --> API["api: 1 s snapshot"]
