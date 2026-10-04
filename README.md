@@ -49,7 +49,7 @@ No internet, or don't want to hit Wikimedia? `make up-offline` runs the same sta
 | `make test` | Unit tests, no services needed |
 | `make test-integration` | Integration tests against ClickHouse |
 | `make proof` | The resume proof on its own |
-| `make e2e` | Browser tests for the widget, against the running stack |
+| `make e2e` | Browser tests for the widget, against the running stack (Chromium by default; CI also runs Firefox and WebKit) |
 | `make clean` | Stops everything and deletes the data |
 
 ## Endpoints
