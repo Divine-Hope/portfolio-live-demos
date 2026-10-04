@@ -23,6 +23,7 @@ from playwright.sync_api import Browser, Page, Route, expect, sync_playwright
 pytestmark = pytest.mark.e2e
 
 WIDGET_URL = os.environ.get("LIVEDEMOS_E2E_URL", "http://localhost:8080/embed/wikipedia/")
+BROWSER = os.environ.get("LIVEDEMOS_E2E_BROWSER", "chromium")  # chromium, firefox or webkit
 ARTICLE_URL = re.compile(r"^https://(en|pt|de)\.wikipedia\.org/wiki/\S+$")
 LIVE = re.compile(r"^Live · last event \d+s ago$")
 POLL_S = 2
@@ -73,7 +74,7 @@ def assert_chart_label_matches_data(page: Page) -> None:
 @pytest.fixture(scope="module")
 def browser() -> Iterator[Browser]:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = getattr(playwright, BROWSER).launch()
         yield browser
         browser.close()
 

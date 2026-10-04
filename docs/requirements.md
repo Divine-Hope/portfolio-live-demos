@@ -43,7 +43,7 @@ What the live demos must do, and how well. Each requirement has an id so tests, 
 | F4 | `tests/integration/test_storage.py::test_first_boot_and_too_old_bookmarks`, `tests/unit/test_snapshot.py` |
 | F5 | `tests/unit/test_snapshot.py`, `tests/integration/test_storage.py::test_snapshot_from_real_rows` |
 | F6 | `tests/unit/test_activity.py`, `tests/integration/test_storage.py::test_query_it_reports_clickhouse_timing` |
-| F7, F8 | `tests/e2e/test_widget.py` in a real browser (`make e2e`, and the CI stack job): live numbers, keyboard use, focus kept across updates, screen-reader announcements only on change, 5-minute-old data shown as paused, reduced motion, axe-core with no violations in light and dark; `tests/unit/test_api.py::test_live_refuses_to_serve_a_stale_snapshot` |
+| F7, F8 | `tests/e2e/test_widget.py` in Chromium, Firefox and WebKit (`make e2e`, and CI): live numbers, keyboard use, focus kept across updates, screen-reader announcements only on change, 5-minute-old data shown as paused, reduced motion, axe-core with no violations in light and dark; `tests/unit/test_api.py::test_live_refuses_to_serve_a_stale_snapshot` |
 | F9 | `make up-offline` |
 | N3 | Snapshot loop design plus the 1 s edge cache; load check in M3 |
 | N7 | Measured week (M5) |

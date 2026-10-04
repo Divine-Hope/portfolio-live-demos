@@ -65,8 +65,8 @@ smoke: ## Check the running stack answers
 	@curl -fsS localhost:8000/readyz && echo
 
 .PHONY: e2e
-e2e: ## Browser tests for the widget (start the stack first: make up-offline)
-	uv run --group e2e playwright install chromium
+e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWSER=firefox or webkit to switch)
+	uv run --group e2e playwright install $${LIVEDEMOS_E2E_BROWSER:-chromium}
 	uv run --group e2e pytest -m e2e -v
 
 .PHONY: lint
