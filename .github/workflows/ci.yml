@@ -82,8 +82,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Validate compose file
-        run: cp .env.example .env && docker compose config --quiet
+      - name: Validate compose files (local, and production on top)
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          IMAGE_TAG=0000000000000000000000000000000000000000 API_ORIGIN_SECRET=ci \
+            docker compose -f compose.yaml -f compose.prod.yaml config --quiet
+      - name: Lint the host scripts
+        run: shellcheck deploy/host/*.sh
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:

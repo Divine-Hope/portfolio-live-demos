@@ -11,6 +11,7 @@ Routes
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -68,6 +69,22 @@ def create_app(
         docs_url="/docs",
         redoc_url=None,
     )
+
+    # Only CloudFront knows the secret. The security group already limits the port to
+    # CloudFront's address ranges; this stops someone else's distribution pointing at us.
+    # /healthz and /metrics stay open for the container healthcheck and a local scraper.
+    open_paths = {"/healthz", "/metrics"}
+    origin_secret = settings.origin_secret.encode()
+
+    @app.middleware("http")
+    async def require_origin_secret(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if origin_secret and request.url.path not in open_paths:
+            sent = request.headers.get("x-origin-verify", "").encode()
+            if not hmac.compare_digest(sent, origin_secret):
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+        return await call_next(request)
 
     @app.middleware("http")
     async def observe(

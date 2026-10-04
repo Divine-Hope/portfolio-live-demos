@@ -1,0 +1,49 @@
+# Everything the host needs at runtime, as SSM parameters under one prefix.
+# deploy/host/render-env.sh turns each one into a variable in the host's .env:
+#   /livedemos/clickhouse-api-password  ->  CLICKHOUSE_API_PASSWORD
+
+locals {
+  ssm_prefix = "/${var.project}"
+  secret_names = [
+    "clickhouse-admin-password",
+    "clickhouse-ingest-password",
+    "clickhouse-api-password",
+    "api-origin-secret",
+  ]
+}
+
+# Generated here, so nobody ever types or sees them. They also live in Terraform
+# state, which is why the state bucket is private and encrypted.
+resource "random_password" "secret" {
+  for_each = toset(local.secret_names)
+  length   = 32
+  special  = false # they end up in an .env file; no quoting surprises
+}
+
+resource "aws_ssm_parameter" "secrets" {
+  for_each = random_password.secret
+  name     = "${local.ssm_prefix}/${each.key}"
+  type     = "SecureString" # encrypted with the AWS-managed key: no KMS charge
+  value    = each.value.result
+}
+
+resource "aws_ssm_parameter" "settings" {
+  for_each = {
+    "ingest-contact"      = var.repo_url
+    "api-snapshot-bucket" = module.snapshots.id
+  }
+  name  = "${local.ssm_prefix}/${each.key}"
+  type  = "String"
+  value = each.value
+}
+
+# The commit SHA of the image to run. Each deploy writes it; Terraform only creates it.
+resource "aws_ssm_parameter" "image_tag" {
+  name  = "${local.ssm_prefix}/image-tag"
+  type  = "String"
+  value = "none"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}

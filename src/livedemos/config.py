@@ -78,6 +78,9 @@ class ApiSettings(BaseSettings):
     stale_after_s: float = 60.0
     live_cache_max_age_s: int = 1
     activity_cache_ttl_s: int = 10
+    # Set in production: CloudFront adds this value as X-Origin-Verify, and requests
+    # without it are refused. Empty (local) turns the check off.
+    origin_secret: str = ""
 
 
 @lru_cache

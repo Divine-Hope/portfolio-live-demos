@@ -5,9 +5,34 @@ Everything in AWS is Terraform, apart from the one-time account setup below. Two
 | Stack | What it creates | State |
 |---|---|---|
 | `bootstrap/` | The S3 bucket that holds Terraform state for `live/` | Local file, gitignored |
-| `live/` | Everything else: budget, network, host, buckets, CloudFront, deploy role | In the S3 bucket |
+| `live/` | Everything else (below) | In the S3 bucket |
 
 Region `eu-west-1`. Every resource is tagged `project=livedemos`.
+
+`live/` holds:
+
+| File | What |
+|---|---|
+| `budget.tf` | Monthly budget, emails at 80% actual and 100% forecast |
+| `network.tf` | VPC, one public subnet, no NAT gateway. Port 80 open to CloudFront's address ranges only |
+| `host.tf`, `user-data.sh.tftpl` | One t4g.small (arm64, Amazon Linux 2023), IMDSv2 only, encrypted disk, no SSH key, an Elastic IP |
+| `secrets.tf` | Generated passwords and settings in SSM Parameter Store |
+| `storage.tf` | Private buckets for the fallback snapshot and the archive |
+| `cdn.tf` | CloudFront: 1 s cache on `live.json`, S3 failover, a secret header the api checks |
+
+Operating it (shell, deploys, rotating secrets, resizing): [`docs/runbook.md`](../docs/runbook.md).
+
+## What it costs
+
+| Item | Monthly |
+|---|---|
+| t4g.small | Free trial until 31 Dec 2026, then about $12 (us-east-1 list price; Ireland is slightly higher) |
+| 25 GB gp3 disk | About $2 |
+| Elastic IP (public IPv4) | About $3.60 |
+| CloudFront, SSM parameters, Session Manager | Free tier |
+| S3 | Cents |
+
+No NAT gateway, no load balancer, no KMS keys, no DynamoDB: each would cost more than everything above.
 
 ## Access: SSO, no access keys
 
