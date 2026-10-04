@@ -1,0 +1,15 @@
+[Unit]
+Description=Live demos stack (Docker Compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/livedemos
+ExecStart=/opt/livedemos/deploy/host/start.sh
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

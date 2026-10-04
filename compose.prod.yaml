@@ -1,0 +1,46 @@
+# Production override, used on the EC2 host:
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d
+# Same services as local, minus the dev conveniences. Secrets come from .env, which
+# deploy/host/render-env.sh writes from SSM Parameter Store on every deploy.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-image: &image
+  image: ghcr.io/divine-hope/portfolio-live-demos:${IMAGE_TAG:?IMAGE_TAG is not set}
+  pull_policy: missing
+
+services:
+  clickhouse:
+    ports: !reset []          # reachable only on the Docker network
+    logging: *logging
+
+  migrate:
+    <<: *image
+    build: !reset null
+    logging: *logging
+
+  ingest:
+    <<: *image
+    ports: !reset []
+    oom_score_adj: -500       # if memory runs out, ingest is the last to go
+    logging: *logging
+
+  api:
+    <<: *image
+    environment:
+      API_ORIGIN_SECRET: ${API_ORIGIN_SECRET:?API_ORIGIN_SECRET is not set}
+      API_SNAPSHOT_BUCKET: ${API_SNAPSHOT_BUCKET:-}   # fallback copy for CloudFront
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}     # credentials: the instance role
+    ports: !override
+      - "80:8000"             # CloudFront's origin; the security group allows only CloudFront
+    logging: *logging
+
+  web:
+    profiles: ["local-only"]  # CloudFront and Cloudflare Pages replace it in production
+
+  fake-stream:
+    profiles: ["local-only"]

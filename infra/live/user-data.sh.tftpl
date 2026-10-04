@@ -1,0 +1,40 @@
+#!/bin/bash
+# First boot only (cloud-init). Installs Docker and Compose, checks out the repo,
+# and registers the service that runs the stack on every boot.
+set -euxo pipefail
+
+# 1 GB of swap: ClickHouse merges can spike memory on a 2 GB host.
+if [ ! -f /swapfile ]; then
+  fallocate -l 1G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >>/etc/fstab
+fi
+
+dnf install -y docker git
+systemctl enable --now docker
+
+# Compose plugin: pinned version, checked against its published SHA-256.
+plugins=/usr/local/lib/docker/cli-plugins
+mkdir -p "$plugins"
+curl -fsSL -o "$plugins/docker-compose" \
+  "https://github.com/docker/compose/releases/download/${compose_version}/docker-compose-linux-aarch64"
+echo "${compose_sha256}  $plugins/docker-compose" | sha256sum -c -
+chmod 755 "$plugins/docker-compose"
+
+# Settings the host scripts need: where to read secrets from.
+mkdir -p /etc/livedemos
+cat >/etc/livedemos/host.env <<EOT
+AWS_REGION=${region}
+SSM_PREFIX=${ssm_prefix}
+EOT
+
+if [ ! -d /opt/livedemos/.git ]; then
+  git clone --depth 1 "${repo_url}.git" /opt/livedemos
+fi
+chmod 700 /opt/livedemos
+
+install -m 644 /opt/livedemos/deploy/host/livedemos.service /etc/systemd/system/livedemos.service
+systemctl daemon-reload
+systemctl enable --now livedemos.service
