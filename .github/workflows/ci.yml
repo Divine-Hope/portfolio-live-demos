@@ -104,3 +104,33 @@ jobs:
         if: failure()
         run: docker compose --profile offline logs --tail 100
 
+  browsers:
+    name: widget in ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [firefox, webkit]
+    env:
+      LIVEDEMOS_E2E_BROWSER: ${{ matrix.browser }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack against the fake stream
+        run: cp .env.example .env && make up-offline
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv run --locked --group e2e playwright install --with-deps ${{ matrix.browser }}
+      - name: Wait for live data
+        run: |
+          for i in $(seq 1 60); do
+            status=$(curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' || true)
+            [ "$status" = "live" ] && exit 0
+            sleep 2
+          done
+          echo "no live data after 120 s"; exit 1
+      - run: uv run --locked --group e2e pytest -m e2e -v
+      - name: Logs on failure
+        if: failure()
+        run: docker compose --profile offline logs --tail 100
