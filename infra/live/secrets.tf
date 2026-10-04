@@ -31,6 +31,7 @@ resource "aws_ssm_parameter" "settings" {
   for_each = {
     "ingest-contact"      = var.repo_url
     "api-snapshot-bucket" = module.snapshots.id
+    "aws-default-region"  = var.region
   }
   name  = "${local.ssm_prefix}/${each.key}"
   type  = "String"

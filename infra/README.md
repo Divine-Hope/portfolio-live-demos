@@ -19,6 +19,7 @@ Region `eu-west-1`. Every resource is tagged `project=livedemos`.
 | `secrets.tf` | Generated passwords and settings in SSM Parameter Store |
 | `storage.tf` | Private buckets for the fallback snapshot and the archive |
 | `cdn.tf` | CloudFront: 1 s cache on `live.json`, S3 failover, a secret header the api checks |
+| `deploy.tf` | GitHub OIDC and a deploy role that can only run the deploy script on this one host |
 
 Operating it (shell, deploys, rotating secrets, resizing): [`docs/runbook.md`](../docs/runbook.md).
 

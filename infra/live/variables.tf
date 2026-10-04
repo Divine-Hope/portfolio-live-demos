@@ -56,3 +56,9 @@ variable "compose_sha256" {
   type        = string
   default     = "d26373b19e89160546d15407516cc59f453030d9bc5b43ba7faf16f7b4980137"
 }
+
+variable "github_repo" {
+  description = "owner/name of the repo whose workflows may deploy."
+  type        = string
+  default     = "Divine-Hope/portfolio-live-demos"
+}
