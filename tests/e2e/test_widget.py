@@ -11,6 +11,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -48,6 +49,27 @@ class Widget:
         pytest.fail("couldn't reach the article list with Tab")
 
 
+def chart_label_for(payload: dict[str, Any]) -> str:
+    """What the chart's aria-label should say for this payload (lang=all)."""
+    series = payload["langs"]["all"]["per_minute"]
+    full = [m for m in series if not m.get("partial") and m.get("edits") is not None]
+    if not full:  # a fresh stack has no complete minute yet
+        return "Edits per minute over the last hour. Not enough data yet."
+    return f"Edits per minute over the last hour. Last full minute: {full[-1]['edits']:,} edits."
+
+
+def assert_chart_label_matches_data(page: Page) -> None:
+    """The label describes the data on screen. Retried, as a poll can land in between."""
+    label = None
+    for _ in range(5):
+        payload = page.evaluate("fetch('/v1/wikipedia/live.json').then(r => r.json())")
+        label = page.locator("#bars").get_attribute("aria-label")
+        if label == chart_label_for(payload):
+            return
+        page.wait_for_timeout(1_000)
+    pytest.fail(f"chart label doesn't match the data: {label!r}")
+
+
 @pytest.fixture(scope="module")
 def browser() -> Iterator[Browser]:
     with sync_playwright() as playwright:
@@ -75,8 +97,7 @@ def test_shows_live_numbers(widget: Widget) -> None:
     for metric in ("#m-edits", "#m-pages", "#m-bots"):
         expect(page.locator(metric)).to_have_text(re.compile(r"^\d[\d,]*%?$"))
     expect(page.locator("#bars .bar")).to_have_count(60)
-    chart_label = re.compile(r"^Edits per minute over the last hour\. Last full minute: \d")
-    expect(page.locator("#bars")).to_have_attribute("aria-label", chart_label)
+    assert_chart_label_matches_data(page)
     expect(page.locator("#list a").first).to_be_visible()
     hrefs: list[str] = page.locator("#list a").evaluate_all("links => links.map(a => a.href)")
     assert hrefs
