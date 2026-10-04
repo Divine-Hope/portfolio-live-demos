@@ -67,3 +67,30 @@ def test_health_and_metrics(client: TestClient) -> None:
     assert client.get("/healthz").json()["status"] == "ok"
     metrics = client.get("/metrics").text
     assert "api_requests_total" in metrics
+
+
+@pytest.fixture
+def guarded_client() -> Iterator[TestClient]:
+    app = create_app(
+        ApiSettings(tick_interval_s=3_600, origin_secret="s3cret"),
+        ClickHouseSettings(url="http://127.0.0.1:9", timeout_s=0.2),
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_origin_secret_is_required_when_configured(guarded_client: TestClient) -> None:
+    assert guarded_client.get("/v1/wikipedia/live.json").status_code == 403
+    wrong = guarded_client.get("/v1/wikipedia/live.json", headers={"X-Origin-Verify": "nope"})
+    assert wrong.status_code == 403
+    right = guarded_client.get("/v1/wikipedia/live.json", headers={"X-Origin-Verify": "s3cret"})
+    assert right.status_code == 503  # past the check; no snapshot yet in this test
+
+
+def test_health_and_metrics_stay_open_for_the_host(guarded_client: TestClient) -> None:
+    assert guarded_client.get("/healthz").status_code == 200
+    assert guarded_client.get("/metrics").status_code == 200
+
+
+def test_no_secret_configured_means_no_check(client: TestClient) -> None:
+    assert client.get("/v1/wikipedia/activity", params={"lang": "fr"}).status_code == 400

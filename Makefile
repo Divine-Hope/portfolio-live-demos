@@ -69,6 +69,45 @@ e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWS
 	uv run --group e2e playwright install $${LIVEDEMOS_E2E_BROWSER:-chromium}
 	uv run --group e2e pytest -m e2e -v
 
+# AWS -----------------------------------------------------------------------------------
+# Credentials come from your SSO profile: run `aws sso login --sso-session bplabs` first.
+TF_PROFILE ?= livedemos
+TF := AWS_PROFILE=$(TF_PROFILE) terraform
+
+.PHONY: tf-bootstrap
+tf-bootstrap: ## AWS: create the Terraform state bucket (once per account)
+	$(TF) -chdir=infra/bootstrap init -input=false
+	$(TF) -chdir=infra/bootstrap apply
+
+.PHONY: tf-init
+tf-init: ## AWS: connect infra/live to the state bucket
+	$(TF) -chdir=infra/live init -input=false -backend-config=backend.hcl
+
+.PHONY: tf-plan
+tf-plan: ## AWS: show what infra/live would change, and save the plan
+	$(TF) -chdir=infra/live plan -input=false -out=tfplan
+
+.PHONY: tf-apply
+tf-apply: ## AWS: apply exactly the plan saved by tf-plan
+	$(TF) -chdir=infra/live apply -input=false tfplan
+
+.PHONY: tf-lock
+tf-lock: ## AWS: record provider checksums for macOS and Linux (commit the lock files)
+	for stack in infra/bootstrap infra/live; do \
+		terraform -chdir=$$stack providers lock -platform=darwin_arm64 -platform=linux_amd64 -platform=linux_arm64; \
+	done
+
+.PHONY: tf-fmt
+tf-fmt: ## Format the Terraform code
+	terraform fmt -recursive infra
+
+.PHONY: tf-validate
+tf-validate: ## Check the Terraform code without touching AWS
+	terraform fmt -check -recursive infra
+	for stack in infra/bootstrap infra/live; do \
+		terraform -chdir=$$stack init -backend=false -input=false >/dev/null && terraform -chdir=$$stack validate || exit 1; \
+	done
+
 .PHONY: lint
 lint: ## Ruff (lint + format check) and mypy
 	uv run ruff check .

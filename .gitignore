@@ -12,3 +12,14 @@ build/
 
 # Local hand-off copies
 *.pending
+
+# Terraform: providers, local state, plans and account-specific settings stay local
+infra/**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+infra/live/backend.hcl
+*.tfvars
+!*.tfvars.example
