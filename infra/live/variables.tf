@@ -62,3 +62,9 @@ variable "github_repo" {
   type        = string
   default     = "Divine-Hope/portfolio-live-demos"
 }
+
+variable "state_bucket" {
+  description = "The Terraform state bucket (backend.hcl), so CI's plan role can take the state lock."
+  type        = string
+  default     = "livedemos-tfstate-444134575833-eu-west-1"
+}

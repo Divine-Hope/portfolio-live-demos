@@ -22,7 +22,9 @@ pushes it to GHCR tagged with the commit SHA, records the tag in SSM, runs
 `/readyz` through CloudFront. It fails loudly if that isn't green within 2 minutes.
 
 To roll back, run the workflow by hand (Actions > deploy > Run workflow) with an
-earlier commit SHA. Every run is listed under the repo's Deployments.
+earlier commit SHA. Every run is listed under the repo's Deployments. A rollback past a
+schema migration fails at the `migrate` step, on purpose: undo it with a new migration
+instead.
 
 GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token for the
 `livedemos-deploy` role, which only trusts this repo's `production` environment.
@@ -36,6 +38,29 @@ GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token 
    so this first deploy fails at the pull.
 4. GitHub > Packages > `portfolio-live-demos` > Package settings: make it public. The
    host pulls without credentials. Re-run the deploy.
+
+## Infrastructure changes
+
+Terraform runs in the same pipeline as the app (`infra/live/ci.tf`, `.github/workflows/`):
+
+- **Pull request:** `terraform plan` with a read-only role. The plan is in the job summary.
+- **Merge to `main`:** plan again; if it changes anything, the `infra` environment waits
+  for your approval, then applies, then the app deploys. A plan that deletes or replaces
+  a resource fails instead: do those by hand with `make tf-plan tf-apply`.
+- **Manual runs** (rollbacks) deploy the app only and never touch infrastructure.
+
+The plan file is never uploaded (it holds secrets; the repo is public). The apply job
+plans again and refuses if that plan changes anything other than what you approved.
+
+### Set up the pipeline (once)
+
+1. `make tf-init`, then `make tf-plan tf-apply`. This creates the two CI roles.
+2. In GitHub > Settings > Environments, create:
+   - `infra-plan`: deployment branches `main` only.
+   - `infra`: deployment branches `main` only, required reviewer: you. Add the variable
+     `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
+3. Repository variables: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`) and
+   `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`).
 
 ## Rotate a secret
 
@@ -65,3 +90,43 @@ terraform -chdir=infra/live apply -replace=aws_instance.host
 
 User data installs Docker, checks out the repo and starts the stack with the image tag
 in SSM. ClickHouse starts empty; ingest backfills the last hour from Wikimedia.
+
+## Schema changes
+
+Add a numbered file to `src/livedemos/migrations/` ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)).
+Every deploy runs the `migrate` job before ingest and the API start; it applies pending
+files in order and records them. Never edit an applied migration: `migrate` refuses, and
+nothing else starts. If it reports another run holding the lock and none is running (a
+deploy was interrupted), clear it with
+`docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.migrate --unlock`. Before the first deploy that adds a secret (such as
+`clickhouse-migrator-password`), run `make tf-plan tf-apply` so SSM has it.
+
+## Check the rollup against raw rows
+
+```
+docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.reconcile
+```
+
+Exit 0: every (minute, language) older than 15 minutes matches. Exit 1: the mismatches are
+logged. To rebuild them, stop ingest first (repair refuses while an ingest insert is
+running or rows are still arriving, and fails if either happens during it), then add `--repair`, then start ingest; it resumes
+from its bookmark. Locally, `make reconcile REPAIR=1` does all three.
+
+## What to alert on
+
+These are the signals; the alerts themselves are M4.
+
+| Signal | Means |
+|---|---|
+| `time() - ingest_last_commit_timestamp_seconds > 120` | Nothing committed for 2 minutes: ingest is stuck, ClickHouse refuses writes, or the stream is down. The loop heartbeat can stay healthy through all three, so alert on this, not on container health. |
+| `ingest_lag_seconds > 60` | Committing, but behind the stream: catching up, or an insert is slow. |
+| `increase(ingest_gaps_recorded_total[1h]) > 0` | History was lost (an outage outlived retention). The chart shows it. |
+| `increase(ingest_inflight_waits_total[10m]) > 0` | A start has waited over a minute for an earlier insert to finish; ingest isn't running meanwhile. Look at `system.processes`. |
+| `increase(ingest_batches_total{result="error"}[5m]) > 0` | Inserts are failing; the batch is being retried. If it never succeeds, ClickHouse is rejecting the data. |
+| `increase(ingest_events_total{outcome="malformed"}[10m])` rising | The stream's schema changed. |
+| `time() - api_last_snapshot_timestamp_seconds > 10` | The API can't build snapshots; CloudFront is serving the S3 copy. |
+| `rate(api_activity_queries_total{cache=~"timeout\|cooldown\|shed"}[5m]) > 0` | "Query it" is shedding load. |
+| `increase(api_activity_query_failures_total[5m]) > 0` | ClickHouse failed a "Query it" query. |
+
+For a slow query or a merge backlog, `system.query_log` (slow application queries) and
+`system.part_log` keep 3 days.
