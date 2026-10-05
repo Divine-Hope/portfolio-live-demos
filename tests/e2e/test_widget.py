@@ -91,6 +91,10 @@ def widget(browser: Browser) -> Iterator[Widget]:
     page.on("pageerror", lambda exc: widget.errors.append(str(exc)))
     page.route(FONTS, lambda route: route.fulfill(status=200, content_type="text/css", body=""))
     yield widget
+    # A route handler can still be mid-fetch when a test ends (the widget polls every 2 s).
+    # Drop handlers first, ignoring those in flight, so their errors can't surface in the
+    # next test's browser calls.
+    page.unroute_all(behavior="ignoreErrors")
     context.close()
 
 
