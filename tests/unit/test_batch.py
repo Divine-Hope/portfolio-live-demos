@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -52,7 +52,7 @@ def test_events_sharing_a_millisecond_get_different_tokens() -> None:
     b = Batch(max_rows=10, interval_s=1.0, clock=FakeClock())
     a.add(edit(1), sse_id="same-ms", ingest_seq=1)
     b.add(edit(2), sse_id="same-ms", ingest_seq=2)
-    assert a.dedup_token() != b.dedup_token()
+    assert a.seal().token != b.seal().token
 
 
 def test_a_batch_never_spans_two_days() -> None:
@@ -69,16 +69,27 @@ def test_a_batch_never_spans_two_days() -> None:
         batch.add(after_midnight, sse_id="b", ingest_seq=2)
 
 
-def test_bookmark_is_the_last_sse_id_and_token_is_stable() -> None:
+def test_sealed_batch_is_what_a_retry_resends() -> None:
     a = Batch(max_rows=10, interval_s=1.0, clock=FakeClock())
     b = Batch(max_rows=10, interval_s=1.0, clock=FakeClock())
     for batch in (a, b):
-        batch.add(edit(1), sse_id="first", ingest_seq=1)
-        batch.add(edit(2), sse_id="last", ingest_seq=2)
-    assert a.last_sse_id == "last"
-    assert a.dedup_token() == b.dedup_token()
-    assert edit(1).event_id in a
+        batch.add(edit(5), sse_id="first", ingest_seq=7)
+        batch.add(edit(2), sse_id="last", ingest_seq=8)
+    pending = a.seal()
+    assert pending.bookmark == "last"
+    assert pending.newest_event_time == edit(5).event_time  # newest, not last added
+    assert pending.event_ids == (edit(5).event_id, edit(2).event_id)
+    assert pending.token == b.seal().token  # same events, same token
+    assert len(pending) == 2
+    with pytest.raises(FrozenInstanceError):
+        pending.token = "other"  # type: ignore[misc]
+    assert edit(5).event_id in a
     assert edit(3).event_id not in a
+
+
+def test_an_empty_batch_cannot_be_sealed() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        Batch(max_rows=10, interval_s=1.0).seal()
 
 
 def test_recent_ids_keep_the_latest_ingested_whatever_their_timestamps() -> None:
@@ -86,7 +97,7 @@ def test_recent_ids_keep_the_latest_ingested_whatever_their_timestamps() -> None
     recent.extend(["a", "b", "c"])
     recent.extend(["d"])  # pushes out the oldest ingested, not the oldest event
     assert "a" not in recent
-    assert {"b", "c", "d"} <= {i for i in "bcd" if i in recent}
+    assert all(i in recent for i in "bcd")
     recent.extend(["c"])  # already known: no change
     assert len(recent) == 3
 
@@ -99,9 +110,23 @@ def test_sequence_never_goes_backwards() -> None:
     assert len(set(values)) == 4
 
 
+def test_sequence_survives_a_restart_with_the_clock_set_back() -> None:
+    before = SequenceGenerator(clock=lambda: 2_000)
+    committed = before.next()
+    # A new process, seeded from what was committed, on a clock that went backwards.
+    after = SequenceGenerator(start=committed, clock=lambda: 1_500)
+    assert after.next() > committed
+
+
 def test_backoff_stays_under_the_cap_and_resets() -> None:
     backoff = Backoff(initial_s=1.0, max_s=8.0)
     delays = [backoff.next_delay() for _ in range(10)]
     assert all(0 <= d <= 8.0 for d in delays)
     backoff.reset()
     assert backoff.next_delay() <= 1.0
+
+
+def test_backoff_survives_a_very_long_outage() -> None:
+    # 2.0 * 2**1025 used to raise OverflowError around attempt 1,025.
+    backoff = Backoff(initial_s=1.0, max_s=30.0)
+    assert all(0 <= backoff.next_delay() <= 30.0 for _ in range(5_000))

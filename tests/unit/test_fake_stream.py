@@ -1,37 +1,57 @@
 import json
 
-from livedemos.devtools.fake_eventstreams import FakeStream
+from livedemos.devtools.fake_eventstreams import TOPICS, FakeStream
 
 
-def filled(n: int = 50) -> FakeStream:
-    fake = FakeStream(seed=7)
+def filled(n: int = 200, *, topic_skew_ms: int = 1_500, same_ms_share: float = 0.2) -> FakeStream:
+    fake = FakeStream(seed=7, topic_skew_ms=topic_skew_ms, same_ms_share=same_ms_share)
     for _ in range(n):
-        stored = fake.make_event()
-        fake.events.append(stored)
-        fake.ts.append(stored.ts_ms)
+        fake.append(fake.make_event())
     return fake
 
 
-def test_ids_look_like_wikimedia_ids() -> None:
-    fake = filled(1)
-    positions = json.loads(fake.events[0].sse_id)
-    assert {p["topic"] for p in positions} == {
-        "eqiad.mediawiki.recentchange",
-        "codfw.mediawiki.recentchange",
-    }
-    assert all("timestamp" in p for p in positions)
-
-
-def test_resume_is_inclusive_like_the_real_service() -> None:
+def test_ids_carry_a_position_per_topic() -> None:
     fake = filled()
-    bookmark = fake.events[20].sse_id
-    assert fake.start_index(bookmark, None) == 20  # the bookmarked event comes back
+    positions = json.loads(fake.events[-1].sse_id)
+    assert [p["topic"] for p in positions] == list(TOPICS)
+    assert all("timestamp" in p for p in positions)
+    # The first event's id can't have a timestamp for a topic nobody has written to yet.
+    first = json.loads(fake.events[0].sse_id)
+    assert any("offset" in p for p in first)
+
+
+def test_topics_advance_independently() -> None:
+    fake = filled(topic_skew_ms=5_000)
+    eqiad, codfw = (json.loads(fake.events[-1].sse_id)[i]["timestamp"] for i in (0, 1))
+    assert eqiad - codfw >= 4_000
+
+
+def test_some_events_share_a_millisecond() -> None:
+    fake = filled(same_ms_share=0.5)
+    per_topic = [(e.topic, e.ts_ms) for e in fake.events]
+    assert len(set(per_topic)) < len(per_topic)
+
+
+def test_resume_is_inclusive_per_topic() -> None:
+    fake = filled()
+    bookmark = fake.events[100]
+    replayed = fake.replay(fake.cursor(bookmark.sse_id, None))
+    seqs = {e.seq for e in replayed}
+    # Nothing after the bookmark is lost...
+    assert all(e.seq in seqs for e in fake.events[101:])
+    # ...the bookmarked event comes back, and so do earlier events that share a topic
+    # position with it: the seam a resume has to deduplicate.
+    assert bookmark.seq in seqs
+    assert min(seqs) <= bookmark.seq
 
 
 def test_no_bookmark_means_live_tail_and_since_rewinds() -> None:
     fake = filled()
-    assert fake.start_index(None, None) == len(fake.events)
-    assert fake.start_index(None, str(fake.events[10].ts_ms)) == 10
+    assert fake.replay(fake.cursor(None, None)) == []
+    since = fake.events[10].ts_ms
+    replayed = fake.replay(fake.cursor(None, str(since)))
+    assert replayed
+    assert all(e.ts_ms >= since for e in replayed)
 
 
 def test_truth_counts_only_events_we_track() -> None:
@@ -44,10 +64,13 @@ def test_truth_counts_only_events_we_track() -> None:
 
 def test_understands_real_ids_with_an_offset_entry() -> None:
     fake = filled()
+    eqiad_events = [e for e in fake.events if e.topic == TOPICS[0]]
     real_shape = json.dumps(
         [
-            {"topic": "eqiad.mediawiki.recentchange", "partition": 0, "timestamp": fake.ts[5]},
-            {"topic": "codfw.mediawiki.recentchange", "partition": 0, "offset": -1},
+            {"topic": TOPICS[0], "partition": 0, "timestamp": eqiad_events[5].ts_ms},
+            {"topic": TOPICS[1], "partition": 0, "offset": -1},
         ]
     )
-    assert fake.start_index(real_shape, None) == 5
+    replayed = fake.replay(fake.cursor(real_shape, None))
+    assert eqiad_events[5] in replayed
+    assert all(e.topic == TOPICS[0] for e in replayed)  # codfw: tail only, nothing buffered

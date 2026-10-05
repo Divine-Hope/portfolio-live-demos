@@ -5,7 +5,9 @@ SHELL := /bin/bash
 export
 
 FAKE_STREAM_URL := http://fake-stream:8090/v2/stream/recentchange
-CH_TEST_ENV := CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_USER=admin CLICKHOUSE_PASSWORD=$(CLICKHOUSE_ADMIN_PASSWORD)
+# Integration tests connect as admin. The password stays in the environment (from .env via
+# `export` above) and is never expanded into a recipe line, so make can't echo it.
+CH_TEST_ENV := CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_USER=admin CLICKHOUSE_PASSWORD="$$CLICKHOUSE_ADMIN_PASSWORD"
 
 .PHONY: help
 help: ## Show this help
@@ -63,6 +65,25 @@ smoke: ## Check the running stack answers
 	@curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print("status:", d["status"], "| last event age:", d["last_event_age_s"], "s | edits 5m:", d.get("langs",{}).get("all",{}).get("edits_5m"))'
 	@curl -fsS -o /dev/null -w "activity: HTTP %{http_code}\n" "localhost:8080/v1/wikipedia/activity?lang=en&window=5m"
 	@curl -fsS localhost:8000/readyz && echo
+
+.PHONY: migrate
+migrate: clickhouse ## Apply pending schema migrations (the stack does this on start)
+	docker compose run --rm migrate
+
+.PHONY: reconcile
+reconcile: clickhouse ## Check the per-minute rollup against raw rows; REPAIR=1 stops ingest and rebuilds
+ifdef REPAIR
+	docker compose stop ingest
+	sleep 30   # repair refuses while rows are still arriving
+	docker compose run --rm migrate python -m livedemos.reconcile --repair; \
+		status=$$?; docker compose start ingest; exit $$status
+else
+	docker compose run --rm migrate python -m livedemos.reconcile
+endif
+
+.PHONY: bench
+bench: clickhouse ## Benchmark every query at 7 days of retained data (separate database)
+	$(CH_TEST_ENV) uv run python -m livedemos.devtools.bench
 
 .PHONY: e2e
 e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWSER=firefox or webkit to switch)

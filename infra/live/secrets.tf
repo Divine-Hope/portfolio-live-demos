@@ -6,6 +6,7 @@ locals {
   ssm_prefix = "/${var.project}"
   secret_names = [
     "clickhouse-admin-password",
+    "clickhouse-migrator-password",
     "clickhouse-ingest-password",
     "clickhouse-api-password",
     "api-origin-secret",

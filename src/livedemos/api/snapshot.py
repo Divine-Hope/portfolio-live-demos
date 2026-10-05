@@ -2,6 +2,13 @@
 
 Every viewer gets the same bytes. One viewer or five hundred, ClickHouse does the
 same work. In production CloudFront caches this for a second and fans it out.
+
+Consistency: every query is bounded above by one watermark, the newest event time read
+first (`to_ms`): raw-row queries by event time, the per-minute chart by using the rollup
+only for completed minutes and raw rows for the current one. The queries run
+concurrently, so a late event (dated before the watermark, inserted after it was read)
+can show up in one query and not another. Inserts are one-second batches, so that's at
+most one batch of late events, and the next snapshot agrees with itself again.
 """
 
 from __future__ import annotations
@@ -13,12 +20,11 @@ import logging
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote
 
 from livedemos.api import metrics, queries
-from livedemos.clickhouse import ClickHouse
+from livedemos.api.contract import Article, LangSummary, LivePayload, MinuteBucket, article_url, iso
+from livedemos.clickhouse import Queryable
 
 log = logging.getLogger(__name__)
 
@@ -34,14 +40,6 @@ class Snapshot:
     last_event_age_s: float | None
 
 
-def iso(ts: float) -> str:
-    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def article_url(lang: str, title: str) -> str:
-    return f"https://{lang}.wikipedia.org/wiki/{quote(title.replace(' ', '_'), safe='')}"
-
-
 def assemble(
     *,
     now: float,
@@ -53,7 +51,7 @@ def assemble(
     lag: Mapping[str, Any] | None,
     gaps: Iterable[Mapping[str, Any]],
     stale_after_s: float,
-) -> dict[str, Any]:
+) -> LivePayload:
     """Pure function: query rows in, widget payload out. Unit-tested on its own."""
     if newest is None:
         return {
@@ -62,12 +60,13 @@ def assemble(
             "computed_at": iso(now),
             "as_of": None,
             "last_event_age_s": None,
+            "stale_after_s": stale_after_s,
             "langs": {},
         }
 
     age = max(0.0, now - newest)
     groups = [*langs, "all"]
-    payload_langs: dict[str, dict[str, Any]] = {}
+    payload_langs: dict[str, LangSummary] = {}
 
     totals = {lang: {"edits": 0, "pages": 0, "bot_edits": 0} for lang in groups}
     for row in window_rows:
@@ -78,12 +77,12 @@ def assemble(
             totals[lang][key] += int(row[key])
             totals["all"][key] += int(row[key])  # pages differ across wikis, so sums hold
 
-    tops: dict[str, list[dict[str, Any]]] = {lang: [] for lang in groups}
+    tops: dict[str, list[Article]] = {lang: [] for lang in groups}
     for row in top_rows:
         lang = str(row["lang"])
         if lang not in tops or lang == "all":
             continue
-        item = {
+        item: Article = {
             "title": str(row["title"]),
             "lang": lang,
             "edits": int(row["edits"]),
@@ -112,6 +111,7 @@ def assemble(
         "computed_at": iso(now),
         "as_of": iso(newest),
         "last_event_age_s": round(age, 3),
+        "stale_after_s": stale_after_s,
         "ingest_lag_ms": {
             "p50": _int_or_none(lag, "p50_ms"),
             "p95": _int_or_none(lag, "p95_ms"),
@@ -127,7 +127,7 @@ def _per_minute(
     langs: Sequence[str],
     rows: Iterable[Mapping[str, Any]],
     gaps: Iterable[Mapping[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, list[MinuteBucket]]:
     """60 one-minute buckets ending with the newest event's minute.
 
     A minute with no rows at all, or inside a recorded gap, is `null`: we don't know,
@@ -142,7 +142,7 @@ def _per_minute(
             counts.setdefault(int(row["minute_s"]), {})[lang] = int(row["edits"])
     gap_ranges = [(int(g["from_ms"]) / 1000, int(g["to_ms"]) / 1000) for g in gaps]
 
-    out: dict[str, list[dict[str, Any]]] = {lang: [] for lang in [*langs, "all"]}
+    out: dict[str, list[MinuteBucket]] = {lang: [] for lang in [*langs, "all"]}
     for minute in buckets:
         known = minute in counts and not any(a < minute + 60 and b > minute for a, b in gap_ranges)
         per_lang = counts.get(minute, {})
@@ -167,13 +167,13 @@ def _int_or_none(row: Mapping[str, Any] | None, key: str) -> int | None:
 class Snapshotter:
     def __init__(
         self,
-        ch: ClickHouse,
+        db: Queryable,
         *,
         langs: Sequence[str],
         interval_s: float,
         stale_after_s: float,
     ):
-        self._ch = ch
+        self._db = db
         self._langs = list(langs)
         self._interval_s = interval_s
         self._stale_after_s = stale_after_s
@@ -185,6 +185,7 @@ class Snapshotter:
             try:
                 self.latest = await self.build()
                 metrics.SNAPSHOTS.labels(result="ok").inc()
+                metrics.LAST_SNAPSHOT_TS.set_to_current_time()
             except Exception:  # keep serving the last good snapshot
                 metrics.SNAPSHOTS.labels(result="error").inc()
                 log.exception("snapshot failed")
@@ -194,7 +195,7 @@ class Snapshotter:
                 await asyncio.wait_for(stop.wait(), timeout=max(0.0, self._interval_s - elapsed))
 
     async def build(self) -> Snapshot:
-        head = await self._ch.query(queries.NEWEST)
+        head = await self._db.query(queries.NEWEST)
         newest_ms = queries.newest_ms(head.rows)
         now = time.time()
         if newest_ms is None:
@@ -206,17 +207,17 @@ class Snapshotter:
 
         to_ms = newest_ms
         window, top, minutes, lag, gaps = await asyncio.gather(
-            self._ch.query(
+            self._db.query(
                 queries.WINDOW_TOTALS,
                 params={"to_ms": to_ms, "window_s": WINDOW_S, "langs": self._langs},
             ),
-            self._ch.query(
+            self._db.query(
                 queries.TOP_ARTICLES,
                 params={"to_ms": to_ms, "window_s": WINDOW_S, "per_lang": TOP_N},
             ),
-            self._ch.query(queries.EDITS_PER_MINUTE, params={"to_ms": to_ms, "minutes": MINUTES}),
-            self._ch.query(queries.INGEST_LAG, params={"to_ms": to_ms}),
-            self._ch.query(queries.RECENT_GAPS, params={"to_ms": to_ms, "minutes": MINUTES}),
+            self._db.query(queries.EDITS_PER_MINUTE, params={"to_ms": to_ms, "minutes": MINUTES}),
+            self._db.query(queries.INGEST_LAG, params={"to_ms": to_ms}),
+            self._db.query(queries.RECENT_GAPS, params={"to_ms": to_ms, "minutes": MINUTES}),
         )
         payload = assemble(
             now=time.time(),
@@ -232,7 +233,7 @@ class Snapshotter:
         return self._pack(payload, payload["last_event_age_s"])
 
     @staticmethod
-    def _pack(payload: dict[str, Any], age: float | None) -> Snapshot:
+    def _pack(payload: LivePayload, age: float | None) -> Snapshot:
         if age is not None:
             metrics.LAST_EVENT_AGE.set(age)
         body = json.dumps(payload, separators=(",", ":")).encode()

@@ -1,7 +1,9 @@
 <!--
   ClickHouse tuned for a 2 GB host (EC2 t4g.small) that also runs ingest, the API and an
   observability agent. Defaults assume a big server; these keep the footprint small and
-  predictable. Measured in the "measured week" before choosing the instance size.
+  predictable. The numbers are sized from the retained-volume benchmark
+  (docs/benchmarks.md), run on a laptop under the same 1.2 GB container limit. They have
+  not yet been measured on the production instance; that is still on the roadmap.
 -->
 <clickhouse>
     <!-- Hard ceiling for the whole server. Queries fail before the kernel OOM-kills us. -->
@@ -33,8 +35,16 @@
         <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
     </merge_tree>
 
-    <!-- System log tables cost memory and disk. Our own metrics cover what we need. -->
-    <query_log remove="1"/>
+    <!-- System log tables cost memory and disk. Keep the two that diagnose a slow query or
+         a merge backlog, for three days; the application users log only slow queries
+         (see users.d). Drop the rest; our own metrics cover them. -->
+    <!-- Merged into the server's default definitions: only the retention is ours. -->
+    <query_log>
+        <ttl>event_date + INTERVAL 3 DAY</ttl>
+    </query_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 3 DAY</ttl>
+    </part_log>
     <query_thread_log remove="1"/>
     <query_views_log remove="1"/>
     <query_metric_log remove="1"/>
@@ -42,7 +52,6 @@
     <text_log remove="1"/>
     <metric_log remove="1"/>
     <asynchronous_metric_log remove="1"/>
-    <part_log remove="1"/>
     <processors_profile_log remove="1"/>
     <opentelemetry_span_log remove="1"/>
     <asynchronous_insert_log remove="1"/>

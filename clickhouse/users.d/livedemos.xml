@@ -1,7 +1,8 @@
 <!--
-  Two application users, least privilege:
-    ingest  writes to the demos database and runs migrations
-    api     read-only, with tight per-query limits (it faces the public internet)
+  Three application users, least privilege:
+    migrator  changes the schema; only the one-shot `migrate` job runs as it
+    ingest    reads and inserts rows; can't change the schema
+    api       read-only, with tight per-query limits (it faces the public internet)
   Passwords come from environment variables, never from this file.
 -->
 <clickhouse>
@@ -13,7 +14,9 @@
             <max_execution_time>30</max_execution_time>
             <!-- A retried, deduplicated insert must not double-count in the rollup either. -->
             <deduplicate_blocks_in_dependent_materialized_views>1</deduplicate_blocks_in_dependent_materialized_views>
-            <log_queries>0</log_queries>
+            <!-- An insert a second: log only the slow ones (system.query_log, kept 3 days). -->
+            <log_queries>1</log_queries>
+            <log_queries_min_query_duration_ms>500</log_queries_min_query_duration_ms>
         </writer>
         <reader>
             <!-- readonly=2: no writes; the client may change settings, but only within
@@ -24,7 +27,8 @@
             <max_execution_time>3</max_execution_time>
             <max_result_rows>10000</max_result_rows>
             <queue_max_wait_ms>1000</queue_max_wait_ms>
-            <log_queries>0</log_queries>
+            <log_queries>1</log_queries>
+            <log_queries_min_query_duration_ms>100</log_queries_min_query_duration_ms>
             <constraints>
                 <readonly><const/></readonly>
                 <max_threads><max>2</max></max_threads>
@@ -36,14 +40,30 @@
     </profiles>
 
     <users>
-        <ingest>
-            <password from_env="CLICKHOUSE_INGEST_PASSWORD"/>
+        <migrator>
+            <password from_env="CLICKHOUSE_MIGRATOR_PASSWORD"/>
             <profile>writer</profile>
             <quota>default</quota>
             <networks><ip>::/0</ip></networks>
             <grants>
                 <query>GRANT CREATE DATABASE ON demos.*</query>
                 <query>GRANT CREATE TABLE, CREATE VIEW, ALTER, SELECT, INSERT ON demos.*</query>
+                <!-- Its run lock (migrate.py), and nothing else it may drop. -->
+                <query>GRANT DROP TABLE ON demos.schema_migrations_lock</query>
+                <!-- Reconcile repairs only while no ingest insert runs: it must see them. -->
+                <query>GRANT SELECT(query_id, current_database, user) ON system.processes</query>
+            </grants>
+        </migrator>
+        <ingest>
+            <password from_env="CLICKHOUSE_INGEST_PASSWORD"/>
+            <profile>writer</profile>
+            <quota>default</quota>
+            <networks><ip>::/0</ip></networks>
+            <grants>
+                <query>GRANT SELECT, INSERT ON demos.*</query>
+                <!-- On start, ingest waits for its database's inserts still running
+                     (see resume.py). Two columns, nothing else in the process list. -->
+                <query>GRANT SELECT(query_id, current_database) ON system.processes</query>
             </grants>
         </ingest>
         <api>

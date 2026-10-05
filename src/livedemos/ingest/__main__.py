@@ -13,7 +13,6 @@ from livedemos.clickhouse import ClickHouse
 from livedemos.config import WIKIMEDIA_STREAM_URL, clickhouse_settings, ingest_settings
 from livedemos.ingest.consumer import Consumer
 from livedemos.logs import setup_logging
-from livedemos.migrate import migrate
 
 log = logging.getLogger("livedemos.ingest")
 
@@ -35,8 +34,9 @@ async def main() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
+    # The schema is the `migrate` job's (it runs first, as the only user allowed to change
+    # it). Ingest only reads and writes rows.
     try:
-        await migrate(ch)
         consumer = asyncio.create_task(Consumer(settings, ch).run(stop))
         stopper = asyncio.create_task(stop.wait())
         done, _ = await asyncio.wait({consumer, stopper}, return_when=asyncio.FIRST_COMPLETED)

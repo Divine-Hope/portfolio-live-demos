@@ -23,10 +23,10 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from livedemos import __version__
 from livedemos.api import metrics
-from livedemos.api.activity import ActivityService, BadRequest, parse_request
+from livedemos.api.activity import ActivityService, BadRequest, Unavailable, parse_request
 from livedemos.api.fallback import FallbackWriter
 from livedemos.api.snapshot import Snapshotter
-from livedemos.clickhouse import ClickHouse, ClickHouseError
+from livedemos.clickhouse import ClickHouse
 from livedemos.config import ApiSettings, ClickHouseSettings, api_settings, clickhouse_settings
 from livedemos.logs import setup_logging
 
@@ -39,10 +39,13 @@ def create_app(
 ) -> FastAPI:
     settings = settings or api_settings()
     ch_settings = ch_settings or clickhouse_settings()
-    langs = [code.strip() for code in settings.langs.split(",") if code.strip()]
+    langs = settings.lang_list
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Here, not at import: importing the app (tests, tools) mustn't replace the
+        # caller's logging setup.
+        setup_logging()
         ch = ClickHouse(ch_settings)
         snapshotter = Snapshotter(
             ch,
@@ -66,12 +69,21 @@ def create_app(
             tasks.append(asyncio.create_task(writer.run(stop)))
         app.state.ch = ch
         app.state.snapshotter = snapshotter
-        app.state.activity = ActivityService(ch, ttl_s=settings.activity_cache_ttl_s)
+        activity = ActivityService(
+            ch,
+            ttl_s=settings.activity_cache_ttl_s,
+            max_concurrency=settings.activity_max_concurrency,
+            max_pending=settings.activity_max_pending,
+            wait_s=settings.activity_wait_s,
+            error_cooldown_s=settings.activity_error_cooldown_s,
+        )
+        app.state.activity = activity
         log.info("api started", extra={"version": __version__, "langs": langs})
         try:
             yield
         finally:
             stop.set()
+            await activity.aclose()
             await asyncio.gather(*tasks, return_exceptions=True)
             await ch.aclose()
 
@@ -145,10 +157,12 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=400)
         try:
             payload = await request.app.state.activity.get(req)
-        except ClickHouseError:
-            log.exception("activity query failed")
+        except Unavailable as exc:
+            log.warning("activity unavailable", extra={"reason": str(exc)}, exc_info=exc.__cause__)
             return JSONResponse(
-                {"error": "query failed"}, status_code=503, headers={"Cache-Control": "no-store"}
+                {"error": str(exc)},
+                status_code=503,
+                headers={"Cache-Control": "no-store", "Retry-After": "5"},
             )
         return JSONResponse(
             payload,
@@ -180,5 +194,4 @@ def create_app(
     return app
 
 
-setup_logging()
 app = create_app()

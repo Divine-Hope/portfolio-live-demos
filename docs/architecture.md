@@ -68,28 +68,33 @@ Consumes `recentchange` from Wikimedia EventStreams over Server-Sent Events.
 - **Resumes** from a bookmark stored on every row ([ADR 0006](adr/0006-bookmark-stored-with-rows.md)). The bookmark only moves after an insert commits. On restart: newest row's SSE id goes back as `Last-Event-ID`.
 - **Dedupes the seam.** Wikimedia resumes by timestamp, so a few events at the cut can arrive twice. The ids of the last 20,000 events ingested are checked before insert. Ingest order, not event time, because the real stream delivers late and interleaved events (checked 2026-10-04).
 - **Retries safely.** Each batch carries an insert deduplication token built from its event ids, so retrying the same batch is a no-op in ClickHouse and in the rollup.
-- **Trusts the table, not its memory, after a database error.** An insert can commit and still report failure. Before reconnecting, ingest re-reads the bookmark from what's actually in the table.
+- **Retries a failed insert unchanged.** An insert can commit, or still be running, and report failure. That batch is sealed and resent with the same token and query id until ClickHouse confirms it, so a late copy is dropped. On start, ingest waits for inserts a killed predecessor left running before reading the bookmark.
+- **Parses defensively.** Every field is type-checked; valid JSON of the wrong shape is counted as malformed and skipped, never raised. Parsing happens in the reader task, so only kept rows wait in the bounded queue.
 - **Ignores events from the future.** Anything dated more than 5 minutes ahead is skipped, so one bad timestamp can't pin every window.
 - **Backpressure by disconnecting.** If ClickHouse is down, ingest closes the stream and waits. Wikimedia keeps the events; nothing piles up in memory.
 - **Idle watchdog.** `recentchange` never goes quiet. 30 seconds of silence means a half-open socket, so it reconnects.
-- **First boot** subscribes with `?since=` one hour back, so charts are full from minute one. A bookmark older than the source's retention records a gap instead of pretending.
+- **First boot** subscribes with `?since=` one hour back, so charts are full from minute one. A bookmark older than the source's retention, at start or before any reconnect, records a gap instead of pretending. So does a start whose raw rows have expired while the rollup remembers earlier runs.
 
-### ClickHouse (`src/livedemos/schema.sql`, `clickhouse/`)
+### ClickHouse (`src/livedemos/migrations/`, `clickhouse/`)
 
-The serving store ([ADR 0003](adr/0003-clickhouse-serving-store.md)). Tuned for a 2 GB host: 900 MiB server memory cap, small caches, fewer background threads, system log tables off.
+The serving store ([ADR 0003](adr/0003-clickhouse-serving-store.md)). Tuned for a 2 GB host: 900 MiB server memory cap, small caches, fewer background threads. Of the system log tables only `query_log` and `part_log` stay, for 3 days, and the application users log only slow queries (over 100 ms for `api`, 500 ms for `ingest`).
 
-Two application users with least privilege: `ingest` (write, migrations) and `api` (read-only, 3 s query limit, 200 MB memory limit). Passwords come from the environment.
+Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Three users with least privilege: `migrator` (schema), `ingest` (select and insert) and `api` (read-only, 3 s query limit, 200 MB memory limit). Passwords come from the environment.
+
+The per-minute rollup is fed by a materialized view in the same INSERT, but not the same transaction. `make reconcile` checks it against raw rows per minute and language and rebuilds what differs.
 
 ### api (`src/livedemos/api/`)
 
 | Route | What it does |
 |---|---|
 | `GET /v1/wikipedia/live.json` | The widget's data. Rebuilt every second from a handful of small queries, served from memory. `Cache-Control: max-age=1`. 503 when there's no snapshot yet or it's more than 10 s old, which also triggers CDN failover. |
-| `GET /v1/wikipedia/activity?lang=&window=` | "Query it". An ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. |
+| `GET /v1/wikipedia/activity?lang=&window=` | "Query it". An ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. Concurrent misses for one key share one query; at most 2 queries run and 4 are admitted at once; nobody waits more than 5 s; a failure is remembered for 5 s. Over any of those: 503 with `Retry-After`. |
 | `GET /healthz`, `/readyz` | Liveness, and readiness (fresh snapshot and ClickHouse reachable). |
 | `GET /metrics` | Prometheus. |
 
-Every window is anchored to the newest event, not the wall clock. If ingest stalls, numbers freeze at the last thing we saw and the widget says "Paused". Nothing decays to a fake zero.
+Every window is anchored to the newest event, not the wall clock, and bounded above by it; the chart takes completed minutes from the rollup and the current minute from raw rows, so it's bounded too. If ingest stalls, numbers freeze at the last thing we saw and the widget says "Paused". Nothing decays to a fake zero. The snapshot's queries run concurrently, so a late event inserted between them can show in one and not another; the next snapshot agrees again.
+
+The payload carries `stale_after_s`, so the API and the widget can't disagree about when data is stale. Its shapes are typed in `api/contract.py`.
 
 ### Widget (`web/embed/wikipedia/`)
 
@@ -132,12 +137,15 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 
 | What fails | What happens | How we know |
 |---|---|---|
-| ingest process crashes or is killed | Restarts; resumes from the last committed bookmark; seam deduped. Proven by `make proof`. | `ingest_connected`, freshness alert |
+| ingest process crashes or is killed | Restarts; waits for its in-flight insert; resumes from the last committed bookmark; seam deduped. Proven by `make proof`, which kills it mid-insert. | `ingest_connected`, `time() - ingest_last_commit_timestamp_seconds` |
 | Wikimedia drops the connection | Reconnect with jittered backoff from the bookmark | `ingest_reconnects_total{reason}` |
 | Half-open socket | Idle watchdog reconnects after 30 s | `reason="idle"` |
 | ClickHouse down | ingest disconnects and waits; after 10 s the api answers 503, so CloudFront serves the S3 copy and the widget shows "Paused" | `reason="clickhouse"`, readiness |
-| Insert reports failure but committed | ingest re-reads the committed bookmark before reconnecting; the replay skips what landed | `test_an_insert_that_commits_but_reports_failure_is_not_written_twice` |
-| Bookmark older than retention | Start from now, record a gap; chart shows it | `ingest_gaps_recorded_total` |
+| Insert reports failure but committed, or commits later | The sealed batch is retried with the same token; ClickHouse keeps one copy | `test_an_insert_that_commits_but_reports_failure_is_not_written_twice`, `test_an_insert_that_lands_after_its_retry_is_not_written_twice` |
+| A malformed event, or one ClickHouse would reject (namespace outside Int32, huge title) | Counted as `malformed`, skipped; ingest carries on | `ingest_events_total{outcome="malformed"}` |
+| Rollup drifts from raw | `make reconcile` finds it per minute and language; `REPAIR=1` stops ingest and rebuilds | reconcile exit code |
+| An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
+| Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
 | api down or warming up | CloudFront serves the last S3 snapshot; widget shows "Paused" (M3/M4) | synthetic check |
 | Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet (M4) | no-data alert |
 
@@ -179,6 +187,6 @@ The full plan, with acceptance criteria, lives in Linear (project "Live demos: r
 - **M2** Local widget: built; edge cache measured on a Mac; browser tests (keyboard, screen reader, axe) in CI
 - **M3** AWS foundation
 - **M4** Observability and hardening
-- **M5** Measured week and sizing decision
+- **M5** Measured week on the real instance, and sizing decision. Query costs at full retained volume are already measured on a laptop ([benchmarks](benchmarks.md))
 - **M6** Launch on the site
 - **M7** Second dataset: Bitcoin

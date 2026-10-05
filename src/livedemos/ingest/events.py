@@ -34,15 +34,26 @@ class Edit:
 
 
 MAX_FUTURE = timedelta(minutes=5)
+# Storage limits. A value ClickHouse would reject must be skipped here: a rejected batch is
+# retried unchanged (it may have committed), so one bad row would stall ingest for good.
+INT32 = range(-(2**31), 2**31)
+MAX_TITLE_BYTES = 1_024  # MediaWiki caps titles at 255 bytes; this is generous
 
 
 def parse(
-    event: Mapping[str, Any],
+    event: object,
     *,
     wikis: frozenset[str],
     types: frozenset[str],
     now: datetime | None = None,
 ) -> Edit | Skip:
+    """Classify one decoded event. Total: any JSON value gets an answer, never an exception.
+
+    The stream is untrusted input. A message that is valid JSON but the wrong shape (null,
+    a list, a number in place of a string) is MALFORMED, so one bad event can't stop ingest.
+    """
+    if not isinstance(event, Mapping):
+        return Skip.MALFORMED
     meta = event.get("meta")
     if not isinstance(meta, Mapping):
         return Skip.MALFORMED
@@ -50,20 +61,37 @@ def parse(
         return Skip.CANARY
 
     wiki = event.get("wiki")
+    if not isinstance(wiki, str):
+        return Skip.MALFORMED
     if wiki not in wikis:
-        return Skip.MALFORMED if not isinstance(wiki, str) else Skip.OTHER_WIKI
+        return Skip.OTHER_WIKI
     change_type = event.get("type")
+    if not isinstance(change_type, str):
+        return Skip.MALFORMED
     if change_type not in types:
         return Skip.OTHER_TYPE
 
-    try:
-        event_id = str(UUID(str(meta["id"])))
-        event_time = datetime.fromisoformat(str(meta["dt"]).replace("Z", "+00:00"))
-        namespace = int(event["namespace"])
-        title = str(event["title"])
-    except (KeyError, TypeError, ValueError):
+    raw_id, raw_dt = meta.get("id"), meta.get("dt")
+    namespace, title, is_bot = event.get("namespace"), event.get("title"), event.get("bot", False)
+    if not (isinstance(raw_id, str) and isinstance(raw_dt, str) and isinstance(title, str)):
         return Skip.MALFORMED
-    if event_time.tzinfo is None or not title:
+    # bool is an int subclass; a namespace of `true` is not namespace 1.
+    if not isinstance(namespace, int) or isinstance(namespace, bool) or namespace not in INT32:
+        return Skip.MALFORMED
+    if not isinstance(is_bot, bool):  # "false" is truthy; don't guess
+        return Skip.MALFORMED
+    try:
+        event_id = str(UUID(raw_id))
+        event_time = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+    except ValueError:
+        return Skip.MALFORMED
+    if (
+        event_time.tzinfo is None
+        or not title
+        or len(title.encode("utf-8", "replace")) > MAX_TITLE_BYTES
+    ):
+        return Skip.MALFORMED
+    if not 1970 < event_time.year < 2106:  # DateTime64 range, as stored
         return Skip.MALFORMED
     if event_time > (now or datetime.now(UTC)) + MAX_FUTURE:
         return Skip.FUTURE
@@ -73,10 +101,10 @@ def parse(
         event_time=event_time,
         wiki=wiki,
         lang=lang_of(wiki),
-        type=str(change_type),
+        type=change_type,
         namespace=namespace,
         title=title,
-        is_bot=bool(event.get("bot", False)),
+        is_bot=is_bot,
     )
 
 

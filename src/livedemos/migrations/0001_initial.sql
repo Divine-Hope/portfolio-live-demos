@@ -1,5 +1,6 @@
--- Schema for the live demos. Every statement is idempotent, so `migrate` can run on
--- every start. `{database}` is replaced with the configured database name.
+-- The original schema. Every statement is IF NOT EXISTS, so applying it to a database
+-- created before migrations were versioned is a no-op that records the baseline.
+-- `{database}` is replaced with the configured database name.
 
 CREATE DATABASE IF NOT EXISTS {database};
 
@@ -17,7 +18,7 @@ CREATE TABLE IF NOT EXISTS {database}.wiki_edits
     title        String,
     is_bot       Bool,
     sse_id       String COMMENT 'resume bookmark, stored with the row (ADR 0006)' CODEC(ZSTD(3)),
-    ingest_seq   UInt64 COMMENT 'monotonic across restarts, orders bookmarks'
+    ingest_seq   UInt64 COMMENT 'orders bookmarks; seeded from the committed max on start'
 )
 ENGINE = MergeTree
 PARTITION BY toDate(event_time)
