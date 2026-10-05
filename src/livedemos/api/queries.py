@@ -46,12 +46,23 @@ ORDER BY edits DESC, title ASC
 LIMIT {per_lang:UInt8} BY lang
 """
 
+# Completed minutes from the rollup; the minute still filling from raw rows, bounded by the
+# watermark like every other query. A rollup row covers its whole minute, so it can't be
+# cut at `to_ms`.
 EDITS_PER_MINUTE = """
 SELECT toUnixTimestamp(minute) AS minute_s, lang, sum(edits) AS edits
 FROM wiki_edits_per_minute
 WHERE minute > toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64}))
                - toIntervalMinute({minutes:UInt16})
+  AND minute < toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64}))
 GROUP BY minute, lang
+UNION ALL
+SELECT toUnixTimestamp(toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64}))) AS minute_s,
+       lang, count() AS edits
+FROM wiki_edits
+WHERE event_time >= toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64}))
+  AND event_time <= fromUnixTimestamp64Milli({to_ms:Int64})
+GROUP BY lang
 """
 
 INGEST_LAG = """
@@ -60,6 +71,7 @@ SELECT
     quantileExact(0.95)(dateDiff('millisecond', event_time, ingested_at)) AS p95_ms
 FROM wiki_edits
 WHERE event_time > fromUnixTimestamp64Milli({to_ms:Int64}) - INTERVAL 1 MINUTE
+  AND event_time <= fromUnixTimestamp64Milli({to_ms:Int64})
 """
 
 RECENT_GAPS = """
@@ -68,4 +80,5 @@ SELECT
     toUnixTimestamp64Milli(gap_to) AS to_ms
 FROM ingest_gaps
 WHERE gap_to > fromUnixTimestamp64Milli({to_ms:Int64}) - toIntervalMinute({minutes:UInt16})
+  AND gap_from <= fromUnixTimestamp64Milli({to_ms:Int64})
 """

@@ -58,6 +58,38 @@ def test_skips_with_a_reason(overrides: dict[str, object], reason: Skip) -> None
     assert parse(event(**overrides), wikis=WIKIS, types=TYPES) is reason
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [None, [], [1, 2], 42, "text", True, {"meta": None}],
+    ids=["null", "empty-list", "list", "number", "string", "bool", "null-meta"],
+)
+def test_any_json_value_gets_an_answer_not_an_exception(raw: object) -> None:
+    assert parse(raw, wikis=WIKIS, types=TYPES) is Skip.MALFORMED
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"wiki": ["enwiki"]},  # unhashable: used to raise TypeError at the set lookup
+        {"type": ["edit"]},
+        {"type": None},
+        {"title": None},  # used to become the title "None"
+        {"title": 7},
+        {"bot": "false"},  # used to become True
+        {"bot": 1},
+        {"namespace": True},  # bool is an int; it isn't namespace 1
+        {"namespace": 0.5},
+        {"namespace": 2**31},  # valid JSON, but ClickHouse's Int32 would reject the batch
+        {"namespace": -(2**31) - 1},
+        {"title": "x" * 2_000},
+        {"meta": {"id": 123, "dt": "2026-10-04T18:00:00Z", "domain": "x"}},
+        {"meta": {"id": "6f7a3b2e-1c4d-4e5f-8a9b-0c1d2e3f4a5b", "dt": 1, "domain": "x"}},
+    ],
+)
+def test_wrong_types_are_malformed(overrides: dict[str, object]) -> None:
+    assert parse(event(**overrides), wikis=WIKIS, types=TYPES) is Skip.MALFORMED
+
+
 def test_rejects_bad_ids_and_naive_times() -> None:
     bad_id = event(meta={"id": "nope", "dt": "2026-10-04T18:00:00Z", "domain": "x"})
     naive = event(

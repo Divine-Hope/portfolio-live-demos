@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
 
@@ -94,3 +96,17 @@ def test_health_and_metrics_stay_open_for_the_host(guarded_client: TestClient) -
 
 def test_no_secret_configured_means_no_check(client: TestClient) -> None:
     assert client.get("/v1/wikipedia/activity", params={"lang": "fr"}).status_code == 400
+
+
+def test_activity_is_503_with_retry_after_when_clickhouse_is_down(client: TestClient) -> None:
+    response = client.get("/v1/wikipedia/activity", params={"lang": "en"})
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["retry-after"] == "5"
+
+
+def test_importing_the_app_leaves_logging_alone() -> None:
+    # In a fresh interpreter: other tests start the app, which does configure logging.
+    code = "import logging; import livedemos.api.app; print(len(logging.getLogger().handlers))"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "0"

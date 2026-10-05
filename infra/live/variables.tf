@@ -62,3 +62,15 @@ variable "github_repo" {
   type        = string
   default     = "Divine-Hope/portfolio-live-demos"
 }
+
+variable "state_bucket" {
+  description = "The Terraform state bucket (backend.hcl), so CI's plan role can take the state lock."
+  type        = string
+  default     = "livedemos-tfstate-444134575833-eu-west-1"
+}
+
+variable "github_repo_ids" {
+  description = "Owner and repo ids, for the immutable OIDC subject: `gh api repos/OWNER/REPO/actions/oidc/customization/sub`."
+  type        = object({ owner = number, repo = number })
+  default     = { owner = 61884028, repo = 1404802454 }
+}

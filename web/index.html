@@ -84,16 +84,39 @@
   const showRequest = () => { document.getElementById("req").textContent = `GET ${requestPath()}`; };
   showRequest();
 
+  // The widget reports what it shows, and when. The host keeps ageing that report on its
+  // own clock, so if the reports stop (an outage, a crashed frame) it drops out of "Live"
+  // by itself instead of freezing on the last good message.
+  let observed = null;
   window.addEventListener("message", (event) => {
-    if (event.source !== frame.contentWindow || event.data?.type !== "livedemos:state") return;
+    if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+    if (event.data?.type !== "livedemos:state") return;
+    observed = { ...event.data, receivedAt: Date.now() };
     lang = event.data.lang;
     showRequest();
-    const age = event.data.last_event_age_s;
-    const live = age != null && age <= 60;
-    document.getElementById("fresh-dot").style.background = live ? "#15803D" : "#D97706";
-    document.getElementById("fresh").textContent =
-      age == null ? "Waiting for the first events." : `${live ? "Live" : "Paused"} · last event ${Math.round(age)}s ago`;
+    renderFreshness();
   });
+
+  function renderFreshness() {
+    const dot = document.getElementById("fresh-dot");
+    const text = document.getElementById("fresh");
+    if (!observed) return;
+    if (observed.status === "unreachable") {
+      dot.style.background = "#B91C1C";
+      text.textContent = "The data API isn't answering. The widget is retrying.";
+      return;
+    }
+    if (observed.last_event_age_s == null) {
+      dot.style.background = "#9DB4D3";
+      text.textContent = "Waiting for the first events.";
+      return;
+    }
+    const age = observed.last_event_age_s + (Date.now() - observed.receivedAt) / 1000;
+    const live = observed.status === "live" && age <= (observed.stale_after_s ?? 60);
+    dot.style.background = live ? "#15803D" : "#D97706";
+    text.textContent = `${live ? "Live" : "Paused"} · last event ${Math.round(age)}s ago`;
+  }
+  setInterval(renderFreshness, 1000);
 
   document.getElementById("run").addEventListener("click", async () => {
     const out = document.getElementById("res");

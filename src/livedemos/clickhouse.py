@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -47,6 +47,31 @@ class QueryResult:
     stats: QueryStats
 
 
+class Queryable(Protocol):
+    """What the read side needs from a database. Lets services take a stub in tests."""
+
+    async def query(
+        self,
+        sql: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        settings: Mapping[str, str] | None = None,
+    ) -> QueryResult: ...
+
+
+class Database(Queryable, Protocol):
+    """What ingest needs: reads, plus idempotent batch inserts."""
+
+    async def insert(
+        self,
+        table: str,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        dedup_token: str | None = None,
+        query_id: str | None = None,
+    ) -> None: ...
+
+
 class ClickHouse:
     def __init__(self, settings: ClickHouseSettings, client: httpx.AsyncClient | None = None):
         self._settings = settings
@@ -73,9 +98,15 @@ class ClickHouse:
             return False
         return response.status_code == 200
 
-    async def execute(self, sql: str, *, settings: Mapping[str, str] | None = None) -> None:
-        """Run a statement that returns no rows (DDL, INSERT ... SELECT)."""
-        await self._post(sql, params=dict(settings or {}))
+    async def execute(
+        self,
+        sql: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        settings: Mapping[str, str] | None = None,
+    ) -> None:
+        """Run a statement that returns no rows (DDL, INSERT ... SELECT, ALTER ... DELETE)."""
+        await self._post(sql, params={**(settings or {}), **_bind(params)})
 
     async def query(
         self,
@@ -89,20 +120,32 @@ class ClickHouse:
         Use ``{name:Type}`` placeholders in ``sql`` and pass values in ``params``;
         ClickHouse binds them server-side, so nothing is string-formatted into SQL.
         """
-        query_params: dict[str, str] = {**_READ_SETTINGS, **(settings or {})}
-        for key, value in (params or {}).items():
-            query_params[f"param_{key}"] = _param_value(value)
+        query_params = {**_READ_SETTINGS, **(settings or {}), **_bind(params)}
         response = await self._post(f"{sql}\nFORMAT JSON", params=query_params)
-        body = response.json()
-        stats = body.get("statistics", {})
-        return QueryResult(
-            rows=body.get("data", []),
-            stats=QueryStats(
+        # HTTP 200 doesn't mean the query succeeded: once rows start streaming, an error
+        # can only be written into the body. Either way it must surface as ClickHouseError.
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ClickHouseError(_error_text(response.text) or "invalid JSON response") from exc
+        if not isinstance(body, dict):
+            raise ClickHouseError("unexpected response shape")
+        if body.get("exception"):
+            raise ClickHouseError(str(body["exception"])[:500])
+        rows, stats = body.get("data", []), body.get("statistics", {})
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ClickHouseError("unexpected response shape: data")
+        if not isinstance(stats, dict):
+            raise ClickHouseError("unexpected response shape: statistics")
+        try:
+            query_stats = QueryStats(
                 elapsed_ms=round(float(stats.get("elapsed", 0.0)) * 1000, 3),
                 rows_read=int(stats.get("rows_read", 0)),
                 bytes_read=int(stats.get("bytes_read", 0)),
-            ),
-        )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ClickHouseError("unexpected response shape: statistics") from exc
+        return QueryResult(rows=rows, stats=query_stats)
 
     async def insert(
         self,
@@ -110,17 +153,25 @@ class ClickHouse:
         rows: Sequence[Mapping[str, Any]],
         *,
         dedup_token: str | None = None,
+        query_id: str | None = None,
     ) -> None:
-        """Insert rows as one block. One block is atomic in a MergeTree table.
+        """Insert rows in one request.
+
+        Atomic only if the rows land in one block of one partition: the caller keeps a
+        batch to one partition, and a batch is far below max_insert_block_size (~1M rows).
 
         ``dedup_token`` makes a retried insert of the same batch a no-op, which keeps
-        a timeout-then-retry from writing the batch twice.
+        a timeout-then-retry from writing the batch twice. ``query_id`` names the insert
+        in system.processes; ClickHouse also refuses a second query with an id that is
+        still running.
         """
         if not rows:
             return
         params = dict(_WRITE_SETTINGS)
         if dedup_token:
             params["insert_deduplication_token"] = dedup_token
+        if query_id:
+            params["query_id"] = query_id
         params["query"] = f"INSERT INTO {self.database}.{table} FORMAT JSONEachRow"
         body = "\n".join(json.dumps(row, separators=(",", ":"), default=str) for row in rows)
         await self._send(params=params, content=body.encode())
@@ -135,10 +186,18 @@ class ClickHouse:
         except httpx.HTTPError as exc:
             raise ClickHouseError(f"ClickHouse unreachable: {exc!r}") from exc
         if response.status_code != 200:
-            text = response.text.strip()
-            start = text.find("Code: ")  # the exception, even after partial output
-            raise ClickHouseError((text[start:] if start >= 0 else text)[:500])
+            raise ClickHouseError(_error_text(response.text) or f"HTTP {response.status_code}")
         return response
+
+
+def _error_text(text: str) -> str:
+    text = text.strip()
+    start = text.find("Code: ")  # the exception, even after partial output
+    return (text[start:] if start >= 0 else text)[:500]
+
+
+def _bind(params: Mapping[str, Any] | None) -> dict[str, str]:
+    return {f"param_{key}": _param_value(value) for key, value in (params or {}).items()}
 
 
 def _param_value(value: Any) -> str:

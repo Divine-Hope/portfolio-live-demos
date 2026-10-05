@@ -6,6 +6,7 @@ the stack job. Web fonts are stubbed so the result doesn't depend on internet ac
 
 from __future__ import annotations
 
+import itertools
 import os
 import re
 from collections.abc import Iterator
@@ -23,6 +24,8 @@ from playwright.sync_api import Browser, Page, Route, expect, sync_playwright
 pytestmark = pytest.mark.e2e
 
 WIDGET_URL = os.environ.get("LIVEDEMOS_E2E_URL", "http://localhost:8080/embed/wikipedia/")
+HOST_URL = WIDGET_URL.removesuffix("embed/wikipedia/")  # the demo host page around it
+LIVE_JSON = re.compile(r"/v1/wikipedia/live\.json")
 BROWSER = os.environ.get("LIVEDEMOS_E2E_BROWSER", "chromium")  # chromium, firefox or webkit
 ARTICLE_URL = re.compile(r"^https://(en|pt|de)\.wikipedia\.org/wiki/\S+$")
 LIVE = re.compile(r"^Live · last event \d+s ago$")
@@ -158,6 +161,23 @@ def test_keyboard_focus_survives_live_updates(widget: Widget, move: str) -> None
     page = widget.page
     if move != "moveBefore":
         page.add_init_script("delete Element.prototype.moveBefore")
+    # Real data, but the top articles rotate and their counts grow on every poll, so the
+    # list is guaranteed to reorder (live Wikipedia can sit still for longer than the test).
+    polls = itertools.count(1)
+
+    def churn(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        n = next(polls)
+        for summary in body.get("langs", {}).values():
+            items = summary["top_articles"]
+            if items:
+                k = n % len(items)
+                rotated = items[k:] + items[:k]
+                summary["top_articles"] = [{**item, "edits": item["edits"] + n} for item in rotated]
+        route.fulfill(response=response, json=body)
+
+    page.route(LIVE_JSON, churn)
     widget.open()
     key = widget.tab_into_list()
     page.evaluate(
@@ -173,10 +193,8 @@ def test_keyboard_focus_survives_live_updates(widget: Widget, move: str) -> None
     page.wait_for_timeout(POLL_S * 3 * 1000)
 
     assert page.evaluate("window.__listChanges") > 0, "the list never updated: nothing tested"
-    assert page.evaluate("document.getElementById('list').contains(document.activeElement)")
-    still_on: str | None = page.evaluate(FOCUSED_KEY)
-    if still_on is not None:  # the article can drop out of the top 5; then focus is on the list
-        assert still_on == key
+    # The same articles, reordered: focus must still be on the one the user was on.
+    assert page.evaluate(FOCUSED_KEY) == key
     assert widget.errors == []
 
 
@@ -236,3 +254,58 @@ def test_no_accessibility_violations(widget: Widget, theme: str) -> None:
     tags = ["wcag2a", "wcag2aa", "wcag21aa", "best-practice"]
     results = Axe().run(page, options={"runOnly": {"type": "tag", "values": tags}})
     assert results.violations_count == 0, results.generate_report()
+
+
+def test_a_hung_request_does_not_stop_polling(widget: Widget) -> None:
+    """The first request never answers. The widget gives up on it and carries on."""
+    page = widget.page
+    calls = 0
+
+    def first_one_hangs(route: Route) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            route.continue_()
+        # else: never fulfilled, like a half-open connection
+
+    page.route(LIVE_JSON, first_one_hangs)
+    page.goto(f"{WIDGET_URL}?lang=all&theme=light")
+
+    expect(page.locator("#status-text")).to_have_text(LIVE, timeout=20_000)
+    assert calls >= 2
+
+
+def _short_staleness(route: Route) -> None:
+    """Real data, but with a 5 s staleness threshold, so an outage shows up quickly."""
+    response = route.fetch()
+    body = response.json()
+    body["stale_after_s"] = 5
+    route.fulfill(response=response, json=body)
+
+
+def test_an_outage_after_live_data_ends_in_paused_on_widget_and_host(widget: Widget) -> None:
+    page = widget.page
+    page.route(LIVE_JSON, _short_staleness)
+    page.goto(HOST_URL)
+    fresh = page.locator("#fresh")
+    expect(fresh).to_have_text(re.compile(r"^Live · "), timeout=30_000)
+
+    page.unroute(LIVE_JSON)
+    page.route(LIVE_JSON, lambda route: route.fulfill(status=503, body="down"))
+
+    frame = page.frame_locator("#widget")
+    expect(frame.locator("#status-text")).to_have_text(re.compile(r"^Paused · "), timeout=15_000)
+    expect(fresh).to_have_text(re.compile(r"^Paused · "), timeout=5_000)
+
+
+def test_the_host_stops_saying_live_when_the_widget_goes_quiet(widget: Widget) -> None:
+    """No more messages at all (the frame is gone): the host ages its last report itself."""
+    page = widget.page
+    page.route(LIVE_JSON, _short_staleness)
+    page.goto(HOST_URL)
+    fresh = page.locator("#fresh")
+    expect(fresh).to_have_text(re.compile(r"^Live · "), timeout=30_000)
+
+    page.locator("#widget").evaluate("frame => { frame.src = 'about:blank'; }")
+
+    expect(fresh).to_have_text(re.compile(r"^Paused · "), timeout=15_000)

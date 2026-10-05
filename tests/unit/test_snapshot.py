@@ -1,6 +1,7 @@
 from typing import Any
 
-from livedemos.api.snapshot import MINUTES, article_url, assemble
+from livedemos.api.contract import article_url
+from livedemos.api.snapshot import MINUTES, assemble
 
 LANGS = ["en", "pt", "de"]
 NEWEST = 1_759_600_000.0  # a fixed instant, minute-aligned + 40 s below
@@ -76,6 +77,12 @@ def test_status_flips_to_stale() -> None:
     stale = build(now=NEWEST + 61)
     assert stale["status"] == "stale"
     assert stale["last_event_age_s"] == 61.0
+
+
+def test_the_stale_threshold_travels_with_the_data() -> None:
+    # The widget reads it from here, so API and widget can't disagree about "Paused".
+    assert build(stale_after_s=30)["stale_after_s"] == 30
+    assert build(newest=None, stale_after_s=30)["stale_after_s"] == 30
 
 
 def test_ingest_lag_is_reported_in_ms() -> None:

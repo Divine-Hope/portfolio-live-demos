@@ -2,7 +2,15 @@
 
 Parameters are allowlisted, results are cached for a few seconds in-process, and
 CloudFront caches them again in front. Visitors can't make ClickHouse do anything
-we haven't already decided it should do.
+we haven't already decided it should do, or make it do it more often than we allow:
+
+- one query per cache key at a time; concurrent misses wait for the same result,
+- at most `max_concurrency` queries run at once, and at most `max_pending` are admitted
+  (running or queued); a miss beyond that gets a 503 straight away,
+- no request waits longer than `wait_s`. Its query keeps running for the others waiting
+  on it, and to fill the cache, so it still counts against `max_pending` until it ends,
+- a failed query is remembered for `error_cooldown_s`, so a struggling ClickHouse
+  isn't retried by every visitor.
 """
 
 from __future__ import annotations
@@ -11,17 +19,20 @@ import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 from livedemos.api import metrics, queries
-from livedemos.api.snapshot import iso
-from livedemos.clickhouse import ClickHouse
+from livedemos.api.contract import ActivityPayload, iso
+from livedemos.clickhouse import ClickHouseError, Queryable
 
 WINDOWS = {"5m": 300, "1h": 3_600, "24h": 86_400}
 
 
 class BadRequest(ValueError):
     pass
+
+
+class Unavailable(RuntimeError):
+    """Can't answer right now (ClickHouse failing, or too busy). Maps to a 503."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,45 +64,92 @@ def parse_request(
 
 
 class ActivityService:
-    def __init__(self, ch: ClickHouse, *, ttl_s: float):
-        self._ch = ch
+    def __init__(
+        self,
+        db: Queryable,
+        *,
+        ttl_s: float,
+        max_concurrency: int = 2,
+        max_pending: int = 4,
+        wait_s: float = 5.0,
+        error_cooldown_s: float = 5.0,
+    ):
+        self._db = db
         self._ttl_s = ttl_s
-        self._cache: dict[str, tuple[float, dict[str, Any]]] = {}
-        self._lock = asyncio.Lock()
+        self._wait_s = wait_s
+        self._error_cooldown_s = error_cooldown_s
+        self._cache: dict[str, tuple[float, ActivityPayload]] = {}
+        self._failed_until: dict[str, float] = {}
+        self._inflight: dict[str, asyncio.Task[ActivityPayload]] = {}
+        self._slots = asyncio.Semaphore(max_concurrency)
+        if max_pending < max_concurrency:
+            raise ValueError("max_pending must be at least max_concurrency")
+        self._max_pending = max_pending
 
-    async def get(self, req: ActivityRequest) -> dict[str, Any]:
-        hit = self._fresh(req.key)
-        if hit is not None:
+    async def get(self, req: ActivityRequest) -> ActivityPayload:
+        now = time.monotonic()
+        entry = self._cache.get(req.key)
+        if entry and entry[0] > now:
             metrics.ACTIVITY_QUERIES.labels(cache="hit").inc()
-            return {**hit, "query": {**hit["query"], "cache": "hit"}}
-        async with self._lock:  # one miss at a time: no thundering herd on ClickHouse
-            hit = self._fresh(req.key)
-            if hit is not None:
-                metrics.ACTIVITY_QUERIES.labels(cache="hit").inc()
-                return {**hit, "query": {**hit["query"], "cache": "hit"}}
-            payload = await self._compute(req)
-            self._cache[req.key] = (time.monotonic() + self._ttl_s, payload)
+            return {**entry[1], "query": {**entry[1]["query"], "cache": "hit"}}
+        if self._failed_until.get(req.key, 0.0) > now:
+            metrics.ACTIVITY_QUERIES.labels(cache="cooldown").inc()
+            raise Unavailable("query failed recently")
+
+        task = self._inflight.get(req.key)
+        if task is None:
+            if len(self._inflight) >= self._max_pending:
+                metrics.ACTIVITY_QUERIES.labels(cache="shed").inc()
+                raise Unavailable("busy")
+            task = asyncio.create_task(self._fill(req))
+            self._inflight[req.key] = task
+            task.add_done_callback(lambda t: self._settle(req.key, t))
             metrics.ACTIVITY_QUERIES.labels(cache="miss").inc()
-            return payload
+        else:
+            metrics.ACTIVITY_QUERIES.labels(cache="coalesced").inc()
+        try:
+            # shield: one impatient visitor timing out mustn't cancel everyone's query.
+            return await asyncio.wait_for(asyncio.shield(task), timeout=self._wait_s)
+        except TimeoutError as exc:
+            metrics.ACTIVITY_QUERIES.labels(cache="timeout").inc()
+            raise Unavailable("busy") from exc
+        except ClickHouseError as exc:
+            raise Unavailable("query failed") from exc
 
-    def _fresh(self, key: str) -> dict[str, Any] | None:
-        entry = self._cache.get(key)
-        if entry and entry[0] > time.monotonic():
-            return entry[1]
-        return None
+    async def aclose(self) -> None:
+        """Cancel queries still running at shutdown."""
+        tasks = list(self._inflight.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _compute(self, req: ActivityRequest) -> dict[str, Any]:
-        head = await self._ch.query(queries.NEWEST)
+    def _settle(self, key: str, task: asyncio.Task[ActivityPayload]) -> None:
+        self._inflight.pop(key, None)
+        if not task.cancelled():
+            task.exception()  # retrieved here, so a result nobody waited for isn't "lost"
+
+    async def _fill(self, req: ActivityRequest) -> ActivityPayload:
+        async with self._slots:
+            try:
+                payload = await self._compute(req)
+            except ClickHouseError:
+                self._failed_until[req.key] = time.monotonic() + self._error_cooldown_s
+                metrics.ACTIVITY_FAILURES.inc()
+                raise
+        self._failed_until.pop(req.key, None)
+        self._cache[req.key] = (time.monotonic() + self._ttl_s, payload)
+        return payload
+
+    async def _compute(self, req: ActivityRequest) -> ActivityPayload:
+        head = await self._db.query(queries.NEWEST)
         newest_ms = queries.newest_ms(head.rows)
         now = time.time()
-        base: dict[str, Any] = {
-            "lang": ",".join(req.langs),
-            "window": req.window,
-            "generated_at": iso(now),
-        }
+        lang, generated_at = ",".join(req.langs), iso(now)
         if newest_ms is None:
             return {
-                **base,
+                "lang": lang,
+                "window": req.window,
+                "generated_at": generated_at,
                 "edits": 0,
                 "pages_edited": 0,
                 "bot_share": None,
@@ -100,7 +158,7 @@ class ActivityService:
                 "query": {"elapsed_ms": 0.0, "rows_read": 0, "bytes_read": 0, "cache": "miss"},
             }
 
-        result = await self._ch.query(
+        result = await self._db.query(
             queries.WINDOW_TOTALS,
             params={
                 "to_ms": newest_ms,
@@ -112,7 +170,9 @@ class ActivityService:
         bots = sum(int(r["bot_edits"]) for r in result.rows)
         newest = newest_ms / 1000
         return {
-            **base,
+            "lang": lang,
+            "window": req.window,
+            "generated_at": generated_at,
             "edits": edits,
             "pages_edited": sum(int(r["pages"]) for r in result.rows),
             "bot_share": round(bots / edits, 4) if edits else None,

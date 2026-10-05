@@ -29,7 +29,8 @@ services:
       CLICKHOUSE_USER: admin
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ADMIN_PASSWORD:?copy .env.example to .env}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
-      # Read by clickhouse/users.d/livedemos.xml for the two application users.
+      # Read by clickhouse/users.d/livedemos.xml for the application users.
+      CLICKHOUSE_MIGRATOR_PASSWORD: ${CLICKHOUSE_MIGRATOR_PASSWORD:?copy .env.example to .env}
       CLICKHOUSE_INGEST_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:?copy .env.example to .env}
       CLICKHOUSE_API_PASSWORD: ${CLICKHOUSE_API_PASSWORD:?copy .env.example to .env}
     volumes:
@@ -54,8 +55,8 @@ services:
     restart: "no"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_USER: ingest
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD}
+      CLICKHOUSE_USER: migrator   # the only user that can change the schema
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_MIGRATOR_PASSWORD}
     depends_on:
       clickhouse:
         condition: service_healthy

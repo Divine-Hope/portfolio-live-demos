@@ -5,7 +5,7 @@ from prometheus_client import Counter, Gauge, Histogram
 EVENTS = Counter(
     "ingest_events_total",
     "Events read from the stream, by outcome.",
-    ["outcome"],  # kept, duplicate, canary, other_wiki, other_type, malformed
+    ["outcome"],  # kept, duplicate, canary, other_wiki, other_type, malformed, future
 )
 ROWS_WRITTEN = Counter("ingest_rows_written_total", "Rows committed to ClickHouse.")
 BATCHES = Counter("ingest_batches_total", "Batches flushed, by result.", ["result"])
@@ -26,6 +26,15 @@ LAST_EVENT_TS = Gauge(
 )
 LAG_SECONDS = Gauge(
     "ingest_lag_seconds", "Commit time minus event time for the newest committed row."
+)
+LAST_COMMIT_TS = Gauge(
+    "ingest_last_commit_timestamp_seconds",
+    "Wall-clock time of the last committed batch. Alert on time() minus this.",
+)
+QUEUE_DEPTH = Gauge("ingest_queue_depth", "Parsed edits waiting for the batcher.")
+INFLIGHT_WAITS = Counter(
+    "ingest_inflight_waits_total",
+    "Each inflight_warn_s a start spent waiting for an earlier insert to finish.",
 )
 GAPS = Counter("ingest_gaps_recorded_total", "Gaps recorded because a resume wasn't possible.")
 HEARTBEAT = Gauge(

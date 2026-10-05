@@ -4,7 +4,12 @@
   "use strict";
 
   const POLL_MS = 2000;
-  const STALE_AFTER_S = 60;
+  // A request that hasn't answered in this long is abandoned, so a hung connection
+  // can't stop the polling loop.
+  const FETCH_TIMEOUT_MS = 5000;
+  // The API owns the freshness threshold and sends it as `stale_after_s`. This is only
+  // the fallback for a payload that predates that field.
+  const DEFAULT_STALE_AFTER_S = 60;
   const LANGS = ["all", "en", "pt", "de"];
   const params = new URLSearchParams(location.search);
   // `?api=` is a development convenience only. On any real host the API comes from the
@@ -57,8 +62,10 @@
 
   // Polling ---------------------------------------------------------------------------
   async function poll() {
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(url, { headers: { Accept: "application/json" }, signal: controller.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
       state.payload = payload;
@@ -71,6 +78,7 @@
       state.failures += 1;
       renderStatus();
     } finally {
+      clearTimeout(deadline);
       // Back off a little while the API is unreachable, then return to normal.
       const delay = state.failures ? Math.min(POLL_MS * 2 ** state.failures, 30000) : POLL_MS;
       setTimeout(poll, delay);
@@ -90,8 +98,14 @@
   }
 
   function articleUrl(lang, title) {
-    // Built here from allowlisted parts, not taken from the payload.
+    // Built here from allowlisted parts, deliberately not taken from the payload's `url`:
+    // a compromised or spoofed API response can't make the widget link anywhere else.
     return `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, "_"))}`;
+  }
+
+  function staleAfter() {
+    const value = state.payload?.stale_after_s;
+    return typeof value === "number" && value > 0 ? value : DEFAULT_STALE_AFTER_S;
   }
 
   function currentAge() {
@@ -101,7 +115,14 @@
 
   // Rendering -------------------------------------------------------------------------
   function render() {
+    // The API decides which languages exist (its `langs`); a pill for one it doesn't
+    // serve is hidden, and a selection it doesn't serve falls back to "all".
+    const served = state.payload?.langs && Object.keys(state.payload.langs).length
+      ? new Set(Object.keys(state.payload.langs))
+      : null;
+    if (served && !served.has(state.lang)) state.lang = "all";
     document.querySelectorAll(".pill").forEach((pill) => {
+      pill.hidden = served !== null && !served.has(pill.dataset.lang);
       pill.setAttribute("aria-pressed", String(pill.dataset.lang === state.lang));
     });
     const data = state.payload?.langs?.[state.lang];
@@ -225,32 +246,42 @@
     $("status-live").textContent = message;
   }
 
+  // One place decides what the status is, so the widget and the host page never disagree.
+  function deriveStatus() {
+    const age = currentAge();
+    if (state.failures > 0 && !state.payload) return { kind: "unreachable", age: null };
+    if (!state.payload) return { kind: "loading", age: null };
+    if (state.payload.status === "empty" || age == null) return { kind: "waiting", age: null };
+    if (age > staleAfter()) return { kind: "paused", age };
+    return { kind: "live", age };
+  }
+
+  let lastKind = null;
   function renderStatus() {
     const dot = $("dot");
     const text = $("status-text");
-    const age = currentAge();
-    if (state.failures > 0 && !state.payload) {
+    const { kind, age } = deriveStatus();
+    if (kind !== lastKind) {
+      lastKind = kind;
+      notifyParent(); // the host hears about every change, not only successful polls
+    }
+    if (kind === "unreachable") {
       dot.className = "dot";
       text.textContent = "Can't reach the data API yet. Retrying.";
       announce("unreachable", text.textContent);
-      return;
-    }
-    if (!state.payload) return;
-    if (state.payload.status === "empty" || age == null) {
+    } else if (kind === "waiting") {
       dot.className = "dot";
       text.textContent = "Waiting for the first events.";
       announce("waiting", text.textContent);
-      return;
-    }
-    if (age > STALE_AFTER_S) {
+    } else if (kind === "paused") {
       dot.className = "dot paused";
       text.textContent = `Paused · last event ${describeAge(age)} ago. Nothing here is invented to fill the gap.`;
       announce("paused", `Paused. Last event ${describeAge(age)} ago.`);
-      return;
+    } else if (kind === "live") {
+      dot.className = "dot live";
+      text.textContent = `Live · last event ${Math.max(0, Math.round(age))}s ago`;
+      announce("live", "Live.");
     }
-    dot.className = "dot live";
-    text.textContent = `Live · last event ${Math.max(0, Math.round(age))}s ago`;
-    announce("live", "Live.");
   }
 
   function describeAge(seconds) {
@@ -260,11 +291,21 @@
   }
 
   // Tell the host page what we're showing, so it can mirror freshness in its own UI.
+  // The host ages each report on its own clock from when it arrives, so if the messages
+  // stop (widget gone, tab throttled) it still won't say "Live" forever.
   function notifyParent() {
     if (window.parent === window) return;
+    const { kind, age } = deriveStatus();
     window.parent.postMessage(
-      { type: "livedemos:state", dataset: "wikipedia", lang: state.lang, status: state.payload?.status ?? null, last_event_age_s: currentAge() },
-      "*",
+      {
+        type: "livedemos:state",
+        dataset: "wikipedia",
+        lang: state.lang,
+        status: kind,
+        last_event_age_s: age,
+        stale_after_s: staleAfter(),
+      },
+      "*", // only freshness and the chosen language; nothing private
     );
   }
 

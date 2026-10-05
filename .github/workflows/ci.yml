@@ -50,6 +50,37 @@ jobs:
             terraform -chdir=$stack validate
           done
 
+  terraform-plan:
+    name: terraform plan (what merging would change)
+    # Pull requests from this repo only: GitHub gives forks no OIDC token anyway.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # read-only role; see infra/live/ci.tf
+    env:
+      TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.11"
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_TF_PLAN_ROLE_ARN }}
+          aws-region: eu-west-1
+      - name: Plan, without the state lock (read-only; main's plan and apply take it)
+        working-directory: infra/live
+        run: |
+          terraform init -input=false -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="region=eu-west-1" >/dev/null
+          terraform plan -input=false -no-color -lock=false -out=tfplan >plan.txt
+          ../../deploy/ci/plan-summary.sh tfplan plan.txt >>"$GITHUB_STEP_SUMMARY"
+          # The same check main runs before applying, so a destroy is caught at review.
+          ../../deploy/ci/plan-digest.sh tfplan >/dev/null
+
   integration:
     name: integration tests and resume proof
     runs-on: ubuntu-latest
@@ -58,6 +89,10 @@ jobs:
       CLICKHOUSE_URL: http://localhost:8123
       CLICKHOUSE_USER: admin
       CLICKHOUSE_PASSWORD: ci-admin
+      # The application users, so the tests can check what they're refused.
+      CLICKHOUSE_MIGRATOR_PASSWORD: ci-migrator
+      CLICKHOUSE_INGEST_PASSWORD: ci-ingest
+      CLICKHOUSE_API_PASSWORD: ci-api
     steps:
       - uses: actions/checkout@v4
       # Started by hand (not as a service) so it runs with our low-memory config and users.
@@ -66,6 +101,7 @@ jobs:
           docker run -d --name clickhouse -p 8123:8123 \
             -e CLICKHOUSE_USER=admin -e CLICKHOUSE_PASSWORD=ci-admin \
             -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
+            -e CLICKHOUSE_MIGRATOR_PASSWORD=ci-migrator \
             -e CLICKHOUSE_INGEST_PASSWORD=ci-ingest -e CLICKHOUSE_API_PASSWORD=ci-api \
             -v "$PWD/clickhouse/config.d/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro" \
             -v "$PWD/clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro" \
@@ -93,7 +129,7 @@ jobs:
           IMAGE_TAG=0000000000000000000000000000000000000000 API_ORIGIN_SECRET=ci \
             docker compose -f compose.yaml -f compose.prod.yaml config --quiet
       - name: Lint the host scripts
-        run: shellcheck deploy/host/*.sh
+        run: shellcheck deploy/host/*.sh deploy/ci/*.sh
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
