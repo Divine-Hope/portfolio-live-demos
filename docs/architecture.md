@@ -1,6 +1,6 @@
 # Architecture
 
-Status: v1, local stack built and tested. AWS deployment is next (see the build order at the end).
+Status: v1, running in AWS since 2026-10-05 (EC2, S3, CloudFront; M3). Observability is next (see the build order at the end).
 
 ## What this is
 
@@ -28,7 +28,16 @@ The API builds one snapshot per second and holds it in memory. Every viewer gets
 | 100 | 2,996 | 99% | 31 (0.5 a second) |
 | 1,000 | 21,628 | 99.9% | 31 (0.5 a second) |
 
-The API's load stayed flat while viewers grew tenfold. It took one fix to get there: nginx's cache lock only covers new entries, so at each expiry every request in flight went to the API (0.6 a second at 100 viewers, 0.9 at 1,000). `proxy_cache_use_stale updating` lets one request refresh while the rest get the copy being replaced. nginx expires entries on whole seconds, so locally a copy lives 1 to 2 s. CloudFront gets measured in M3.
+The API's load stayed flat while viewers grew tenfold. It took one fix to get there: nginx's cache lock only covers new entries, so at each expiry every request in flight went to the API (0.6 a second at 100 viewers, 0.9 at 1,000). `proxy_cache_use_stale updating` lets one request refresh while the rest get the copy being replaced. nginx expires entries on whole seconds, so locally a copy lives 1 to 2 s.
+
+**Measured on CloudFront, 2026-10-05.** Same test against the production distribution, from one laptop (so every request landed on one edge location, Lisbon). Origin requests are the API's own `api_requests_total` for `live.json`, read on the host before and after:
+
+| Viewers | Edge requests | Served from cache | Reached the API |
+|---|---|---|---|
+| 100 | 2,868 | 97.9% | 61 (1.0 a second) |
+| 1,000 | 5,667 | 98.7% | 71 (1.0 a second) |
+
+CloudFront sends one request a second to the API whatever the viewer count: one miss per 1 s TTL. The 1,000 row is capped by the laptop, which managed 5,667 requests rather than the 30,000 that 1,000 real viewers would make; the origin count is the point. Viewers spread over many edge locations add up to one origin request a second per busy edge location, still flat in viewers.
 
 ## Diagram
 
@@ -55,7 +64,7 @@ flowchart TB
     CF -- "poll every 2 s" --> PAGE
 ```
 
-What runs today is the local version: the same containers under Docker Compose, with nginx standing in for CloudFront and serving the widget. The AWS pieces (EC2, S3, CloudFront) and Cloudflare Pages come in milestones M3 and M4; dashed lines are M4.
+What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3). Locally, nginx stands in for CloudFront and serves the widget. Cloudflare Pages and the dashed lines come in M4 and later.
 
 ## Components
 
@@ -146,7 +155,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | Rollup drifts from raw | `make reconcile` finds it per minute and language; `REPAIR=1` stops ingest and rebuilds | reconcile exit code |
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
-| api down or warming up | CloudFront serves the last S3 snapshot; widget shows "Paused" (M3/M4) | synthetic check |
+| api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
 | Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet (M4) | no-data alert |
 
 ## Security
@@ -182,10 +191,10 @@ About $6 a month until the end of 2026. The real bill goes in the README once th
 
 The full plan, with acceptance criteria, lives in Linear (project "Live demos: real-time data platform").
 
-- **M0** Foundations and docs: docs and tooling done; repo and CI next
-- **M1** Local pipeline: built and tested, running in Docker on a Mac; check against the real stream next
+- **M0** Foundations and docs: done
+- **M1** Local pipeline: done; ingesting the real stream in production since 2026-10-05
 - **M2** Local widget: built; edge cache measured on a Mac; browser tests (keyboard, screen reader, axe) in CI
-- **M3** AWS foundation
+- **M3** AWS foundation: done 2026-10-05. Terraform with an approved apply on merge, keyless deploys, CloudFront with S3 failover; acceptance checks recorded in Linear (BPL-57 to BPL-62)
 - **M4** Observability and hardening
 - **M5** Measured week on the real instance, and sizing decision. Query costs at full retained volume are already measured on a laptop ([benchmarks](benchmarks.md))
 - **M6** Launch on the site

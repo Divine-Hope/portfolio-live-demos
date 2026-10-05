@@ -6,7 +6,7 @@ Small data products I run in public. Each one takes a public event stream, store
 
 First up: what's being edited on English, Portuguese and German Wikipedia, right now.
 
-> Status: the local stack is built and tested. AWS deployment is next. The live link goes here once it's up.
+> Status: running in AWS. The API is live at [`/v1/wikipedia/live.json`](https://d1ij81u3v32tos.cloudfront.net/v1/wikipedia/live.json); a [Postman collection](docs/postman/livedemos.postman_collection.json) covers every public endpoint. The page that shows it comes with the site.
 
 ## What's interesting in here
 

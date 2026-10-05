@@ -1,0 +1,377 @@
+{
+  "info": {
+    "name": "Live demos API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Public, read-only API behind the Wikipedia live widget. Production goes through CloudFront; switch `baseUrl` to `http://localhost:8080` for the local stack (`make up`).\n\nEvery response allows any origin. `live.json` is cached for 1 s at the edge, `activity` for 10 s."
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "https://d1ij81u3v32tos.cloudfront.net",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Widget data",
+      "item": [
+        {
+          "name": "Live snapshot",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/wikipedia/live.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "wikipedia",
+                "live.json"
+              ],
+              "query": []
+            },
+            "description": "Everything the widget shows, rebuilt every second: edits, pages and bot share over 5 minutes, top articles, 60 one-minute buckets per language, ingest lag, and `stale_after_s`. 503 when there is no fresh snapshot (CloudFront then serves the last good copy from S3)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test(\"is live (newest event younger than stale_after_s)\", () => pm.expect(d.status).to.eql(\"live\"));",
+                  "pm.test(\"has every language plus all\", () => pm.expect(Object.keys(d.langs)).to.include.members([\"all\", \"en\", \"pt\", \"de\"]));",
+                  "pm.test(\"60 one-minute buckets\", () => pm.expect(d.langs.all.per_minute).to.have.length(60));",
+                  "console.log(`last event ${d.last_event_age_s}s ago, ${d.langs.all.edits_5m} edits in 5 min, lag p50 ${d.ingest_lag_ms.p50} ms`);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Query it",
+      "item": [
+        {
+          "name": "English, last 5 minutes",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/wikipedia/activity?lang=en&window=5m",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "wikipedia",
+                "activity"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "en"
+                },
+                {
+                  "key": "window",
+                  "value": "5m"
+                }
+              ]
+            },
+            "description": "An ad hoc query with allowlisted parameters, returning ClickHouse's own timing."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test(\"reports ClickHouse timing\", () => { pm.expect(d.query).to.have.keys(\"elapsed_ms\", \"rows_read\", \"bytes_read\", \"cache\"); });",
+                  "console.log(`${d.edits} edits, ${d.pages_edited} pages, cache ${d.query.cache}, ${d.query.rows_read} rows read in ${d.query.elapsed_ms} ms`);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "All languages, last hour",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/wikipedia/activity?lang=all&window=1h",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "wikipedia",
+                "activity"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "all"
+                },
+                {
+                  "key": "window",
+                  "value": "1h"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test(\"reports ClickHouse timing\", () => { pm.expect(d.query).to.have.keys(\"elapsed_ms\", \"rows_read\", \"bytes_read\", \"cache\"); });",
+                  "console.log(`${d.edits} edits, ${d.pages_edited} pages, cache ${d.query.cache}, ${d.query.rows_read} rows read in ${d.query.elapsed_ms} ms`);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "English and Portuguese, last 24 hours",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/wikipedia/activity?lang=en,pt&window=24h",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "wikipedia",
+                "activity"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "en,pt"
+                },
+                {
+                  "key": "window",
+                  "value": "24h"
+                }
+              ]
+            },
+            "description": "The most expensive query (about a million rows). Cached 10 s; concurrent requests share one query."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test(\"reports ClickHouse timing\", () => { pm.expect(d.query).to.have.keys(\"elapsed_ms\", \"rows_read\", \"bytes_read\", \"cache\"); });",
+                  "console.log(`${d.edits} edits, ${d.pages_edited} pages, cache ${d.query.cache}, ${d.query.rows_read} rows read in ${d.query.elapsed_ms} ms`);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rejected: unknown language",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/wikipedia/activity?lang=fr&window=5m",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "wikipedia",
+                "activity"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "fr"
+                },
+                {
+                  "key": "window",
+                  "value": "5m"
+                }
+              ]
+            },
+            "description": "`lang` must be `all` or a comma list of en, pt, de."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 for anything not allowlisted\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"says what is allowed\", () => pm.expect(pm.response.json().error).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rejected: unknown window",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/wikipedia/activity?lang=en&window=7d",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "wikipedia",
+                "activity"
+              ],
+              "query": [
+                {
+                  "key": "lang",
+                  "value": "en"
+                },
+                {
+                  "key": "window",
+                  "value": "7d"
+                }
+              ]
+            },
+            "description": "`window` must be 5m, 1h or 24h."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400 for anything not allowlisted\", () => pm.response.to.have.status(400));",
+                  "pm.test(\"says what is allowed\", () => pm.expect(pm.response.json().error).to.be.a(\"string\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Ready",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/readyz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "readyz"
+              ],
+              "query": []
+            },
+            "description": "Ready: a fresh snapshot and ClickHouse reachable. 503 with the problems otherwise."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"ready\", () => pm.expect(pm.response.json().status).to.eql(\"ready\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Alive",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/healthz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "healthz"
+              ],
+              "query": []
+            },
+            "description": "The API process is up, and its version."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
