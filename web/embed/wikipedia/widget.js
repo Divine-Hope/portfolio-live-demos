@@ -252,7 +252,8 @@
     if (state.failures > 0 && !state.payload) return { kind: "unreachable", age: null };
     if (!state.payload) return { kind: "loading", age: null };
     if (state.payload.status === "empty" || age == null) return { kind: "waiting", age: null };
-    if (age > staleAfter()) return { kind: "paused", age };
+    // The S3 fallback copy is only served while the host is down: paused, however recent.
+    if (state.payload.status === "fallback" || age > staleAfter()) return { kind: "paused", age };
     return { kind: "live", age };
   }
 

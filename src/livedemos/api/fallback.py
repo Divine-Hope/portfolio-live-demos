@@ -1,9 +1,10 @@
 """Keep the last good live.json in S3, for CloudFront's fallback origin.
 
-Every minute, if the in-memory snapshot is fresh and the data in it is live, write its
-exact bytes to `v1/wikipedia/live.json` in the snapshot bucket. When the host is down,
-CloudFront serves that object instead. Its own `as_of` tells the widget how old it is,
-so it shows "Paused", never a fake "Live".
+Every minute, if the in-memory snapshot is fresh and the data in it is live, write it to
+`v1/wikipedia/live.json` in the snapshot bucket, with `status` set to "fallback".
+CloudFront only serves that object when the host is down, so a viewer who gets it is
+looking at a stopped stream: the widget shows "Paused" at once, with the real age from
+the copy's own `as_of`, instead of counting down to `stale_after_s` first.
 
 Nothing here may break the API: S3 errors are logged and counted, then retried on the
 next tick.
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from typing import Any, Protocol
@@ -79,7 +81,7 @@ class FallbackWriter:
                 self._client.put_object,
                 Bucket=self._bucket,
                 Key=KEY,
-                Body=snapshot.body,
+                Body=as_fallback(snapshot.body),
                 ContentType="application/json",
                 CacheControl=CACHE_CONTROL,
             )
@@ -87,3 +89,10 @@ class FallbackWriter:
             log.warning("fallback snapshot write failed", exc_info=True)
             return "error"
         return "written"
+
+
+def as_fallback(body: bytes) -> bytes:
+    """The same snapshot, marked as the copy served while the host is down."""
+    payload = json.loads(body)
+    payload["status"] = "fallback"
+    return json.dumps(payload, separators=(",", ":")).encode()

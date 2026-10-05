@@ -64,9 +64,8 @@ variable "github_repo" {
 }
 
 variable "state_bucket" {
-  description = "The Terraform state bucket (backend.hcl), so CI's plan role can take the state lock."
+  description = "The Terraform state bucket (the one in backend.hcl), so CI's plan role can take the state lock. Its name holds the account id, so it lives in terraform.tfvars and the TF_STATE_BUCKET variable, never in git."
   type        = string
-  default     = "livedemos-tfstate-444134575833-eu-west-1"
 }
 
 variable "github_repo_ids" {

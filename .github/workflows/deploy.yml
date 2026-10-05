@@ -94,6 +94,7 @@ jobs:
     env:
       TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
+      TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -128,6 +129,7 @@ jobs:
     env:
       TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
+      TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
       APPROVED: ${{ needs.infra-plan.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
