@@ -415,7 +415,11 @@ async def demos_schema() -> AsyncIterator[None]:
     a local stack's `demos` already exists and is left alone."""
     admin = ClickHouse(clickhouse_test_settings().model_copy(update={"database": "demos"}))
     try:
-        exists = await admin.query("SELECT count() AS n FROM system.databases WHERE name = 'demos'")
+        # Asked from `default`: a connection to `demos` fails if `demos` doesn't exist yet.
+        exists = await admin.query(
+            "SELECT count() AS n FROM system.databases WHERE name = 'demos'",
+            settings={"database": "default"},
+        )
         if not int(exists.rows[0]["n"]):
             await migrate(admin)
         yield

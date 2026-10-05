@@ -29,8 +29,8 @@ data "aws_iam_policy_document" "tf_plan_trust" {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_repo}:pull_request",
-        "repo:${var.github_repo}:environment:infra-plan",
+        "${local.github_sub}:pull_request",
+        "${local.github_sub}:environment:infra-plan",
       ]
     }
   }
@@ -81,7 +81,7 @@ data "aws_iam_policy_document" "tf_apply_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:environment:infra"]
+      values   = ["${local.github_sub}:environment:infra"]
     }
   }
 }

@@ -6,6 +6,14 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
+# GitHub's OIDC subject for this repo, in its immutable form (owner and repo ids as well as
+# names, enabled on the repo). A deleted-and-recreated repo with the same name gets new
+# ids, so it can't inherit these roles.
+locals {
+  github_repo = split("/", var.github_repo)
+  github_sub  = "repo:${local.github_repo[0]}@${var.github_repo_ids.owner}/${local.github_repo[1]}@${var.github_repo_ids.repo}"
+}
+
 # Only this repo's `production` environment can assume the role, so a fork or another
 # branch's workflow can't deploy.
 data "aws_iam_policy_document" "deploy_trust" {
@@ -26,7 +34,7 @@ data "aws_iam_policy_document" "deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:environment:production"]
+      values   = ["${local.github_sub}:environment:production"]
     }
   }
 }
