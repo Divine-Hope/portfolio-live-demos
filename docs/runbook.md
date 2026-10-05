@@ -59,8 +59,9 @@ plans again and refuses if that plan changes anything other than what you approv
    - `infra-plan`: deployment branches `main` only.
    - `infra`: deployment branches `main` only, required reviewer: you. Add the variable
      `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
-3. Repository variables: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`) and
-   `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`).
+3. Repository variables: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`),
+   `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`) and
+   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`).
 
 ## Rotate a secret
 
