@@ -1,2 +1,5 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
 budget_email = "you@example.com"
+
+# The state bucket from infra/bootstrap (same as backend.hcl).
+state_bucket = "livedemos-tfstate-ACCOUNT_ID-eu-west-1"
