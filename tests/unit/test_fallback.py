@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from livedemos.api.fallback import CACHE_CONTROL, KEY, FallbackWriter
+from livedemos.api.fallback import CACHE_CONTROL, KEY, FallbackWriter, as_fallback
 from livedemos.api.snapshot import Snapshot
 
 
@@ -38,20 +38,20 @@ def writer(latest: Snapshot | None, s3: StubS3) -> FallbackWriter:
 
 def snapshot(*, built_ago_s: float = 0.5, last_event_age_s: float | None = 2.0) -> Snapshot:
     return Snapshot(
-        body=b'{"status":"live"}',
+        body=b'{"status":"live","as_of":"2026-10-05T12:00:00.000Z"}',
         built_at=time.monotonic() - built_ago_s,
         last_event_age_s=last_event_age_s,
     )
 
 
-async def test_writes_a_fresh_live_snapshot_as_is() -> None:
+async def test_writes_a_fresh_live_snapshot_marked_as_the_fallback() -> None:
     s3 = StubS3()
     assert await writer(snapshot(), s3).write_once() == "written"
     assert s3.puts == [
         {
             "Bucket": "snapshots",
             "Key": KEY,
-            "Body": b'{"status":"live"}',
+            "Body": b'{"status":"fallback","as_of":"2026-10-05T12:00:00.000Z"}',
             "ContentType": "application/json",
             "CacheControl": CACHE_CONTROL,
         }
@@ -86,3 +86,10 @@ async def test_run_stops_promptly() -> None:
     stop.set()
     await asyncio.wait_for(task, timeout=1)
     assert len(s3.puts) == 1
+
+
+def test_the_fallback_copy_keeps_everything_but_the_status() -> None:
+    body = b'{"dataset":"wikipedia","status":"live","as_of":"x","langs":{"en":{"edits_5m":3}}}'
+    assert as_fallback(body) == (
+        b'{"dataset":"wikipedia","status":"fallback","as_of":"x","langs":{"en":{"edits_5m":3}}}'
+    )

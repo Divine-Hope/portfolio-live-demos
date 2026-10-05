@@ -242,6 +242,26 @@ def test_old_data_says_paused(widget: Widget) -> None:
     assert page.locator("#dot").get_attribute("class") == "dot paused"
 
 
+def test_the_s3_fallback_copy_says_paused_at_once(widget: Widget) -> None:
+    """CloudFront only serves the S3 copy while the host is down: paused, even if recent."""
+    page = widget.page
+
+    def from_the_fallback(route: Route) -> None:
+        response = route.fetch()
+        body = response.json()
+        body["status"] = "fallback"
+        body["as_of"] = (datetime.now(UTC) - timedelta(seconds=20)).isoformat()
+        route.fulfill(response=response, json=body)
+
+    page.route(re.compile(r"/v1/wikipedia/live\.json"), from_the_fallback)
+    page.goto(f"{WIDGET_URL}?lang=all&theme=light")
+
+    expect(page.locator("#status-text")).to_have_text(
+        re.compile(r"^Paused · last event 2\ds ago\."), timeout=10_000
+    )
+    assert page.locator("#dot").get_attribute("class") == "dot paused"
+
+
 @pytest.mark.parametrize(("motion", "animation"), [("reduce", "none"), ("no-preference", "pulse")])
 def test_live_dot_respects_reduced_motion(widget: Widget, motion: str, animation: str) -> None:
     page = widget.page

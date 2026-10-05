@@ -48,7 +48,7 @@ class IngestLag(TypedDict):
 
 class _LiveBase(TypedDict):
     dataset: Literal["wikipedia"]
-    status: Literal["empty", "live", "stale"]
+    status: Literal["empty", "live", "stale", "fallback"]  # "fallback": S3 copy, host down
     computed_at: str
     as_of: str | None
     last_event_age_s: float | None
