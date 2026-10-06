@@ -75,8 +75,9 @@ class FewerRows(RuntimeError):
     """ClickHouse has no more rows for the hour than its file: writing would lose some."""
 
 
-def _ceil_hour(seconds: int) -> int:
-    return -(-seconds // HOUR_S) * HOUR_S
+def _ceil_hour(ms: int) -> int:
+    """The start of the first whole hour at or after `ms` (milliseconds), in seconds."""
+    return -(-ms // (HOUR_S * 1000)) * HOUR_S
 
 
 class Warehouse(Queryable, Protocol):
@@ -143,8 +144,8 @@ class Archiver:
         if not int(span["n"]):
             return Plan(due=[], archived={})
         first = max(
-            _ceil_hour(int(span["oldest_s"])),
-            _ceil_hour(int(now.timestamp()) - self._settings.lookback_s),
+            _ceil_hour(int(span["oldest_ms"])),
+            _ceil_hour(int(now.timestamp() * 1000) - self._settings.lookback_s * 1000),
         )
         # Hours that ended at least settle_s before the newest committed event.
         end = (int(span["newest_s"]) - self._settings.settle_s) // HOUR_S * HOUR_S
@@ -200,10 +201,13 @@ class Archiver:
             },
         )
         in_file = await self._file_count(url)
-        if manual or in_file >= floor:
-            await self._record(hour_s, in_file)
-        else:  # rows vanished mid-write; the previous version is still in the bucket
+        # Always the truth, so a later run compares against what the file really holds.
+        await self._record(hour_s, in_file)
+        if in_file < floor and not manual:
+            # Rows vanished between the count and the write (deleted by hand: the hours
+            # considered are inside retention). The previous version is in the bucket.
             log.error("an hour's file now has fewer rows", extra={"hour_s": hour_s})
+            return HourResult(hour_s, "mismatch", in_file)
         # Counted after the read-back: a row that landed in between is a mismatch now, and
         # the next run writes the hour again because its raw rows outnumber the file's.
         raw = await self._raw_count(bounds)
@@ -300,7 +304,7 @@ class Archiver:
 
 
 _RAW_SPAN = """
-SELECT toUnixTimestamp(min(event_time)) AS oldest_s,
+SELECT toUnixTimestamp64Milli(min(event_time)) AS oldest_ms,
        toUnixTimestamp(max(event_time)) AS newest_s,
        count() AS n
 FROM wiki_edits

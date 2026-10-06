@@ -212,6 +212,25 @@ async def test_a_rebuild_that_cant_read_the_archive_leaves_the_rollup_alone(
     assert await per_minute(edits) == before
 
 
+async def test_a_rebuild_refuses_a_file_that_lost_rows(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """A valid file for the right hour, but only part of it: archive_hours knows better."""
+    await Archiver(settings, edits).run_once(NOW)
+    await edits.execute(
+        f"INSERT INTO FUNCTION {s3_function(settings, 'Parquet')} "
+        "SELECT toString(event_id) AS event_id, event_time, ingested_at, wiki, lang, type, "
+        "namespace, title, is_bot FROM wiki_edits "
+        "WHERE toStartOfHour(event_time) = fromUnixTimestamp({h:Int64}) LIMIT 10",
+        params={"url": hour_url(settings.url, H1), "h": H1},
+        settings={"use_hive_partitioning": "0", "s3_truncate_on_insert": "1"},
+    )
+    before = await per_minute(edits)
+    with pytest.raises(ArchiveIncomplete, match="don't hold the rows"):
+        await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+    assert await per_minute(edits) == before
+
+
 async def test_a_rebuild_waits_its_turn(edits: ClickHouse, settings: ArchiveSettings) -> None:
     """One migration, repair or rebuild at a time: they share the staging table and lock."""
     await Archiver(settings, edits).run_once(NOW)

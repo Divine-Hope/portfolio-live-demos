@@ -165,8 +165,9 @@ by one to two hours.
   The copy becomes the current version. With the archive service stopped, record what it
   holds, or the service compares against the bad rewrite's count: run
   `python -m livedemos.archive --once` as above after deleting that hour's rows from
-  `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'`,
-  as admin); it then finds the file and records it. Start the service again.
+  `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'
+  SETTINGS mutations_sync = 1`, as admin, so it's gone before the run); it then finds the
+  file and records it. Start the service again.
 
 ## What to alert on
 

@@ -9,7 +9,7 @@ host rebuilt from scratch). The live rollup is never half-rebuilt:
    (nothing was ingested) or an hour that never got archived, and the files can't tell
    which. Check `ingest_gaps`, then pass `--allow-missing` to accept them as empty.
 2. Count the files into `wiki_edits_per_minute_staging`, one day per query, and check
-   every hour with a file produced rows.
+   every file produced rows, and as many as `archive_hours` recorded for it.
 3. With ingest stopped, copy each affected month's other minutes into staging, so it
    holds complete replacement months, then swap each month in with REPLACE PARTITION.
    Each swap is atomic: a month is either all old or all new, never empty.
@@ -124,14 +124,29 @@ async def _rebuild(
             settings={**REBUILD_INSERT_SETTINGS, **S3_SETTINGS},
         )
     staged = await ch.query(
-        "SELECT toUnixTimestamp(toStartOfHour(minute)) AS h, count() AS n "
+        "SELECT toUnixTimestamp(toStartOfHour(minute)) AS h, count() AS n, sum(edits) AS e "
         f"FROM wiki_edits_per_minute_staging WHERE {_RANGE} GROUP BY h",
         params=bounds,
     )
     staged_hours = {int(r["h"]): int(r["n"]) for r in staged.rows}
+    staged_edits = {int(r["h"]): int(r["e"]) for r in staged.rows}
     empty = sorted(archived - set(staged_hours))
     if empty:  # a file is only written for an hour with rows
         raise ArchiveIncomplete(f"{len(empty)} file(s) produced no rows, first {_iso(empty[0])}")
+    # What each file held when it was written (or found), where this host knows it.
+    recorded = await ch.query(
+        "SELECT toUnixTimestamp(hour) AS h, argMax(rows, (written_at, rows)) AS n "
+        "FROM archive_hours WHERE hour >= fromUnixTimestamp({from_s:Int64}) "
+        "AND hour < fromUnixTimestamp({to_s:Int64}) GROUP BY h",
+        params=bounds,
+    )
+    short = sorted(
+        int(r["h"]) for r in recorded.rows if staged_edits.get(int(r["h"]), 0) != int(r["n"])
+    )
+    if short:
+        raise ArchiveIncomplete(
+            f"{len(short)} file(s) don't hold the rows recorded for them, first {_iso(short[0])}"
+        )
 
     mark = await require_ingest_stopped(ch, quiet=quiet)
     months = sorted({f"{datetime.fromtimestamp(d, UTC):%Y%m}" for d in range(from_s, to_s, DAY_S)})

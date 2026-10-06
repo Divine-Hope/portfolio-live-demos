@@ -70,10 +70,10 @@ class StubWarehouse:
         recorded: dict[int, int] | None = None,
         files: dict[int, int] | None = None,
         unreadable: set[int] | None = None,
-        oldest: int | None = None,  # the first raw row; the start of the first hour if None
+        oldest_ms: int | None = None,  # the first raw row; the first hour's start if None
     ) -> None:
         self.raw = raw
-        self.oldest = oldest if oldest is not None else min(raw)
+        self.oldest = oldest_ms if oldest_ms is not None else min(raw) * 1000
         self.recorded = dict(recorded or {})
         self.files = dict(files or {})
         self.unreadable = unreadable or set()
@@ -96,7 +96,7 @@ class StubWarehouse:
             row = {"n": self.files[hour_s], "lo": hour_s, "hi": hour_s + 60}
             return QueryResult([row], stats)
         if "min(event_time)" in sql:
-            span = {"oldest_s": self.oldest, "newest_s": max(self.raw) + HOUR_S, "n": 1}
+            span = {"oldest_ms": self.oldest, "newest_s": max(self.raw) + HOUR_S, "n": 1}
             return QueryResult([span], stats)
         if "FROM archive_hours" in sql:
             return QueryResult([{"h": h, "n": n} for h, n in self.recorded.items()], stats)
@@ -161,8 +161,8 @@ async def test_plan_stays_inside_the_lookback() -> None:
 
 
 async def test_plan_skips_an_hour_that_started_before_the_first_raw_row() -> None:
-    """First boot, or a rebuilt host: rows begin 10 minutes into H."""
-    stub = StubWarehouse(raw={H: 4, H + HOUR_S: 4}, oldest=H + 600)
+    """First boot, or a rebuilt host: rows begin half a second into H."""
+    stub = StubWarehouse(raw={H: 4, H + HOUR_S: 4}, oldest_ms=H * 1000 + 500)  # 09:00:00.5
     plan = await Archiver(settings(), stub).plan(datetime.fromtimestamp(H + 3 * HOUR_S, UTC))
     assert plan.due == [H + HOUR_S]
 
