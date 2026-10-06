@@ -196,6 +196,16 @@ async def test_rebuild_refuses_hours_without_a_file_even_after_the_rollup_is_gon
         await rebuild(edits, settings, **WHOLE_DAY, quiet=timedelta(0))
 
 
+async def test_allow_missing_leaves_hours_without_a_file_as_they_are(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """A partial first hour, say: no file, but the rollup has its minutes. Keep them."""
+    await Archiver(settings, edits).archive_hour(H0)  # H1 and H2 have no file
+    before = await per_minute(edits)
+    await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+    assert await per_minute(edits) == before
+
+
 async def test_a_rebuild_that_cant_read_the_archive_leaves_the_rollup_alone(
     edits: ClickHouse, settings: ArchiveSettings
 ) -> None:
