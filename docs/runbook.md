@@ -145,7 +145,8 @@ by one to two hours.
 
   It refuses while rows are arriving, and if any hour in the range has no file. An hour
   with no file is either an outage or an hour that never got archived. Check
-  `ingest_gaps`; if they're outages, add `--allow-missing` to rebuild them as empty.
+  `ingest_gaps`. If they're outages, or a partial first hour, add `--allow-missing`: it
+  rebuilds the hours that have files and leaves the others as they are.
   The live rollup only changes once every file has been read into a staging table, and
   then a whole month at a time, atomically. It holds the maintenance lock; if it reports
   the lock held and nothing is running, clear it with `python -m livedemos.migrate --unlock`

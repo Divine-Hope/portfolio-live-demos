@@ -7,7 +7,8 @@ host rebuilt from scratch). The live rollup is never half-rebuilt:
 
 1. Every hour in the range must have a file. An hour without one is either a real outage
    (nothing was ingested) or an hour that never got archived, and the files can't tell
-   which. Check `ingest_gaps`, then pass `--allow-missing` to accept them as empty.
+   which. Check `ingest_gaps`, then pass `--allow-missing` to rebuild the hours that have
+   files and leave the others as they are in the live rollup.
 2. Count the files into `wiki_edits_per_minute_staging`, one day per query, and check
    every file produced rows, and as many as `archive_hours` recorded for it.
 3. With ingest stopped, copy each affected month's other minutes into staging, so it
@@ -98,7 +99,7 @@ async def _rebuild(
     if missing and not allow_missing:
         raise ArchiveIncomplete(
             f"{len(missing)} hour(s) have no file, first {_iso(missing[0])}. If they're "
-            "outages (see ingest_gaps), rerun with --allow-missing to rebuild them as empty."
+            "outages (see ingest_gaps), rerun with --allow-missing to rebuild the rest."
         )
 
     await ch.execute("TRUNCATE TABLE wiki_edits_per_minute_staging")
@@ -150,15 +151,18 @@ async def _rebuild(
 
     mark = await require_ingest_stopped(ch, quiet=quiet)
     months = sorted({f"{datetime.fromtimestamp(d, UTC):%Y%m}" for d in range(from_s, to_s, DAY_S)})
-    # The rest of each month as it is now, so the swap changes only the range.
+    # Everything else in those months as it is now, including hours with no file, so the
+    # swap changes only the hours rebuilt from the archive.
     await ch.execute(
         f"INSERT INTO wiki_edits_per_minute_staging ({_COLUMNS}) "
         f"SELECT {_COLUMNS} FROM wiki_edits_per_minute "
         "WHERE toYYYYMM(minute) IN {months:Array(UInt32)} "
-        "AND NOT (minute >= fromUnixTimestamp({from_s:Int64}) "
-        "AND minute < fromUnixTimestamp({to_s:Int64}))",
-        params={"months": [int(m) for m in months], **bounds},
+        "AND toUnixTimestamp(toStartOfHour(minute)) NOT IN {rebuilt:Array(UInt32)}",
+        params={"months": [int(m) for m in months], "rebuilt": sorted(archived)},
         settings=REBUILD_INSERT_SETTINGS,
+    )
+    expected = await ch.query(
+        f"SELECT count() AS n FROM wiki_edits_per_minute_staging WHERE {_RANGE}", params=bounds
     )
     for month in months:  # a computed integer, not input
         await ch.execute(
@@ -171,10 +175,10 @@ async def _rebuild(
         f"SELECT count() AS n FROM wiki_edits_per_minute WHERE {_RANGE}", params=bounds
     )
     rows = int(result.rows[0]["n"])
-    if rows != sum(staged_hours.values()):
+    if rows != int(expected.rows[0]["n"]):
         raise ArchiveIncomplete(
             f"the rollup has {rows} rows in the range after the swap, "
-            f"staging had {sum(staged_hours.values())}"
+            f"staging had {expected.rows[0]['n']}"
         )
     return rows
 
@@ -200,7 +204,9 @@ def main() -> int:
     parser.add_argument("--from", dest="first", type=date.fromisoformat, required=True)
     parser.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
     parser.add_argument(
-        "--allow-missing", action="store_true", help="rebuild hours with no file as empty"
+        "--allow-missing",
+        action="store_true",
+        help="rebuild the hours that have files; leave the others as they are",
     )
     return asyncio.run(_main(parser.parse_args()))
 
