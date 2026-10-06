@@ -9,7 +9,8 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/livedemos
 ExecStart=/opt/livedemos/deploy/host/start.sh
-TimeoutStartSec=600
+# A rebuilt host restores from the archive before the stack starts (archive/restore.py).
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target

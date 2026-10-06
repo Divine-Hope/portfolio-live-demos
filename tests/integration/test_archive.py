@@ -24,8 +24,10 @@ from livedemos.archive.job import (
     s3_function,
 )
 from livedemos.archive.rebuild import ArchiveIncomplete, rebuild
+from livedemos.archive.restore import Restored, restore
 from livedemos.clickhouse import ClickHouse, ClickHouseError
 from livedemos.config import ArchiveSettings
+from livedemos.ingest.resume import RESTORE_REPLAY_MARGIN, load_resume_state
 from livedemos.migrate import MigrationError, exclusive
 
 from .conftest import clickhouse_test_settings, rows, user_settings
@@ -185,6 +187,85 @@ async def test_rebuild_drill_restores_the_rollup_from_the_archive(
     assert await per_minute(edits) == before
     assert rollup_rows == len(before)
     assert await scalar(edits, OUTSIDE_DAY) == other_days  # the rest of the month kept
+
+
+async def test_a_host_rebuilt_from_scratch_comes_back_from_the_archive(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    # Three days before the test day too: old enough to go straight into the rollup.
+    old = DAY - timedelta(days=3) + timedelta(hours=3)
+    await edits.insert("wiki_edits", rows(1, start=old - timedelta(hours=2), first_seq=5000))
+    await edits.insert("wiki_edits", rows(20, start=old + timedelta(seconds=10), first_seq=6000))
+    written = {r.hour_s for r in await Archiver(settings, edits).run_once(NOW)}
+    old_h = int(old.timestamp())
+    assert {old_h, H0, H1, H2} <= written
+
+    def archived_minutes(
+        table_rows: list[tuple[str, str, int, int]],
+    ) -> list[tuple[str, str, int, int]]:
+        return [r for r in table_rows if _hour_of(r[0]) in written]
+
+    before = archived_minutes(await all_minutes(edits))
+    raw_from = int(DAY.timestamp()) - 24 * HOUR_S  # the day before the newest archived day
+    older = {h for h in written if h < raw_from}
+    ids = await raw_ids(edits, written)
+    old_hour = await raw_ids(edits, older)
+    assert await restore(edits, settings, now=NOW) == Restored()  # raw rows: nothing lost
+
+    for table in ("wiki_edits", "wiki_edits_per_minute", "archive_hours"):
+        await edits.execute(f"TRUNCATE TABLE {table}")
+    done = await restore(edits, settings, now=NOW)
+
+    assert set(done.rollup_hours) == older  # older days: straight into the rollup
+    assert set(done.raw_hours) == written - older  # the last two days: back in raw
+    assert await raw_ids(edits, written) == ids - old_hour
+    assert archived_minutes(await all_minutes(edits)) == before  # via the view, once
+    assert await restore(edits, settings, now=NOW) == Restored()  # done already
+
+    # Ingest replays from before the newest archived event and skips what came back.
+    state = await load_resume_state(
+        edits, now=NOW, retention=timedelta(days=7), lookback=timedelta(hours=1), seam_ids=1000
+    )
+    assert state.bookmark is None
+    assert state.since == at(H2 + HOUR_S) - RESTORE_REPLAY_MARGIN
+    assert set(state.seam_ids) == await raw_ids(edits, written)
+    assert state.floor is not None
+    assert state.floor >= at(raw_from)  # older events: the rollup has them
+    assert (state.floor.hour, state.floor.minute) == (0, 0)  # restored raw rows: whole days
+
+    # A restore that stopped part way (the INSERT isn't atomic) is done again.
+    await edits.execute(
+        "ALTER TABLE wiki_edits DELETE WHERE toUnixTimestamp(toStartOfHour(event_time)) = "
+        "{h:UInt32} SETTINGS mutations_sync = 1",
+        params={"h": H1},
+    )
+    again = await restore(edits, settings, now=NOW)
+    assert set(again.raw_hours) == written - older
+    assert await raw_ids(edits, written) == ids - old_hour
+    assert archived_minutes(await all_minutes(edits)) == before
+    assert state.gap is None
+
+
+def _hour_of(minute: str) -> int:
+    t = datetime.fromisoformat(minute).replace(tzinfo=UTC)
+    return int(t.timestamp()) // HOUR_S * HOUR_S
+
+
+async def all_minutes(ch: ClickHouse) -> list[tuple[str, str, int, int]]:
+    result = await ch.query(
+        "SELECT toString(minute) AS m, lang, sum(edits) AS e, sum(bot_edits) AS b "
+        "FROM wiki_edits_per_minute GROUP BY minute, lang ORDER BY minute, lang"
+    )
+    return [(r["m"], r["lang"], int(r["e"]), int(r["b"])) for r in result.rows]
+
+
+async def raw_ids(ch: ClickHouse, hours: set[int]) -> set[str]:
+    result = await ch.query(
+        "SELECT toString(event_id) AS id FROM wiki_edits "
+        "WHERE toUnixTimestamp(toStartOfHour(event_time)) IN {hours:Array(UInt32)}",
+        params={"hours": sorted(hours)},
+    )
+    return {str(r["id"]) for r in result.rows}
 
 
 async def test_rebuild_refuses_hours_without_a_file_even_after_the_rollup_is_gone(

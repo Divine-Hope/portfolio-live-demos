@@ -250,8 +250,25 @@ async def test_raw_rows_expired_but_rollup_remembers_is_a_gap_not_a_first_boot(
     assert state.bookmark is None
     assert state.gap is not None
     gap_from, gap_to = state.gap
-    assert now - timedelta(days=9) < gap_from < now - timedelta(days=8)
-    assert gap_to == now - timedelta(hours=1)
+    assert now - timedelta(days=9, minutes=1) < gap_from < now - timedelta(days=8)
+    assert gap_from.second == 0  # the whole last minute: ingest may have stopped inside it
+    assert gap_to == state.since == now - timedelta(days=7)  # replays all the source has
+
+
+async def test_a_rollup_minute_without_raw_rows_is_marked_as_a_gap(ch: ClickHouse) -> None:
+    """Raw rows gone, the rollup's last minute recent: it may be partial, so it's a gap."""
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    last = now - timedelta(minutes=50)
+    await ch.insert(
+        "wiki_edits_per_minute",
+        [{"minute": last.isoformat(), "lang": "en", "edits": 3, "bot_edits": 0}],
+    )
+    state = await load_resume_state(
+        ch, now=now, retention=timedelta(days=7), lookback=timedelta(hours=1), seam_ids=100
+    )
+    # Not an hour back: that would count the rollup's minutes twice.
+    assert state.since == state.floor == last + timedelta(minutes=1)
+    assert state.gap == (last, last + timedelta(minutes=1))
 
 
 async def test_start_waits_for_an_insert_still_running_on_the_server(ch: ClickHouse) -> None:

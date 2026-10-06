@@ -20,6 +20,9 @@ main() {
   git checkout --quiet --force "$sha"
   ch_after=$(git rev-parse HEAD:clickhouse)
 
+  # Host upkeep (security updates). A failure here mustn't block shipping the app.
+  deploy/host/harden.sh || echo "WARNING: host upkeep failed; see the output above" >&2
+
   deploy/host/render-env.sh
   if ! grep -q "^IMAGE_TAG=$sha\$" .env; then
     echo "SSM image-tag doesn't match $sha; refusing to deploy" >&2

@@ -11,7 +11,7 @@ variable "project" {
 }
 
 variable "budget_email" {
-  description = "Where budget alerts go. Set it in terraform.tfvars (gitignored)."
+  description = "Where budget and host alarm emails go. Set it in terraform.tfvars (gitignored)."
   type        = string
 }
 

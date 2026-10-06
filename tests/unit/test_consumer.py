@@ -91,6 +91,14 @@ async def test_a_poison_message_doesnt_stop_the_reader() -> None:
     assert queue.empty()
 
 
+def test_events_the_restored_rollup_already_counts_are_dropped() -> None:
+    consumer = Consumer(SETTINGS, StubDatabase())
+    consumer._floor = datetime.now(UTC) + timedelta(seconds=30)
+    assert consumer._parse(valid_event(1), "sse-1") is None
+    consumer._floor = datetime.now(UTC) - timedelta(seconds=30)
+    assert consumer._parse(valid_event(2), "sse-2") is not None
+
+
 async def test_a_failed_insert_is_retried_unchanged_before_the_bookmark_moves() -> None:
     db = StubDatabase(fail_inserts=2)
     consumer = Consumer(SETTINGS, db)

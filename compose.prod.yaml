@@ -24,16 +24,23 @@ services:
     environment:
       ARCHIVE_URL: ${ARCHIVE_URL:?ARCHIVE_URL is not set}
       ARCHIVE_NOSIGN: "false"
+    depends_on: !override
+      clickhouse:
+        condition: service_healthy
     logging: *logging
 
   ingest:
     <<: *image
     ports: !reset []
-    oom_score_adj: -500       # if memory runs out, ingest is the last to go
+    # If the host runs out of memory, the kernel kills the archive first, then the API
+    # (CloudFront serves the fallback), and ingest last: the stream is the one thing
+    # that can't wait. Each container also has its own cap (mem_limit in compose.yaml).
+    oom_score_adj: -500
     logging: *logging
 
   api:
     <<: *image
+    oom_score_adj: 300
     environment:
       API_ORIGIN_SECRET: ${API_ORIGIN_SECRET:?API_ORIGIN_SECRET is not set}
       API_SNAPSHOT_BUCKET: ${API_SNAPSHOT_BUCKET:-}   # fallback copy for CloudFront
@@ -44,6 +51,7 @@ services:
 
   archive:
     <<: *image
+    oom_score_adj: 500        # catches up on its next run
     environment:
       ARCHIVE_URL: ${ARCHIVE_URL:?ARCHIVE_URL is not set}   # the archive bucket, signed
       ARCHIVE_NOSIGN: "false"

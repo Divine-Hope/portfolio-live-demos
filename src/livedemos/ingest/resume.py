@@ -25,6 +25,7 @@ SEAM_WINDOW_NS = 3_600 * 10**9
 class ResumeState:
     bookmark: str | None  # SSE id to send as Last-Event-ID, or None to start fresh
     since: datetime | None  # used only when there's no usable bookmark
+    floor: datetime | None  # drop events older than this: the rollup already counts them
     seam_ids: list[str]  # ids of the most recently ingested events, newest first
     last_seq: int  # highest ingest_seq committed; new ids must be above it
     newest_event_time: datetime | None  # newest event committed, to age the bookmark
@@ -66,30 +67,93 @@ async def load_resume_state(
     newest = await _newest_event_time(ch)
 
     if newest is None:
-        since = now - lookback
-        # Raw rows are gone, but the 90-day rollup remembers that we ran before: that's
-        # lost history (a long outage outlived raw retention), not a first boot.
         prior = await _newest_rollup_minute(ch)
-        gap = (prior + timedelta(minutes=1), since) if prior and prior < since else None
-        log.info(
-            "no raw rows, starting fresh",
-            extra={"since": since.isoformat(), "previous_run": prior and prior.isoformat()},
-        )
-        return ResumeState(None, since, [], 0, None, gap)
+        if prior is None:  # a first boot
+            since = now - lookback
+            log.info("no raw rows, starting fresh", extra={"since": since.isoformat()})
+            return ResumeState(None, since, None, [], 0, None, None)
+        # Raw rows are gone but the rollup remembers earlier runs: an outage outlived raw
+        # retention. Replay what the source still has, after the rollup's last minute, and
+        # mark everything from that minute on as a gap: it may be partial.
+        floor = prior + timedelta(minutes=1)
+        since = min(max(floor, now - retention), now)
+        log.info("no raw rows, resuming after the rollup", extra={"since": since.isoformat()})
+        return ResumeState(None, since, floor, [], 0, None, (prior, since))
 
     last_seq = await _max_ingest_seq(ch)
     if newest < now - retention:
         # The source no longer has these events. Start fresh and say what's missing.
         since = now - lookback
         log.warning("bookmark older than retention", extra={"newest": newest.isoformat()})
-        return ResumeState(None, since, [], last_seq, None, (newest, since))
+        return ResumeState(None, since, None, [], last_seq, None, (_minute(newest), since))
 
     bookmark, recent_ids = await _ingest_tail(ch, last_seq, limit=seam_ids)
+    if not bookmark:
+        return await _after_restore(
+            ch, now=now, retention=retention, recent_ids=recent_ids, last_seq=last_seq
+        )
     log.info(
         "resuming from bookmark",
         extra={"newest": newest.isoformat(), "seam_ids": len(recent_ids), "last_seq": last_seq},
     )
-    return ResumeState(bookmark, None, recent_ids, last_seq, newest, None)
+    return ResumeState(bookmark, None, None, recent_ids, last_seq, newest, None)
+
+
+# How far before the archive's newest event a rebuilt host replays from. Covers events the
+# old host ingested after its last archive run (it runs every 5 minutes, and an hour is
+# written 5 minutes after it ends) and ingest lag. Replayed events it restored are skipped
+# by id, so a wide margin costs only replay time.
+RESTORE_REPLAY_MARGIN = timedelta(minutes=30)
+
+
+async def _after_restore(
+    ch: Database, *, now: datetime, retention: timedelta, recent_ids: list[str], last_seq: int
+) -> ResumeState:
+    """The newest raw rows came back from the archive (archive/restore.py), no bookmark.
+
+    Replay from before the newest restored event and skip the restored ids: everything
+    the old host ingested after these were archived is still in the source. `recent_ids`
+    holds the restored rows ingested last, which is where the replay overlaps them.
+    Events older than the restored raw rows belong to minutes rebuilt into the rollup, so
+    they're dropped rather than counted twice.
+    """
+    span = (await ch.query(_RESTORED_SPAN)).rows[0]
+    oldest = _from_ms(int(span["oldest_ms"]))
+    hour_end = _ceil_hour(_from_ms(int(span["newest_ms"])))
+    last_ingested = _from_ms(int(span["ingested_ms"]))
+    since = min(last_ingested, hour_end) - RESTORE_REPLAY_MARGIN
+    gap = None
+    if since < now - retention:
+        gap, since = (hour_end, now - retention), now - retention
+    log.info(
+        "resuming after a restore from the archive",
+        extra={"since": since.isoformat(), "seam_ids": len(recent_ids)},
+    )
+    # Restored raw rows are whole days (archive/restore.py); before them, the rollup.
+    floor = oldest.replace(hour=0, minute=0, second=0, microsecond=0)
+    return ResumeState(None, since, floor, recent_ids, last_seq, None, gap)
+
+
+_RESTORED_SPAN = """
+SELECT toUnixTimestamp64Milli(min(event_time)) AS oldest_ms,
+       toUnixTimestamp64Milli(max(event_time)) AS newest_ms,
+       toUnixTimestamp64Milli(max(ingested_at)) AS ingested_ms
+FROM wiki_edits
+"""
+
+
+def _from_ms(ms: int) -> datetime:
+    return datetime.fromtimestamp(ms / 1000, UTC)
+
+
+def _minute(t: datetime) -> datetime:
+    """The start of t's minute: a minute ingest stopped in may be partial."""
+    return t.replace(second=0, microsecond=0)
+
+
+def _ceil_hour(t: datetime) -> datetime:
+    start = t.replace(minute=0, second=0, microsecond=0)
+    return start if start == t else start + timedelta(hours=1)
 
 
 async def _newest_event_time(ch: Database) -> datetime | None:

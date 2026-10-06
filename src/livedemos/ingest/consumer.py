@@ -69,6 +69,7 @@ class Consumer:
         self._bookmark: str | None = None
         self._bookmark_time: datetime | None = None  # newest event committed
         self._since: datetime | None = None
+        self._floor: datetime | None = None  # see ResumeState.floor
         self._pending: PendingInsert | None = None  # sent, outcome unknown
         self._backoff = Backoff(settings.backoff_initial_s, settings.backoff_max_s)
 
@@ -117,6 +118,7 @@ class Consumer:
         self._bookmark = state.bookmark
         self._bookmark_time = state.newest_event_time
         self._since = state.since
+        self._floor = state.floor
         self._seq = SequenceGenerator(start=state.last_seq)
         self._recent.extend(reversed(state.seam_ids))  # oldest first, so pruning drops the oldest
         if state.gap is not None:
@@ -139,7 +141,9 @@ class Consumer:
             return
         since = now - timedelta(seconds=self._s.first_boot_lookback_s)
         log.warning("bookmark aged out", extra={"newest": self._bookmark_time.isoformat()})
-        await record_gap(self._ch, gap_from=self._bookmark_time, gap_to=since, reason="retention")
+        # From the start of its minute: ingest stopped part way through it.
+        gap_from = self._bookmark_time.replace(second=0, microsecond=0)
+        await record_gap(self._ch, gap_from=gap_from, gap_to=since, reason="retention")
         metrics.GAPS.inc()
         self._bookmark, self._bookmark_time, self._since = None, None, since
 
@@ -232,6 +236,12 @@ class Consumer:
             return None
         if not sse_id:
             metrics.EVENTS.labels(outcome=Skip.MALFORMED).inc()
+            return None
+        # Older than what this run may add: minutes the rollup already counts (rebuilt
+        # from the archive, or kept from before raw rows expired). Counting it would double
+        # it. Only set when ingest started without a bookmark.
+        if self._floor and result.event_time < self._floor:
+            metrics.EVENTS.labels(outcome="before_floor").inc()
             return None
         return result
 

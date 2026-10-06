@@ -62,9 +62,15 @@ services:
       # For rebuilding the rollup from the archive (make rebuild-rollups).
       ARCHIVE_URL: http://s3:8333/archive/wikipedia/edits
       ARCHIVE_NOSIGN: "true"
+      # A host that lost its raw rows refills the rollup from the archive before ingest
+      # starts (archive/restore.py). `ARCHIVE_RESTORE=false make up` skips that.
+      ARCHIVE_RESTORE: ${ARCHIVE_RESTORE:-true}
+      CLICKHOUSE_TIMEOUT_S: "300"   # a restore reads a day of Parquet per query
     depends_on:
       clickhouse:
         condition: service_healthy
+      s3-bucket:
+        condition: service_completed_successfully
 
   ingest:
     <<: *app

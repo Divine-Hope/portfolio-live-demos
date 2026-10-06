@@ -89,10 +89,38 @@ CloudFront pointed at it, and `livedemos.service` brings the stack back.
 terraform -chdir=infra/live apply -replace=aws_instance.host
 ```
 
-User data installs Docker, checks out the repo and starts the stack with the image tag
-in SSM. ClickHouse starts empty; ingest backfills the last hour from Wikimedia. History stays in
-the archive bucket. To get the per-minute chart back for older days, rebuild the rollup
-from the archive (below).
+No data steps. User data installs Docker, checks out the repo, applies host upkeep
+(`deploy/host/harden.sh`) and starts the stack with the image tag in SSM. ClickHouse starts
+empty, so before ingest starts `migrate` restores from the archive bucket: the newest two
+archived days back into the raw table, older days (up to 90) into the per-minute rollup.
+Ingest then replays the outage from Wikimedia (it keeps 7 days), starting 30 minutes before
+the newest archived event and skipping the events it restored. The archive service finds
+its predecessor's files and leaves them. The chart is continuous, or shows a labelled gap
+if the outage outlived the stream's retention.
+
+If `migrate` fails on the restore (the archive can't be read), nothing else starts. Fix
+the cause, or start without it and rebuild later:
+`ARCHIVE_RESTORE=false docker compose -f compose.yaml -f compose.prod.yaml up -d`.
+
+## Security updates and reboots
+
+`deploy/host/harden.sh` runs at first boot and on every deploy. Security updates install
+daily (`dnf-automatic.timer`, from the latest Amazon Linux release). On Sundays at 04:00
+UTC the host reboots if an update needs it (`reboot-if-needed.timer`); the live page shows
+the fallback for a minute or two. To see what happened: `journalctl -u dnf-automatic -u
+reboot-if-needed --since -7d`. To skip this week's reboot: `systemctl stop
+reboot-if-needed.timer` (the next deploy turns it back on).
+
+## Host alarms (CloudWatch)
+
+Both email the budget address (confirm the subscription once) and act on their own:
+
+| Alarm | Means | Does | First checks |
+|---|---|---|---|
+| `livedemos-host-system-check` | AWS's side failed (hardware, host network) for 2 minutes | Recovers the instance onto new hardware; same ID, IPs and disk | AWS Health dashboard; once it's back, `/readyz` |
+| `livedemos-host-instance-check` | The OS stopped answering for 3 minutes (kernel panic, memory exhausted) | Reboots it | After the reboot: `journalctl -b -1 -p err`, `dmesg \| grep -i oom`, `docker stats` |
+
+If either keeps firing, rebuild the host from scratch (above).
 
 ## Schema changes
 
