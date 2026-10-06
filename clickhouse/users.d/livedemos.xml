@@ -23,6 +23,13 @@
             <log_queries>1</log_queries>
             <log_queries_min_query_duration_ms>500</log_queries_min_query_duration_ms>
         </writer>
+        <!-- The writer's limits, plus permission to sign s3() with the server's own
+             credentials (the instance role), which 26.8 refuses to user queries by default.
+             Only archiver and migrator get it, and their S3 grants reach only the archive. -->
+        <archive>
+            <profile>writer</profile>
+            <s3_allow_server_credentials_in_user_queries>1</s3_allow_server_credentials_in_user_queries>
+        </archive>
         <reader>
             <!-- readonly=2: no writes; the client may change settings, but only within
                  the constraints below, so it can tighten limits and never raise them. -->
@@ -47,7 +54,7 @@
     <users>
         <migrator>
             <password from_env="CLICKHOUSE_MIGRATOR_PASSWORD"/>
-            <profile>writer</profile>
+            <profile>archive</profile>
             <quota>default</quota>
             <networks><ip>::/0</ip></networks>
             <grants>
@@ -86,7 +93,7 @@
         </api>
         <archiver>
             <password from_env="CLICKHOUSE_ARCHIVER_PASSWORD"/>
-            <profile>writer</profile>
+            <profile>archive</profile>
             <quota>default</quota>
             <networks><ip>::/0</ip></networks>
             <grants>
