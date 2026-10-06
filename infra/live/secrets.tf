@@ -9,6 +9,7 @@ locals {
     "clickhouse-migrator-password",
     "clickhouse-ingest-password",
     "clickhouse-api-password",
+    "clickhouse-archiver-password",
     "api-origin-secret",
   ]
 }
@@ -32,6 +33,7 @@ resource "aws_ssm_parameter" "settings" {
   for_each = {
     "ingest-contact"      = var.repo_url
     "api-snapshot-bucket" = module.snapshots.id
+    "archive-url"         = "https://${module.archive.id}.s3.${var.region}.amazonaws.com/wikipedia/edits"
     "aws-default-region"  = var.region
   }
   name  = "${local.ssm_prefix}/${each.key}"

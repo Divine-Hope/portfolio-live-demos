@@ -33,9 +33,11 @@ services:
       CLICKHOUSE_MIGRATOR_PASSWORD: ${CLICKHOUSE_MIGRATOR_PASSWORD:?copy .env.example to .env}
       CLICKHOUSE_INGEST_PASSWORD: ${CLICKHOUSE_INGEST_PASSWORD:?copy .env.example to .env}
       CLICKHOUSE_API_PASSWORD: ${CLICKHOUSE_API_PASSWORD:?copy .env.example to .env}
+      CLICKHOUSE_ARCHIVER_PASSWORD: ${CLICKHOUSE_ARCHIVER_PASSWORD:?copy .env.example to .env}
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./clickhouse/config.d/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+      - ./clickhouse/config.d/s3.xml:/etc/clickhouse-server/config.d/s3.xml:ro
       - ./clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro
     ports:
       - "127.0.0.1:8123:8123"
@@ -57,6 +59,9 @@ services:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: migrator   # the only user that can change the schema
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_MIGRATOR_PASSWORD}
+      # For rebuilding the rollup from the archive (make rebuild-rollups).
+      ARCHIVE_URL: http://s3:8333/archive/wikipedia/edits
+      ARCHIVE_NOSIGN: "true"
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -96,6 +101,56 @@ services:
       timeout: 5s
       retries: 3
 
+  # Every finished hour of raw edits, as one Parquet file in S3 (ADR 0004).
+  archive:
+    <<: *app
+    command: ["python", "-m", "livedemos.archive"]
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: archiver
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_ARCHIVER_PASSWORD}
+      ARCHIVE_URL: http://s3:8333/archive/wikipedia/edits
+      ARCHIVE_NOSIGN: "true"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      s3-bucket:
+        condition: service_completed_successfully
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9102/metrics', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Local stand-in for S3. MinIO no longer publishes images; SeaweedFS speaks the same API.
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    restart: unless-stopped
+    command: ["server", "-s3", "-dir=/data"]
+    volumes:
+      - s3-data:/data
+    ports:
+      - "127.0.0.1:8333:8333"
+    mem_limit: 256m
+
+  s3-bucket:
+    image: chrislusf/seaweedfs:4.48
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        for _ in $$(seq 1 60); do
+          echo "s3.bucket.list" | weed shell -master=s3:9333 2>/dev/null | grep -q " archive" && exit 0
+          echo "s3.bucket.create -name archive" | weed shell -master=s3:9333 >/dev/null 2>&1
+          sleep 1
+        done
+        exit 1
+    depends_on:
+      - s3
+
   web:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -125,3 +180,4 @@ services:
 
 volumes:
   clickhouse-data:
+  s3-data:

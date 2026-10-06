@@ -29,8 +29,14 @@ from datetime import UTC, datetime, timedelta
 
 from livedemos.clickhouse import ClickHouse
 from livedemos.config import clickhouse_settings
-from livedemos.ingest.resume import INSERT_QUERY_ID_PREFIX
 from livedemos.logs import setup_logging
+from livedemos.maintenance import (
+    REBUILD_INSERT_SETTINGS,
+    IngestRunning,
+    require_ingest_still_stopped,
+    require_ingest_stopped,
+)
+from livedemos.migrate import MigrationError, exclusive
 
 log = logging.getLogger(__name__)
 
@@ -58,21 +64,6 @@ ORDER BY minute, lang
 _RAW_RANGE = """
 SELECT toUnixTimestamp(min(event_time)) AS oldest_s, count() AS n FROM wiki_edits
 """
-
-
-_LAST_INGEST = "SELECT toUnixTimestamp64Milli(max(ingested_at)) AS ms, count() AS n FROM wiki_edits"
-# max(ingest_seq) comes from the seq_max projection: a cheap sentinel for "a batch landed".
-_LAST_SEQ = "SELECT max(ingest_seq) AS seq FROM wiki_edits"
-# An insert whose raw rows are already visible can still be writing the rollup (the view
-# runs after the raw part commits), so "no new rows" isn't enough: no insert may be running.
-_RUNNING_INSERTS = (
-    "SELECT count() AS n FROM system.processes "
-    "WHERE startsWith(query_id, {prefix:String}) AND current_database = currentDatabase()"
-)
-
-
-class IngestRunning(RuntimeError):
-    """Rows arrived within the quiet period: repairing now could double-count."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,56 +95,41 @@ async def find_mismatches(ch: ClickHouse, *, now: datetime, settle: timedelta) -
     ]
 
 
-async def _last_ingest_ms(ch: ClickHouse) -> int:
-    row = (await ch.query(_LAST_INGEST)).rows[0]
-    return int(row["ms"]) if int(row["n"]) else 0
-
-
-async def _ingest_state(ch: ClickHouse) -> tuple[int, int]:
-    """(inserts running now, highest committed ingest_seq)."""
-    running = await ch.query(_RUNNING_INSERTS, params={"prefix": INSERT_QUERY_ID_PREFIX})
-    seq = await ch.query(_LAST_SEQ)
-    return int(running.rows[0]["n"]), int(seq.rows[0]["seq"]) if seq.rows else 0
-
-
 async def repair(
     ch: ClickHouse, mismatches: list[Mismatch], *, quiet: timedelta = timedelta(seconds=30)
 ) -> int:
     """Rebuild every listed minute (all languages) from raw rows. Returns minutes rebuilt.
 
-    Refuses unless no ingest insert is running and nothing was ingested for `quiet`, and
-    fails if an insert ran or landed while it worked (rerun it, with ingest stopped).
+    Refuses unless ingest is stopped (`require_ingest_stopped`), and fails if an insert
+    ran or landed while it worked (rerun it, with ingest stopped). Holds the maintenance
+    lock. The delete and the insert aren't one transaction, but the source is raw rows
+    still in ClickHouse: if it's interrupted between them, rerunning restores the minutes.
     """
     minutes = sorted({int(m.minute.timestamp()) for m in mismatches})
     if not minutes:
         return 0
-    running, seq_before = await _ingest_state(ch)
-    if running:
-        raise IngestRunning("an ingest insert is still running; stop ingest before repairing")
-    before = await _last_ingest_ms(ch)
-    if before and datetime.now(UTC).timestamp() * 1000 - before < quiet.total_seconds() * 1000:
-        raise IngestRunning("rows are still arriving; stop ingest before repairing")
-    # Integers, not timestamps: ClickHouse binds them as an Array(UInt32) and compares
-    # toUnixTimestamp(minute), so no time zone or format can creep in.
-    await ch.execute(
-        "ALTER TABLE wiki_edits_per_minute DELETE "
-        "WHERE toUnixTimestamp(minute) IN {minutes:Array(UInt32)} "
-        "SETTINGS mutations_sync = 1",
-        params={"minutes": minutes},
-    )
-    await ch.execute(
-        """
-        INSERT INTO wiki_edits_per_minute (minute, lang, edits, bot_edits)
-        SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
-        FROM wiki_edits
-        WHERE toUnixTimestamp(toStartOfMinute(event_time)) IN {minutes:Array(UInt32)}
-        GROUP BY minute, lang
-        """,
-        params={"minutes": minutes},
-    )
-    running, seq_after = await _ingest_state(ch)
-    if running or seq_after != seq_before or await _last_ingest_ms(ch) != before:
-        raise IngestRunning("ingest wrote during the repair; stop it and run reconcile again")
+    async with exclusive(ch):
+        mark = await require_ingest_stopped(ch, quiet=quiet)
+        # Integers, not timestamps: ClickHouse binds them as an Array(UInt32) and compares
+        # toUnixTimestamp(minute), so no time zone or format can creep in.
+        await ch.execute(
+            "ALTER TABLE wiki_edits_per_minute DELETE "
+            "WHERE toUnixTimestamp(minute) IN {minutes:Array(UInt32)} "
+            "SETTINGS mutations_sync = 1",
+            params={"minutes": minutes},
+        )
+        await ch.execute(
+            """
+            INSERT INTO wiki_edits_per_minute (minute, lang, edits, bot_edits)
+            SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
+            FROM wiki_edits
+            WHERE toUnixTimestamp(toStartOfMinute(event_time)) IN {minutes:Array(UInt32)}
+            GROUP BY minute, lang
+            """,
+            params={"minutes": minutes},
+            settings=REBUILD_INSERT_SETTINGS,
+        )
+        await require_ingest_still_stopped(ch, mark)
     return len(minutes)
 
 
@@ -180,7 +156,7 @@ async def _main(args: argparse.Namespace) -> int:
             return 1
         try:
             rebuilt = await repair(ch, found)
-        except IngestRunning as exc:
+        except (IngestRunning, MigrationError) as exc:
             log.error("not repaired", extra={"reason": str(exc)})
             return 1
         left = await find_mismatches(ch, now=datetime.now(UTC), settle=settle)

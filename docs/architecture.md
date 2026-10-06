@@ -49,6 +49,7 @@ flowchart TB
         ING["ingest<br/>Python, asyncio"]
         CH[("ClickHouse<br/>raw 7 days + per-minute rollups")]
         API["api<br/>FastAPI, 1 s snapshot"]
+        ARC["archive<br/>hourly job"]
     end
 
     S3[("S3<br/>Parquet archive, fallback snapshot")]
@@ -59,12 +60,14 @@ flowchart TB
     ING -- "1 s batches, bookmark in the rows" --> CH
     CH --> API
     API -- "live.json, activity" --> CF
-    API -. "hourly Parquet, 60 s snapshot" .-> S3
+    API -- "60 s snapshot" --> S3
+    ARC -- "INSERT INTO FUNCTION s3()" --> CH
+    CH -- "hourly Parquet" --> S3
     S3 -. "secondary origin" .-> CF
     CF -- "poll every 2 s" --> PAGE
 ```
 
-What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3). Locally, nginx stands in for CloudFront and serves the widget. Cloudflare Pages and the dashed lines come in M4 and later.
+What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
 
 ## Components
 
@@ -88,7 +91,7 @@ Consumes `recentchange` from Wikimedia EventStreams over Server-Sent Events.
 
 The serving store ([ADR 0003](adr/0003-clickhouse-serving-store.md)). Tuned for a 2 GB host: 900 MiB server memory cap, small caches, fewer background threads. Of the system log tables only `query_log` and `part_log` stay, for 3 days, and the application users log only slow queries (over 100 ms for `api`, 500 ms for `ingest`).
 
-Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Three users with least privilege: `migrator` (schema), `ingest` (select and insert) and `api` (read-only, 3 s query limit, 200 MB memory limit). Passwords come from the environment.
+Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Four users with least privilege: `migrator` (schema, and rollup repairs and rebuilds), `ingest` (select and insert), `api` (read-only, 3 s query limit, 200 MB memory limit) and `archiver` (reads raw rows, writes the archive). Passwords come from the environment.
 
 The per-minute rollup is fed by a materialized view in the same INSERT, but not the same transaction. `make reconcile` checks it against raw rows per minute and language and rebuilds what differs.
 
@@ -119,6 +122,16 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 
 `web/index.html` is a local stand-in for the live demos page: the widget inside the "Northwind" demo host app, plus a working "Query it" panel.
 
+### archive (`src/livedemos/archive/`)
+
+Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`, in the archive bucket ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)). ClickHouse writes it with one `INSERT INTO FUNCTION s3(...)`, signed by the instance role, so the archive service holds no AWS credentials. It's its own small service, not part of the API: archiving needs a ClickHouse user that can write to S3, and the API is public and read-only.
+
+- **Every hour complete, for as long as raw rows exist.** Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every whole hour of the last 7 days that ingest has passed by 5 minutes, it compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay. "Whole" means it started after the first raw row and after the retention cutoff: raw rows expire part by part, so the hour the cutoff falls in may be missing its start.
+- **Never fewer rows.** A scheduled write goes ahead only if ClickHouse has more rows than the file, checked again just before writing. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, checks each one's events fall inside its hour, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
+- **Recoverable.** The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone. The host can put, get and list under `wikipedia/`, never delete.
+- **Rebuilds the rollup without risking it.** `python -m livedemos.archive.rebuild` needs a file for every hour in the range (or `--allow-missing` for real outages). It counts the files into a staging table a day at a time and checks every file produced as many rows as `archive_hours` recorded for it. Then, with ingest stopped, it adds the rest of each affected month and swaps whole months into the live rollup with `REPLACE PARTITION`: each month is all old or all new, never empty. It holds the same lock as migrations and reconcile repairs, so none of them overlap.
+- **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at archive-bucket URLs (`livedemos-archive-*`); any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it. The pattern can't name the exact bucket: its name holds the account id, which stays out of this public repo. The S3 permissions themselves belong to the instance role, which every container on the host can reach; isolating that per container would cost more than this project's budget.
+
 ## Data model
 
 | Table | Engine | Grain | Retention |
@@ -127,7 +140,7 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 | `wiki_edits_per_minute` | SummingMergeTree, fed by a materialized view | minute x language | 90 days |
 | `ingest_gaps` | MergeTree | one row per known gap | 90 days |
 
-History beyond 7 days will live as Parquet on S3 ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)).
+History beyond 7 days lives as hourly Parquet on S3 (see archive above). Files move to cheaper storage classes after 30 and 180 days.
 
 ## Freshness budget
 
@@ -156,7 +169,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
 | api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
-| Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet (M4) | no-data alert |
+| Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet | no-data alert |
 
 ## Security
 
@@ -172,6 +185,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | Edge cache and fan-out | nginx `web` container, 1 s micro-cache, cache lock | CloudFront, 1 s cache, request collapsing |
 | Static site and widget | nginx serves `web/` | Cloudflare Pages |
 | Fallback when api is down | none | CloudFront origin group, S3 `live.json` |
+| Parquet archive | SeaweedFS `s3` container, unsigned | S3 archive bucket, instance role |
 | Source | real stream, or `fake-stream` offline | real stream |
 | Secrets | `.env` | SSM Parameter Store |
 | Logs and metrics | `docker compose logs`, `/metrics` | Grafana Alloy to Grafana Cloud |
@@ -183,9 +197,22 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | EC2 t4g.small | free trial until 31 Dec 2026, then about $12 |
 | EBS 25 GB gp3 + public IPv4 | about $6 |
 | CloudFront, Grafana Cloud, Cloudflare Pages | free tiers |
-| S3 | cents |
+| S3: fallback snapshot and Parquet archive | about 1 cent at first, about 6 cents after a year (below) |
 
 About $6 a month until the end of 2026. The real bill goes in the README once there is one.
+
+**The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Parquet with zstd took 36 bytes an edit in the local archive (fake stream, so real titles may cost more; checked against production files after the first deploy). That's about 0.34 MB an hour, 8 MB a day, 0.25 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
+
+| Item | Price | A month, once a year is stored |
+|---|---|---|
+| Newest month, S3 Standard | $0.023 per GB-month | 0.25 GB, $0.006 |
+| Months 2 to 6, Standard-IA | $0.0125 per GB-month | 1.2 GB, $0.015 |
+| Months 7 to 12, Glacier Instant Retrieval | $0.004 per GB-month | 1.5 GB, $0.006 |
+| Writes (730) and listings (about 730) | $0.005 per 1,000 | $0.007 |
+| Read-backs (about 2,200) | $0.004 per 10,000 | under $0.001 |
+| Lifecycle moves to IA and to Glacier IR | $0.01 and $0.02 per 1,000 | $0.022 |
+
+About 6 cents a month after a year, growing about half a cent a month after that. Rewrites for late events add a PUT and keep the replaced version for 30 days; even if every hour were rewritten once, that's under 2 cents more a month. Files are 340 KB, above Standard-IA's 128 KB minimum, and they stay in each class longer than its minimum (30 and 90 days). Rebuilding a month of rollups reads 0.25 GB: under a cent in retrieval fees.
 
 ## Build order
 

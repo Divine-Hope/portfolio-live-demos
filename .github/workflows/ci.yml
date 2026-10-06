@@ -94,17 +94,32 @@ jobs:
       CLICKHOUSE_MIGRATOR_PASSWORD: ci-migrator
       CLICKHOUSE_INGEST_PASSWORD: ci-ingest
       CLICKHOUSE_API_PASSWORD: ci-api
+      CLICKHOUSE_ARCHIVER_PASSWORD: ci-archiver
+      ARCHIVE_TEST_URL: http://s3:8333/archive/test   # as ClickHouse sees it
     steps:
       - uses: actions/checkout@v4
+      # The archive tests need an S3 API that ClickHouse can reach by name, as in compose.
+      - name: Start SeaweedFS (local S3) with an archive bucket
+        run: |
+          docker network create ci
+          docker run -d --name s3 --network ci -p 127.0.0.1:8333:8333 chrislusf/seaweedfs:4.48 server -s3 -dir=/data
+          for _ in $(seq 1 60); do
+            docker exec s3 sh -c 'echo s3.bucket.list | weed shell -master=localhost:9333' 2>/dev/null |
+              grep -q " archive" && break
+            docker exec s3 sh -c 'echo "s3.bucket.create -name archive" | weed shell -master=localhost:9333' >/dev/null 2>&1 || true
+            sleep 1
+          done
       # Started by hand (not as a service) so it runs with our low-memory config and users.
       - name: Start ClickHouse with the project's config
         run: |
-          docker run -d --name clickhouse -p 8123:8123 \
+          docker run -d --name clickhouse --network ci -p 8123:8123 \
             -e CLICKHOUSE_USER=admin -e CLICKHOUSE_PASSWORD=ci-admin \
             -e CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1 \
             -e CLICKHOUSE_MIGRATOR_PASSWORD=ci-migrator \
             -e CLICKHOUSE_INGEST_PASSWORD=ci-ingest -e CLICKHOUSE_API_PASSWORD=ci-api \
+            -e CLICKHOUSE_ARCHIVER_PASSWORD=ci-archiver \
             -v "$PWD/clickhouse/config.d/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro" \
+            -v "$PWD/clickhouse/config.d/s3.xml:/etc/clickhouse-server/config.d/s3.xml:ro" \
             -v "$PWD/clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro" \
             clickhouse/clickhouse-server:26.8
           for _ in $(seq 1 60); do curl -fsS localhost:8123/ping && break; sleep 1; done
@@ -128,6 +143,7 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           IMAGE_TAG=0000000000000000000000000000000000000000 API_ORIGIN_SECRET=ci \
+            ARCHIVE_URL=https://example.invalid/wikipedia/edits \
             docker compose -f compose.yaml -f compose.prod.yaml config --quiet
       - name: Lint the host scripts
         run: shellcheck deploy/host/*.sh deploy/ci/*.sh

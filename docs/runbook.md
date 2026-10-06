@@ -90,7 +90,9 @@ terraform -chdir=infra/live apply -replace=aws_instance.host
 ```
 
 User data installs Docker, checks out the repo and starts the stack with the image tag
-in SSM. ClickHouse starts empty; ingest backfills the last hour from Wikimedia.
+in SSM. ClickHouse starts empty; ingest backfills the last hour from Wikimedia. History stays in
+the archive bucket. To get the per-minute chart back for older days, rebuild the rollup
+from the archive (below).
 
 ## Schema changes
 
@@ -113,6 +115,60 @@ logged. To rebuild them, stop ingest first (repair refuses while an ingest inser
 running or rows are still arriving, and fails if either happens during it), then add `--repair`, then start ingest; it resumes
 from its bookmark. Locally, `make reconcile REPAIR=1` does all three.
 
+## The Parquet archive
+
+The `archive` service writes each finished hour to S3 within about 5 minutes of ingest
+passing it, logs every file, and rewrites an hour whose raw rows grow later. Healthy:
+`archive_hours_behind` is 0 and `archive_newest_hour_timestamp_seconds` trails the clock
+by one to two hours.
+
+- **Rewrite an hour** (a file that can't be read, or one you want rebuilt from what
+  ClickHouse has now). Stop the service first so the two don't write the same file:
+
+  ```
+  docker compose -f compose.yaml -f compose.prod.yaml stop archive
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm archive python -m livedemos.archive --hour 2026-10-06T09
+  docker compose -f compose.yaml -f compose.prod.yaml start archive
+  ```
+
+  It refuses an hour ClickHouse has no rows for (exit 2). The replaced version stays in
+  the bucket for 30 days. Locally: `make archive-hour HOUR=...`.
+- **Rebuild the rollup from the archive**, for whole UTC days, up to 31 at a time, `--to`
+  exclusive. Stop ingest first:
+
+  ```
+  docker compose -f compose.yaml -f compose.prod.yaml stop ingest
+  sleep 30
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.archive.rebuild --from 2026-10-01 --to 2026-10-03
+  docker compose -f compose.yaml -f compose.prod.yaml start ingest
+  ```
+
+  It refuses while rows are arriving, and if any hour in the range has no file. An hour
+  with no file is either an outage or an hour that never got archived. Check
+  `ingest_gaps`; if they're outages, add `--allow-missing` to rebuild them as empty.
+  The live rollup only changes once every file has been read into a staging table, and
+  then a whole month at a time, atomically. It holds the maintenance lock; if it reports
+  the lock held and nothing is running, clear it with `python -m livedemos.migrate --unlock`
+  (see Schema changes).
+  Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days,
+  `reconcile` (below) then confirms the rollup matches raw again.
+
+- **Undo a bad rewrite** (within 30 days; replaced versions expire after that). From
+  your laptop, with the `livedemos` profile, since the host can't read old versions:
+
+  ```
+  aws s3api list-object-versions --bucket <archive-bucket> --prefix wikipedia/edits/dt=2026-10-06/hour=09.parquet
+  aws s3api copy-object --bucket <archive-bucket> --key wikipedia/edits/dt=2026-10-06/hour=09.parquet \
+    --copy-source "<archive-bucket>/wikipedia/edits/dt=2026-10-06/hour=09.parquet?versionId=<VersionId>"
+  ```
+
+  The copy becomes the current version. With the archive service stopped, record what it
+  holds, or the service compares against the bad rewrite's count: run
+  `python -m livedemos.archive --once` as above after deleting that hour's rows from
+  `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'
+  SETTINGS mutations_sync = 1`, as admin, so it's gone before the run); it then finds the
+  file and records it. Start the service again.
+
 ## What to alert on
 
 These are the signals; the alerts themselves are M4.
@@ -128,6 +184,10 @@ These are the signals; the alerts themselves are M4.
 | `time() - api_last_snapshot_timestamp_seconds > 10` | The API can't build snapshots; CloudFront is serving the S3 copy. |
 | `rate(api_activity_queries_total{cache=~"timeout\|cooldown\|shed"}[5m]) > 0` | "Query it" is shedding load. |
 | `increase(api_activity_query_failures_total[5m]) > 0` | ClickHouse failed a "Query it" query. |
+| `time() - archive_newest_hour_timestamp_seconds > 3 * 3600` | No new hour archived for three hours: the archive service, S3 or ingest is stuck. |
+| `archive_hours_behind > 0` for 30 minutes | Hours whose file holds fewer rows than ClickHouse, or can't be read. Short-lived ones are retried; an unreadable file needs `--hour`. |
+| `archive_hours_behind > 0 and time() - archive_oldest_behind_hour_timestamp_seconds > 5 * 86400` | An hour has been behind for 5 days; its raw rows expire after 7. (The timestamp is 0 when nothing is behind, so it needs the first half.) |
+| `ClickHouse MemoryTrackingUncorrected - MemoryTracking` growing | The memory count is drifting. The memory worker corrects it; if this keeps growing, that correction is off. |
 
 For a slow query or a merge backlog, `system.query_log` (slow application queries) and
 `system.part_log` keep 3 days.

@@ -1,8 +1,10 @@
 <!--
-  Three application users, least privilege:
-    migrator  changes the schema; only the one-shot `migrate` job runs as it
+  Four application users, least privilege:
+    migrator  changes the schema; only the one-shot `migrate` job runs as it. Also
+              rewrites the rollup (reconcile repairs, rebuilds from the archive)
     ingest    reads and inserts rows; can't change the schema
     api       read-only, with tight per-query limits (it faces the public internet)
+    archiver  reads raw rows and writes them to S3 as Parquet; nothing else
   Passwords come from environment variables, never from this file.
 -->
 <clickhouse>
@@ -55,6 +57,10 @@
                 <query>GRANT DROP TABLE ON demos.schema_migrations_lock</query>
                 <!-- Reconcile repairs only while no ingest insert runs: it must see them. -->
                 <query>GRANT SELECT(query_id, current_database, user) ON system.processes</query>
+                <!-- Rebuilding the rollup: read the archive (only), stage, then replace. -->
+                <query>GRANT READ ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>
+                <query>GRANT CREATE TEMPORARY TABLE ON *.*</query>
+                <query>GRANT TRUNCATE ON demos.wiki_edits_per_minute_staging</query>
             </grants>
         </migrator>
         <ingest>
@@ -78,5 +84,19 @@
                 <query>GRANT SELECT ON demos.*</query>
             </grants>
         </api>
+        <archiver>
+            <password from_env="CLICKHOUSE_ARCHIVER_PASSWORD"/>
+            <profile>writer</profile>
+            <quota>default</quota>
+            <networks><ip>::/0</ip></networks>
+            <grants>
+                <query>GRANT SELECT ON demos.wiki_edits</query>
+                <query>GRANT SELECT, INSERT ON demos.archive_hours</query>
+                <!-- s3() reaches only the archive bucket (production) or the local stand-in;
+                     any other URL is refused. A table function needs a temporary table. -->
+                <query>GRANT READ, WRITE ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>
+                <query>GRANT CREATE TEMPORARY TABLE ON *.*</query>
+            </grants>
+        </archiver>
     </users>
 </clickhouse>

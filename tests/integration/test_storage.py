@@ -4,59 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
 
 from livedemos.api.activity import ActivityService, parse_request
 from livedemos.api.snapshot import Snapshotter
 from livedemos.clickhouse import ClickHouse, ClickHouseError
-from livedemos.config import ClickHouseSettings
-from livedemos.ingest.events import Edit, to_row
 from livedemos.ingest.resume import load_resume_state, wait_for_inflight_inserts
+from livedemos.maintenance import IngestRunning
 from livedemos.migrate import MigrationError, _statements, migrate
-from livedemos.reconcile import IngestRunning, Mismatch, find_mismatches, repair
+from livedemos.reconcile import Mismatch, find_mismatches, repair
 
-from .conftest import TEST_DB, clickhouse_test_settings
+from .conftest import TEST_DB, clickhouse_test_settings, rows, user_settings
 
 pytestmark = pytest.mark.integration
-
-
-def rows(
-    n: int,
-    *,
-    lang: str = "en",
-    start: datetime | None = None,
-    bot_every: int = 0,
-    first_seq: int = 1,
-) -> list[dict[str, object]]:
-    start = start or datetime.now(UTC) - timedelta(seconds=n)
-    out = []
-    for i in range(n):
-        edit = Edit(
-            event_id=str(uuid4()),
-            event_time=start + timedelta(seconds=i),
-            wiki=f"{lang}wiki",
-            lang=lang,
-            type="edit",
-            namespace=0,
-            title=f"Article {i % 3}",
-            is_bot=bool(bot_every) and i % bot_every == 0,
-        )
-        out.append(
-            to_row(
-                edit,
-                sse_id=f'[{{"timestamp":{i}}}]',
-                ingest_seq=first_seq + i,
-                ingested_at=datetime.now(UTC),
-            )
-        )
-    return out
 
 
 async def scalar(ch: ClickHouse, sql: str) -> int:
@@ -71,14 +35,16 @@ async def test_migrations_run_once_and_are_recorded(ch: ClickHouse) -> None:
         params={"db": ch.database},
     )
     assert [r["name"] for r in tables.rows] == [
+        "archive_hours",
         "ingest_gaps",
         "schema_migrations",
         "wiki_edits",
         "wiki_edits_per_minute",
         "wiki_edits_per_minute_mv",
+        "wiki_edits_per_minute_staging",
     ]
     applied = await ch.query("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r["version"] for r in applied.rows] == [1, 2]
+    assert [r["version"] for r in applied.rows] == [1, 2, 3]
 
 
 async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
@@ -87,7 +53,7 @@ async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
     assert await migrate(ch, upto=1) == [1]
     await ch.insert("wiki_edits", rows(50), dedup_token="before-upgrade")
 
-    assert await migrate(ch) == [2]
+    assert await migrate(ch) == [2, 3]
     projections = await ch.query(
         "SELECT DISTINCT name FROM system.projection_parts "
         "WHERE database = {db:String} AND table = 'wiki_edits' AND active ORDER BY name",
@@ -107,7 +73,7 @@ async def test_a_database_from_before_versioned_migrations_is_adopted(ch: ClickH
         await ch.execute(sql, settings={"database": db})
     await ch.insert("wiki_edits", rows(40), dedup_token="legacy")
 
-    assert await migrate(ch) == [1, 2]  # 1 is a no-op that records the baseline
+    assert await migrate(ch) == [1, 2, 3]  # 1 is a no-op that records the baseline
     assert await scalar(ch, "SELECT count() FROM wiki_edits") == 40
     assert await scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute") == 40
 
@@ -398,33 +364,6 @@ async def test_reconcile_finds_and_rebuilds_a_rollup_that_drifted(ch: ClickHouse
     assert await find_mismatches(ch, now=now, settle=timedelta(0)) == []
     bots = await scalar(ch, "SELECT sum(bot_edits) FROM wiki_edits_per_minute")
     assert bots == await scalar(ch, "SELECT countIf(is_bot) FROM wiki_edits")
-
-
-def user_settings(user: str, password_env: str) -> ClickHouseSettings:
-    password = os.environ.get(password_env)
-    if not password:
-        pytest.skip(f"{password_env} not set")
-    return clickhouse_test_settings().model_copy(
-        update={"user": user, "password": password, "database": "demos"}
-    )
-
-
-@pytest.fixture
-async def demos_schema() -> AsyncIterator[None]:
-    """The users' grants are on `demos`. Create it if this ClickHouse has never had it (CI);
-    a local stack's `demos` already exists and is left alone."""
-    admin = ClickHouse(clickhouse_test_settings().model_copy(update={"database": "demos"}))
-    try:
-        # Asked from `default`: a connection to `demos` fails if `demos` doesn't exist yet.
-        exists = await admin.query(
-            "SELECT count() AS n FROM system.databases WHERE name = 'demos'",
-            settings={"database": "default"},
-        )
-        if not int(exists.rows[0]["n"]):
-            await migrate(admin)
-        yield
-    finally:
-        await admin.aclose()
 
 
 @pytest.mark.usefixtures("demos_schema")
