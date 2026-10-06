@@ -8,7 +8,8 @@ before anything runs:
 - a database ahead of this code (an older build deployed over a newer schema),
 - a second `migrate` running at the same time: `CREATE TABLE schema_migrations_lock` is
   atomic, so exactly one run gets it. A run that crashed leaves it behind; check nothing
-  else is migrating, then `python -m livedemos.migrate --unlock`.
+  else is migrating, then `python -m livedemos.migrate --unlock`. Rollup repairs and
+  rebuilds take the same lock (`exclusive`), so none of them overlap.
 
 ClickHouse has no transactional DDL, so a migration that fails halfway is retried from the
 top on the next run. Write each statement so running it twice is harmless (IF NOT EXISTS,
@@ -26,6 +27,8 @@ import hashlib
 import logging
 import re
 import socket
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -110,12 +113,19 @@ async def migrate(ch: ClickHouse, *, upto: int | None = None) -> list[int]:
     known = load(db)
     # CREATE DATABASE must not run inside the database it creates.
     await ch.execute(f"CREATE DATABASE IF NOT EXISTS {db}", settings={"database": "default"})
-    await _lock(ch)
-    try:
+    async with exclusive(ch):
         await ch.execute(_LEDGER.replace("{database}", db))
         return await _apply(ch, known, upto=upto)
+
+
+@asynccontextmanager
+async def exclusive(ch: ClickHouse) -> AsyncIterator[None]:
+    """Hold the maintenance lock: one migration, repair or rebuild at a time."""
+    await _lock(ch)
+    try:
+        yield
     finally:
-        await ch.execute(f"DROP TABLE IF EXISTS {db}.{_LOCK}")
+        await ch.execute(f"DROP TABLE IF EXISTS {ch.database}.{_LOCK}")
 
 
 async def _apply(ch: ClickHouse, known: list[Migration], *, upto: int | None) -> list[int]:
@@ -180,8 +190,8 @@ async def _lock(ch: ClickHouse) -> None:
         )
         by = held.rows[0]["comment"] if held.rows else "unknown"
         raise MigrationError(
-            f"another migrate holds the lock ({by}). If none is running, a previous run "
-            "crashed: python -m livedemos.migrate --unlock"
+            f"another migration, repair or rebuild holds the lock ({by}). If none is "
+            "running, a previous run crashed: python -m livedemos.migrate --unlock"
         ) from exc
 
 

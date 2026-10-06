@@ -3,18 +3,20 @@
     python -m livedemos.archive.rebuild --from 2026-10-01 --to 2026-10-03   # [from, to)
 
 For when the rollup is lost or wrong and the raw rows are gone (older than 7 days, or a
-host rebuilt from scratch). Nothing live changes until the replacement is ready:
+host rebuilt from scratch). The live rollup is never half-rebuilt:
 
 1. Every hour in the range must have a file. An hour without one is either a real outage
    (nothing was ingested) or an hour that never got archived, and the files can't tell
    which. Check `ingest_gaps`, then pass `--allow-missing` to accept them as empty.
 2. Count the files into `wiki_edits_per_minute_staging`, one day per query, and check
-   every hour that has a file produced rows.
-3. With ingest stopped, replace the range in the live rollup from staging. Only this
-   step touches live data, and it reads nothing from S3.
+   every hour with a file produced rows.
+3. With ingest stopped, copy each affected month's other minutes into staging, so it
+   holds complete replacement months, then swap each month in with REPLACE PARTITION.
+   Each swap is atomic: a month is either all old or all new, never empty.
 
-Like `reconcile --repair`, it needs ingest stopped (`make rebuild-rollups` does that), and
-it runs as `migrator`, the user that can rewrite tables.
+It holds the maintenance lock (`livedemos.migrate.exclusive`) throughout, so it never
+overlaps a migration, a reconcile repair or another rebuild. It needs ingest stopped
+(`make rebuild-rollups` does that), and runs as `migrator`.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from livedemos.maintenance import (
     require_ingest_still_stopped,
     require_ingest_stopped,
 )
+from livedemos.migrate import MigrationError, exclusive
 
 log = logging.getLogger(__name__)
 
@@ -75,9 +78,21 @@ async def rebuild(
         raise ValueError(f"the range must cover 1 to {MAX_DAYS} days")
     from_s = int(datetime(first.year, first.month, first.day, tzinfo=UTC).timestamp())
     to_s = from_s + days * DAY_S
+    async with exclusive(ch):
+        return await _rebuild(ch, settings, from_s, to_s, allow_missing=allow_missing, quiet=quiet)
+
+
+async def _rebuild(
+    ch: ClickHouse,
+    settings: ArchiveSettings,
+    from_s: int,
+    to_s: int,
+    *,
+    allow_missing: bool,
+    quiet: timedelta,
+) -> int:
     bounds = {"from_s": from_s, "to_s": to_s}
     hours = list(range(from_s, to_s, HOUR_S))
-
     archived = await Archiver(settings, ch).existing_hours(hours)
     missing = sorted(set(hours) - archived)
     if missing and not allow_missing:
@@ -109,31 +124,44 @@ async def rebuild(
             settings={**REBUILD_INSERT_SETTINGS, **S3_SETTINGS},
         )
     staged = await ch.query(
-        "SELECT DISTINCT toUnixTimestamp(toStartOfHour(minute)) AS h "
-        f"FROM wiki_edits_per_minute_staging WHERE {_RANGE}",
+        "SELECT toUnixTimestamp(toStartOfHour(minute)) AS h, count() AS n "
+        f"FROM wiki_edits_per_minute_staging WHERE {_RANGE} GROUP BY h",
         params=bounds,
     )
-    empty = sorted(archived - {int(r["h"]) for r in staged.rows})
+    staged_hours = {int(r["h"]): int(r["n"]) for r in staged.rows}
+    empty = sorted(archived - set(staged_hours))
     if empty:  # a file is only written for an hour with rows
         raise ArchiveIncomplete(f"{len(empty)} file(s) produced no rows, first {_iso(empty[0])}")
 
     mark = await require_ingest_stopped(ch, quiet=quiet)
+    months = sorted({f"{datetime.fromtimestamp(d, UTC):%Y%m}" for d in range(from_s, to_s, DAY_S)})
+    # The rest of each month as it is now, so the swap changes only the range.
     await ch.execute(
-        f"ALTER TABLE wiki_edits_per_minute DELETE WHERE {_RANGE} SETTINGS mutations_sync = 1",
-        params=bounds,
-    )
-    await ch.execute(
-        f"INSERT INTO wiki_edits_per_minute ({_COLUMNS}) "
-        f"SELECT {_COLUMNS} FROM wiki_edits_per_minute_staging WHERE {_RANGE}",
-        params=bounds,
+        f"INSERT INTO wiki_edits_per_minute_staging ({_COLUMNS}) "
+        f"SELECT {_COLUMNS} FROM wiki_edits_per_minute "
+        "WHERE toYYYYMM(minute) IN {months:Array(UInt32)} "
+        "AND NOT (minute >= fromUnixTimestamp({from_s:Int64}) "
+        "AND minute < fromUnixTimestamp({to_s:Int64}))",
+        params={"months": [int(m) for m in months], **bounds},
         settings=REBUILD_INSERT_SETTINGS,
     )
+    for month in months:  # a computed integer, not input
+        await ch.execute(
+            f"ALTER TABLE wiki_edits_per_minute REPLACE PARTITION ID '{month}' "
+            "FROM wiki_edits_per_minute_staging"
+        )
     await require_ingest_still_stopped(ch, mark)
     await ch.execute("TRUNCATE TABLE wiki_edits_per_minute_staging")
     result = await ch.query(
         f"SELECT count() AS n FROM wiki_edits_per_minute WHERE {_RANGE}", params=bounds
     )
-    return int(result.rows[0]["n"])
+    rows = int(result.rows[0]["n"])
+    if rows != sum(staged_hours.values()):
+        raise ArchiveIncomplete(
+            f"the rollup has {rows} rows in the range after the swap, "
+            f"staging had {sum(staged_hours.values())}"
+        )
+    return rows
 
 
 async def _main(args: argparse.Namespace) -> int:
@@ -143,7 +171,7 @@ async def _main(args: argparse.Namespace) -> int:
         rows = await rebuild(
             ch, archive_settings(), args.first, args.end, allow_missing=args.allow_missing
         )
-    except (IngestRunning, ArchiveIncomplete) as exc:
+    except (IngestRunning, ArchiveIncomplete, MigrationError) as exc:
         log.error("not rebuilt", extra={"reason": str(exc)})
         return 1
     finally:

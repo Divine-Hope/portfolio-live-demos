@@ -36,6 +36,7 @@ from livedemos.maintenance import (
     require_ingest_still_stopped,
     require_ingest_stopped,
 )
+from livedemos.migrate import MigrationError, exclusive
 
 log = logging.getLogger(__name__)
 
@@ -100,32 +101,35 @@ async def repair(
     """Rebuild every listed minute (all languages) from raw rows. Returns minutes rebuilt.
 
     Refuses unless ingest is stopped (`require_ingest_stopped`), and fails if an insert
-    ran or landed while it worked (rerun it, with ingest stopped).
+    ran or landed while it worked (rerun it, with ingest stopped). Holds the maintenance
+    lock. The delete and the insert aren't one transaction, but the source is raw rows
+    still in ClickHouse: if it's interrupted between them, rerunning restores the minutes.
     """
     minutes = sorted({int(m.minute.timestamp()) for m in mismatches})
     if not minutes:
         return 0
-    mark = await require_ingest_stopped(ch, quiet=quiet)
-    # Integers, not timestamps: ClickHouse binds them as an Array(UInt32) and compares
-    # toUnixTimestamp(minute), so no time zone or format can creep in.
-    await ch.execute(
-        "ALTER TABLE wiki_edits_per_minute DELETE "
-        "WHERE toUnixTimestamp(minute) IN {minutes:Array(UInt32)} "
-        "SETTINGS mutations_sync = 1",
-        params={"minutes": minutes},
-    )
-    await ch.execute(
-        """
-        INSERT INTO wiki_edits_per_minute (minute, lang, edits, bot_edits)
-        SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
-        FROM wiki_edits
-        WHERE toUnixTimestamp(toStartOfMinute(event_time)) IN {minutes:Array(UInt32)}
-        GROUP BY minute, lang
-        """,
-        params={"minutes": minutes},
-        settings=REBUILD_INSERT_SETTINGS,
-    )
-    await require_ingest_still_stopped(ch, mark)
+    async with exclusive(ch):
+        mark = await require_ingest_stopped(ch, quiet=quiet)
+        # Integers, not timestamps: ClickHouse binds them as an Array(UInt32) and compares
+        # toUnixTimestamp(minute), so no time zone or format can creep in.
+        await ch.execute(
+            "ALTER TABLE wiki_edits_per_minute DELETE "
+            "WHERE toUnixTimestamp(minute) IN {minutes:Array(UInt32)} "
+            "SETTINGS mutations_sync = 1",
+            params={"minutes": minutes},
+        )
+        await ch.execute(
+            """
+            INSERT INTO wiki_edits_per_minute (minute, lang, edits, bot_edits)
+            SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
+            FROM wiki_edits
+            WHERE toUnixTimestamp(toStartOfMinute(event_time)) IN {minutes:Array(UInt32)}
+            GROUP BY minute, lang
+            """,
+            params={"minutes": minutes},
+            settings=REBUILD_INSERT_SETTINGS,
+        )
+        await require_ingest_still_stopped(ch, mark)
     return len(minutes)
 
 
@@ -152,7 +156,7 @@ async def _main(args: argparse.Namespace) -> int:
             return 1
         try:
             rebuilt = await repair(ch, found)
-        except IngestRunning as exc:
+        except (IngestRunning, MigrationError) as exc:
             log.error("not repaired", extra={"reason": str(exc)})
             return 1
         left = await find_mismatches(ch, now=datetime.now(UTC), settle=settle)

@@ -15,10 +15,18 @@ from uuid import uuid4
 
 import pytest
 
-from livedemos.archive.job import HOUR_S, Archiver, NothingToArchive, hour_url, s3_function
+from livedemos.archive.job import (
+    HOUR_S,
+    Archiver,
+    FewerRows,
+    NothingToArchive,
+    hour_url,
+    s3_function,
+)
 from livedemos.archive.rebuild import ArchiveIncomplete, rebuild
 from livedemos.clickhouse import ClickHouse, ClickHouseError
 from livedemos.config import ArchiveSettings
+from livedemos.migrate import MigrationError, exclusive
 
 from .conftest import clickhouse_test_settings, rows, user_settings
 
@@ -29,6 +37,7 @@ NOW = datetime.now(UTC)
 DAY = (NOW - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
 H0, H1, H2 = (int(DAY.timestamp()) + h * HOUR_S for h in (3, 4, 5))
 WHOLE_DAY = {"first": DAY.date(), "end": DAY.date() + timedelta(days=1)}
+OUTSIDE_DAY = f"SELECT sum(edits) FROM wiki_edits_per_minute WHERE toDate(minute) != '{DAY.date()}'"
 
 
 @pytest.fixture
@@ -43,13 +52,19 @@ def at(seconds: int) -> datetime:
 
 @pytest.fixture
 async def edits(ch: ClickHouse) -> ClickHouse:
-    """50, 40 and 30 edits in H0, H1 and H2, and one just now, so ingest is past them all."""
+    """50, 40 and 30 edits in H0, H1 and H2, and one just now, so ingest is past them all.
+    One more the evening before, so ingest's coverage starts before H0: it's a whole hour."""
+    await ch.insert("wiki_edits", rows(1, start=at(H0 - 4 * HOUR_S + 600), first_seq=1000))
     seq = 1
     for hour_s, n in ((H0, 50), (H1, 40), (H2, 30)):
         await ch.insert("wiki_edits", rows(n, start=at(hour_s + 10), bot_every=4, first_seq=seq))
         seq += n
     await ch.insert("wiki_edits", rows(1, first_seq=seq))
     return ch
+
+
+async def scalar(ch: ClickHouse, sql: str) -> int:
+    return int(next(iter((await ch.query(sql)).rows[0].values())))
 
 
 async def file_count(ch: ClickHouse, settings: ArchiveSettings, hour_s: int) -> int:
@@ -115,9 +130,9 @@ async def test_a_file_is_never_replaced_by_one_with_fewer_rows(
     await archiver.run_once(NOW)
     await edits.execute("TRUNCATE TABLE archive_hours")
     await edits.execute(
-        "ALTER TABLE wiki_edits DELETE WHERE event_time < fromUnixTimestamp({to_s:Int64}) "
-        "SETTINGS mutations_sync = 1",
-        params={"to_s": H0 + 30},
+        "ALTER TABLE wiki_edits DELETE WHERE event_time >= fromUnixTimestamp({from_s:Int64}) "
+        "AND event_time < fromUnixTimestamp({to_s:Int64}) SETTINGS mutations_sync = 1",
+        params={"from_s": H0, "to_s": H0 + 30},
     )
 
     assert await archiver.run_once(NOW) == []
@@ -127,6 +142,17 @@ async def test_a_file_is_never_replaced_by_one_with_fewer_rows(
     # Rewriting it anyway is a deliberate act.
     rewritten = await archiver.archive_hour(H0, manual=True)
     assert (rewritten.result, rewritten.rows) == ("written", 30)
+
+
+async def test_a_scheduled_write_never_goes_ahead_with_fewer_rows(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """Raw rows shrank between planning and writing: the file is left as it is."""
+    archiver = Archiver(settings, edits)
+    await archiver.run_once(NOW)
+    with pytest.raises(FewerRows):
+        await archiver.archive_hour(H0, floor=60)
+    assert await file_count(edits, settings, H0) == 50
 
 
 async def test_a_manual_rewrite_of_an_empty_hour_is_refused(
@@ -143,7 +169,14 @@ async def test_rebuild_drill_restores_the_rollup_from_the_archive(
     before = await per_minute(edits)
     assert sum(e for _, _, e, _ in before) == 120
 
-    await edits.execute("TRUNCATE TABLE wiki_edits_per_minute")
+    other_days = await scalar(edits, OUTSIDE_DAY)
+    assert other_days >= 1  # the evening before, at least
+
+    await edits.execute(
+        "ALTER TABLE wiki_edits_per_minute DELETE WHERE toDate(minute) = {day:Date} "
+        "SETTINGS mutations_sync = 1",
+        params={"day": DAY.date().isoformat()},
+    )
     # The test day only has three hours of edits; the other 21 have no file.
     rollup_rows = await rebuild(
         edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0)
@@ -151,6 +184,7 @@ async def test_rebuild_drill_restores_the_rollup_from_the_archive(
 
     assert await per_minute(edits) == before
     assert rollup_rows == len(before)
+    assert await scalar(edits, OUTSIDE_DAY) == other_days  # the rest of the month kept
 
 
 async def test_rebuild_refuses_hours_without_a_file_even_after_the_rollup_is_gone(
@@ -176,6 +210,59 @@ async def test_a_rebuild_that_cant_read_the_archive_leaves_the_rollup_alone(
     with pytest.raises(ClickHouseError):
         await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
     assert await per_minute(edits) == before
+
+
+async def test_a_rebuild_waits_its_turn(edits: ClickHouse, settings: ArchiveSettings) -> None:
+    """One migration, repair or rebuild at a time: they share the staging table and lock."""
+    await Archiver(settings, edits).run_once(NOW)
+    async with exclusive(edits):
+        with pytest.raises(MigrationError, match="holds the lock"):
+            await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+
+
+async def test_duckdb_reads_every_column(edits: ClickHouse, settings: ArchiveSettings) -> None:
+    """The README's way in: DuckDB over S3. Every column, its type and its values."""
+    duckdb = pytest.importorskip("duckdb")
+    await Archiver(settings, edits).run_once(NOW)
+    expected = await edits.query(
+        "SELECT toString(event_id) AS event_id, wiki, lang, type, namespace, title, is_bot, "
+        "toUnixTimestamp64Milli(event_time) AS ms FROM wiki_edits "
+        "WHERE toStartOfHour(event_time) = fromUnixTimestamp({h:Int64}) "
+        "ORDER BY event_time, event_id",
+        params={"h": H0},
+    )
+
+    endpoint = os.environ.get("ARCHIVE_TEST_S3_ENDPOINT", "localhost:8333")
+    path = "s3://" + settings.url.split("://", 1)[1].split("/", 1)[1]  # drop scheme and host
+    db = duckdb.connect()
+    db.execute("INSTALL httpfs; LOAD httpfs;")
+    db.execute(
+        "CREATE SECRET (TYPE s3, KEY_ID 'any', SECRET 'any', ENDPOINT ?, URL_STYLE 'path', "
+        "USE_SSL false, REGION 'us-east-1')",
+        [endpoint],
+    )
+    source = f"read_parquet('{path}/dt=*/hour=*.parquet', hive_partitioning = true)"
+    types = {row[0]: row[1] for row in db.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()}
+    assert types == {
+        "event_id": "VARCHAR",
+        "event_time": "TIMESTAMP WITH TIME ZONE",
+        "ingested_at": "TIMESTAMP WITH TIME ZONE",
+        "wiki": "VARCHAR",
+        "lang": "VARCHAR",
+        "type": "VARCHAR",
+        "namespace": "INTEGER",
+        "title": "VARCHAR",
+        "is_bot": "BOOLEAN",
+        "dt": "DATE",
+    }
+    got = db.execute(
+        "SELECT event_id, wiki, lang, type, namespace, title, is_bot, epoch_ms(event_time) "
+        f"FROM {source} WHERE date_trunc('hour', event_time) = to_timestamp(?) "
+        "ORDER BY event_time, event_id",
+        [H0],
+    ).fetchall()
+    assert [tuple(r.values()) for r in expected.rows] == got
+    assert db.execute(f"SELECT DISTINCT dt FROM {source}").fetchall() == [(DAY.date(),)]
 
 
 class DedupEverything(ClickHouse):

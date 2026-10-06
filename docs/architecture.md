@@ -126,11 +126,11 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 
 Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`, in the archive bucket ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)). ClickHouse writes it with one `INSERT INTO FUNCTION s3(...)`, signed by the instance role, so the archive service holds no AWS credentials. It's its own small service, not part of the API: archiving needs a ClickHouse user that can write to S3, and the API is public and read-only.
 
-- **Every hour complete, for as long as raw rows exist.** Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every hour of the last 7 days that ingest has passed by 5 minutes, it compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay.
-- **Never fewer rows.** A file is never replaced by one with fewer rows. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
+- **Every hour complete, for as long as raw rows exist.** Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every whole hour of the last 7 days that ingest has passed by 5 minutes, it compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay. "Whole" means it started after the first raw row and after the retention cutoff: raw rows expire part by part, so the hour the cutoff falls in may be missing its start.
+- **Never fewer rows.** A scheduled write goes ahead only if ClickHouse has more rows than the file, checked again just before writing, and a lower count is never recorded. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, checks each one's events fall inside its hour, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
 - **Recoverable.** The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone. The host can put, get and list under `wikipedia/`, never delete.
-- **Rebuilds the rollup without risking it.** `python -m livedemos.archive.rebuild` needs a file for every hour in the range (or `--allow-missing` for real outages), counts the files into a staging table a day at a time, checks every file produced rows, and only then, with ingest stopped, replaces the range in the live rollup from staging.
-- **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at the archive bucket's URLs; any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it.
+- **Rebuilds the rollup without risking it.** `python -m livedemos.archive.rebuild` needs a file for every hour in the range (or `--allow-missing` for real outages). It counts the files into a staging table a day at a time and checks every file produced rows. Then, with ingest stopped, it adds the rest of each affected month and swaps whole months into the live rollup with `REPLACE PARTITION`: each month is all old or all new, never empty. It holds the same lock as migrations and reconcile repairs, so none of them overlap.
+- **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at archive-bucket URLs (`livedemos-archive-*`); any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it. The pattern can't name the exact bucket: its name holds the account id, which stays out of this public repo. The S3 permissions themselves belong to the instance role, which every container on the host can reach; isolating that per container would cost more than this project's budget.
 
 ## Data model
 
@@ -201,7 +201,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 
 About $6 a month until the end of 2026. The real bill goes in the README once there is one.
 
-**The archive, estimated 2026-10-06.** Production kept 9,302 edits an hour over the previous 24 hours. Parquet with zstd took 36 bytes an edit in the local archive (fake stream, so real titles may cost more; checked against production files after the first deploy). That's about 0.34 MB an hour, 8 MB a day, 0.25 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
+**The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Parquet with zstd took 36 bytes an edit in the local archive (fake stream, so real titles may cost more; checked against production files after the first deploy). That's about 0.34 MB an hour, 8 MB a day, 0.25 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 
 | Item | Price | A month, once a year is stored |
 |---|---|---|
@@ -212,7 +212,7 @@ About $6 a month until the end of 2026. The real bill goes in the README once th
 | Read-backs (about 2,200) | $0.004 per 10,000 | under $0.001 |
 | Lifecycle moves to IA and to Glacier IR | $0.01 and $0.02 per 1,000 | $0.022 |
 
-About 6 cents a month after a year, growing about half a cent a month after that. Files are 340 KB, above Standard-IA's 128 KB minimum, and they stay in each class longer than its minimum (30 and 90 days). Rebuilding a month of rollups reads 0.25 GB: under a cent in retrieval fees.
+About 6 cents a month after a year, growing about half a cent a month after that. Rewrites for late events add a PUT and keep the replaced version for 30 days; even if every hour were rewritten once, that's under 2 cents more a month. Files are 340 KB, above Standard-IA's 128 KB minimum, and they stay in each class longer than its minimum (30 and 90 days). Rebuilding a month of rollups reads 0.25 GB: under a cent in retrieval fees.
 
 ## Build order
 

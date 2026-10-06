@@ -146,9 +146,27 @@ by one to two hours.
   It refuses while rows are arriving, and if any hour in the range has no file. An hour
   with no file is either an outage or an hour that never got archived. Check
   `ingest_gaps`; if they're outages, add `--allow-missing` to rebuild them as empty.
-  The live rollup only changes once every file has been read into a staging table.
+  The live rollup only changes once every file has been read into a staging table, and
+  then a whole month at a time, atomically. It holds the maintenance lock; if it reports
+  the lock held and nothing is running, clear it with `python -m livedemos.migrate --unlock`
+  (see Schema changes).
   Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days,
   `reconcile` (below) then confirms the rollup matches raw again.
+
+- **Undo a bad rewrite** (within 30 days; replaced versions expire after that). From
+  your laptop, with the `livedemos` profile, since the host can't read old versions:
+
+  ```
+  aws s3api list-object-versions --bucket <archive-bucket> --prefix wikipedia/edits/dt=2026-10-06/hour=09.parquet
+  aws s3api copy-object --bucket <archive-bucket> --key wikipedia/edits/dt=2026-10-06/hour=09.parquet \
+    --copy-source "<archive-bucket>/wikipedia/edits/dt=2026-10-06/hour=09.parquet?versionId=<VersionId>"
+  ```
+
+  The copy becomes the current version. With the archive service stopped, record what it
+  holds, or the service compares against the bad rewrite's count: run
+  `python -m livedemos.archive --once` as above after deleting that hour's rows from
+  `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'`,
+  as admin); it then finds the file and records it. Start the service again.
 
 ## What to alert on
 
@@ -167,7 +185,7 @@ These are the signals; the alerts themselves are M4.
 | `increase(api_activity_query_failures_total[5m]) > 0` | ClickHouse failed a "Query it" query. |
 | `time() - archive_newest_hour_timestamp_seconds > 3 * 3600` | No new hour archived for three hours: the archive service, S3 or ingest is stuck. |
 | `archive_hours_behind > 0` for 30 minutes | Hours whose file holds fewer rows than ClickHouse, or can't be read. Short-lived ones are retried; an unreadable file needs `--hour`. |
-| `time() - archive_oldest_behind_hour_timestamp_seconds > 5 * 86400` | An hour has been behind for 5 days; its raw rows expire after 7. |
+| `archive_hours_behind > 0 and time() - archive_oldest_behind_hour_timestamp_seconds > 5 * 86400` | An hour has been behind for 5 days; its raw rows expire after 7. (The timestamp is 0 when nothing is behind, so it needs the first half.) |
 | `ClickHouse MemoryTrackingUncorrected - MemoryTracking` growing | The memory count is drifting. The memory worker corrects it; if this keeps growing, that correction is off. |
 
 For a slow query or a merge backlog, `system.query_log` (slow application queries) and

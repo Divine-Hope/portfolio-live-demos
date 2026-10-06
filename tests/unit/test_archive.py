@@ -70,8 +70,10 @@ class StubWarehouse:
         recorded: dict[int, int] | None = None,
         files: dict[int, int] | None = None,
         unreadable: set[int] | None = None,
+        oldest: int | None = None,  # the first raw row; the start of the first hour if None
     ) -> None:
         self.raw = raw
+        self.oldest = oldest if oldest is not None else min(raw)
         self.recorded = dict(recorded or {})
         self.files = dict(files or {})
         self.unreadable = unreadable or set()
@@ -86,8 +88,15 @@ class StubWarehouse:
     ) -> QueryResult:
         stats = QueryStats(0, 0, 0)
         params = params or {}
+        if "url" in params and "count()" in sql:  # reading a file
+            hour_s = hour_of_path(str(params["url"]))
+            assert hour_s is not None
+            if hour_s in self.unreadable:
+                raise ClickHouseError("Cannot read Parquet")
+            row = {"n": self.files[hour_s], "lo": hour_s, "hi": hour_s + 60}
+            return QueryResult([row], stats)
         if "min(event_time)" in sql:
-            span = {"oldest_s": min(self.raw), "newest_s": max(self.raw) + HOUR_S, "n": 1}
+            span = {"oldest_s": self.oldest, "newest_s": max(self.raw) + HOUR_S, "n": 1}
             return QueryResult([span], stats)
         if "FROM archive_hours" in sql:
             return QueryResult([{"h": h, "n": n} for h, n in self.recorded.items()], stats)
@@ -97,12 +106,6 @@ class StubWarehouse:
             return QueryResult(rows, stats)
         if "_path" in sql:
             return QueryResult([{"path": hour_url("bucket", h)} for h in self.files], stats)
-        if "count()" in sql and "url" in params:  # reading a file back
-            hour_s = hour_of_path(str(params["url"]))
-            assert hour_s is not None
-            if hour_s in self.unreadable:
-                raise ClickHouseError("Cannot read Parquet")
-            return QueryResult([{"n": self.files[hour_s]}], stats)
         raise AssertionError(f"unexpected query: {sql}")
 
     async def execute(self, sql: str, *, params: Any = None, settings: Any = None) -> None:
@@ -155,3 +158,17 @@ async def test_plan_stays_inside_the_lookback() -> None:
         datetime.fromtimestamp(H, UTC)
     )
     assert plan.due == [H - 3 * HOUR_S, H - 2 * HOUR_S, H - HOUR_S, H]
+
+
+async def test_plan_skips_an_hour_that_started_before_the_first_raw_row() -> None:
+    """First boot, or a rebuilt host: rows begin 10 minutes into H."""
+    stub = StubWarehouse(raw={H: 4, H + HOUR_S: 4}, oldest=H + 600)
+    plan = await Archiver(settings(), stub).plan(datetime.fromtimestamp(H + 3 * HOUR_S, UTC))
+    assert plan.due == [H + HOUR_S]
+
+
+async def test_plan_skips_the_hour_the_retention_cutoff_falls_in() -> None:
+    raw = {H - n * HOUR_S: 1 for n in range(10)}
+    now = datetime.fromtimestamp(H + 1800, UTC)  # cutoff lands 30 minutes into H - 3h
+    plan = await Archiver(settings(lookback_s=3 * HOUR_S), StubWarehouse(raw=raw)).plan(now)
+    assert plan.due == [H - 2 * HOUR_S, H - HOUR_S, H]

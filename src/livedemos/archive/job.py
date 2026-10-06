@@ -20,6 +20,10 @@ each file holds, counted from the file itself after writing it. So:
 "Passed" uses the newest committed event, not the clock: after an outage, ingest replays
 the stream oldest first, and an hour waits for the replay to pass it.
 
+Only whole hours: one that started before the first raw row (first boot, a rebuilt host)
+or before the retention cutoff (raw rows expire part by part, so its start may be gone)
+is never archived as if it were complete.
+
 An hour with no raw rows gets no file. Rewriting an hour by hand, whatever it holds, is
 `python -m livedemos.archive --hour ...` (stop the service first).
 """
@@ -51,6 +55,7 @@ _COLUMNS = """
 """
 # What the rollup rebuild reads back. Naming the schema skips inferring it from every file.
 READ_SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, is_bot Bool"
+_TIME_SCHEMA = "event_time DateTime64(3, 'UTC')"
 _HOUR_RANGE = (
     "event_time >= fromUnixTimestamp({from_s:Int64}) "
     "AND event_time < fromUnixTimestamp({to_s:Int64})"
@@ -64,6 +69,14 @@ Result = Literal["written", "mismatch", "error"]
 
 class NothingToArchive(ValueError):
     """A manual rewrite of an hour ClickHouse has no rows for: it would change nothing."""
+
+
+class FewerRows(RuntimeError):
+    """ClickHouse has no more rows for the hour than its file: writing would lose some."""
+
+
+def _ceil_hour(seconds: int) -> int:
+    return -(-seconds // HOUR_S) * HOUR_S
 
 
 class Warehouse(Queryable, Protocol):
@@ -130,8 +143,8 @@ class Archiver:
         if not int(span["n"]):
             return Plan(due=[], archived={})
         first = max(
-            int(span["oldest_s"]) // HOUR_S * HOUR_S,
-            (int(now.timestamp()) - self._settings.lookback_s) // HOUR_S * HOUR_S,
+            _ceil_hour(int(span["oldest_s"])),
+            _ceil_hour(int(now.timestamp()) - self._settings.lookback_s),
         )
         # Hours that ended at least settle_s before the newest committed event.
         end = (int(span["newest_s"]) - self._settings.settle_s) // HOUR_S * HOUR_S
@@ -160,11 +173,20 @@ class Archiver:
         found = {hour_of_path(str(r["path"])) for r in result.rows}
         return {h for h in found if h is not None} & set(hours)
 
-    async def archive_hour(self, hour_s: int, *, manual: bool = False) -> HourResult:
-        """Write one hour's file, replacing any that's there, read it back and record it."""
+    async def archive_hour(
+        self, hour_s: int, *, floor: int = 0, manual: bool = False
+    ) -> HourResult:
+        """Write one hour's file, replacing any that's there, read it back and record it.
+
+        `floor` is what the file holds now. A scheduled write only goes ahead with more
+        rows than that, and never records fewer; `manual` writes whatever ClickHouse has.
+        """
         bounds = {"from_s": hour_s, "to_s": hour_s + HOUR_S}
-        if manual and not await self._raw_count(bounds):
+        raw_before = await self._raw_count(bounds)
+        if manual and not raw_before:
             raise NothingToArchive("ClickHouse has no rows for that hour; the file is unchanged")
+        if not manual and raw_before <= floor:
+            raise FewerRows(f"{raw_before} raw rows, the file has {floor}; not rewritten")
         url = hour_url(self._settings.url, hour_s)
         await self._ch.execute(
             f"INSERT INTO FUNCTION {s3_function(self._settings, 'Parquet')} "
@@ -178,7 +200,10 @@ class Archiver:
             },
         )
         in_file = await self._file_count(url)
-        await self._record(hour_s, in_file)
+        if manual or in_file >= floor:
+            await self._record(hour_s, in_file)
+        else:  # rows vanished mid-write; the previous version is still in the bucket
+            log.error("an hour's file now has fewer rows", extra={"hour_s": hour_s})
         # Counted after the read-back: a row that landed in between is a mismatch now, and
         # the next run writes the hour again because its raw rows outnumber the file's.
         raw = await self._raw_count(bounds)
@@ -192,7 +217,7 @@ class Archiver:
         for hour_s in plan.due:
             hour = datetime.fromtimestamp(hour_s, UTC).isoformat()
             try:
-                outcome = await self.archive_hour(hour_s)
+                outcome = await self.archive_hour(hour_s, floor=archived.get(hour_s, 0))
             except Exception:  # ClickHouse or S3; the hour stays due
                 outcome = HourResult(hour_s, "error", archived.get(hour_s, 0))
                 log.exception("archiving an hour failed", extra={"hour": hour})
@@ -223,7 +248,7 @@ class Archiver:
         for hour_s in sorted(await self.existing_hours(hours)):
             hour = datetime.fromtimestamp(hour_s, UTC).isoformat()
             try:
-                rows = await self._file_count(hour_url(self._settings.url, hour_s))
+                rows = await self._checked_count(hour_s)
             except Exception:
                 unreadable.append(hour_s)
                 log.exception("an archive file can't be read", extra={"hour": hour})
@@ -236,7 +261,7 @@ class Archiver:
     async def _record(self, hour_s: int, rows: int) -> None:
         await self._ch.execute(
             "INSERT INTO archive_hours (hour, rows, written_at) "
-            "SELECT fromUnixTimestamp({hour_s:Int64}), {rows:UInt64}, now64(3)",
+            "SELECT fromUnixTimestamp({hour_s:Int64}), {rows:UInt64}, now64(6)",
             params={"hour_s": hour_s, "rows": rows},
         )
 
@@ -249,6 +274,21 @@ class Archiver:
             f"SELECT count() AS n FROM wiki_edits WHERE {_HOUR_RANGE}", params=bounds
         )
         return int(result.rows[0]["n"])
+
+    async def _checked_count(self, hour_s: int) -> int:
+        """Rows in a file this host didn't write, after checking they're all its hour's."""
+        result = await self._ch.query(
+            "SELECT count() AS n, toUnixTimestamp(min(event_time)) AS lo, "
+            "toUnixTimestamp(max(event_time)) AS hi "
+            f"FROM {s3_function(self._settings, 'Parquet', _TIME_SCHEMA)}",
+            params={"url": hour_url(self._settings.url, hour_s)},
+            settings=S3_SETTINGS,
+        )
+        row = result.rows[0]
+        n = int(row["n"])
+        if n and not hour_s <= int(row["lo"]) <= int(row["hi"]) < hour_s + HOUR_S:
+            raise ValueError("the file holds events from outside its hour")
+        return n
 
     async def _file_count(self, url: str) -> int:
         result = await self._ch.query(
@@ -271,7 +311,7 @@ FROM wiki_edits WHERE {_HOUR_RANGE}
 GROUP BY h
 """
 _RECORDED_COUNTS = """
-SELECT toUnixTimestamp(hour) AS h, argMax(rows, written_at) AS n
+SELECT toUnixTimestamp(hour) AS h, argMax(rows, (written_at, rows)) AS n
 FROM archive_hours
 WHERE hour >= fromUnixTimestamp({from_s:Int64}) AND hour < fromUnixTimestamp({to_s:Int64})
 GROUP BY h

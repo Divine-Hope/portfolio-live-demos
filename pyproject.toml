@@ -17,6 +17,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "duckdb>=1.5.6",
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
