@@ -12,8 +12,13 @@ main() {
     return 2
   fi
   cd /opt/livedemos
+  # ClickHouse reads clickhouse/ through a bind mount, so `up -d` won't restart it when
+  # only those files change. Compare the directory's git tree before and after.
+  local ch_before ch_after
+  ch_before=$(git rev-parse --quiet HEAD:clickhouse 2>/dev/null || true)
   git fetch --quiet --depth 1 origin "$sha"
   git checkout --quiet --force "$sha"
+  ch_after=$(git rev-parse HEAD:clickhouse)
 
   deploy/host/render-env.sh
   if ! grep -q "^IMAGE_TAG=$sha\$" .env; then
@@ -24,6 +29,10 @@ main() {
   local compose=(docker compose -f compose.yaml -f compose.prod.yaml)
   "${compose[@]}" pull --quiet
   "${compose[@]}" up -d --remove-orphans
+  if [[ $ch_before != "$ch_after" ]]; then
+    echo "clickhouse/ changed; restarting clickhouse to load it"
+    "${compose[@]}" restart clickhouse
+  fi
   docker image prune --force --filter "until=168h" >/dev/null
   echo "deployed $sha"
 }

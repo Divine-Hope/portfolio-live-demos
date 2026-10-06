@@ -9,6 +9,13 @@
     <!-- Hard ceiling for the whole server. Queries fail before the kernel OOM-kills us. -->
     <max_server_memory_usage>943718400</max_server_memory_usage> <!-- 900 MiB -->
 
+    <!-- Without this, the server's own count of its memory drifts upwards and is never
+         corrected: in production it claimed 676 MiB while the container used 415 MiB, and
+         after a day it hit the ceiling above and refused queries and merges with real
+         memory to spare. The memory worker resyncs the count with the container's actual
+         (anonymous) memory, from cgroups, every few hundred ms. -->
+    <memory_worker_correct_memory_tracker>1</memory_worker_correct_memory_tracker>
+
     <!-- Caches sized for a dataset of a few GB, not hundreds. -->
     <mark_cache_size>67108864</mark_cache_size> <!-- 64 MiB -->
     <index_mark_cache_size>16777216</index_mark_cache_size> <!-- 16 MiB -->
