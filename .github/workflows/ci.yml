@@ -106,7 +106,7 @@ jobs:
             -e CLICKHOUSE_INGEST_PASSWORD=ci-ingest -e CLICKHOUSE_API_PASSWORD=ci-api \
             -v "$PWD/clickhouse/config.d/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro" \
             -v "$PWD/clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro" \
-            clickhouse/clickhouse-server:25.8
+            clickhouse/clickhouse-server:26.8
           for _ in $(seq 1 60); do curl -fsS localhost:8123/ping && break; sleep 1; done
       - uses: astral-sh/setup-uv@v6
         with:

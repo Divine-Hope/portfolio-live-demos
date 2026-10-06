@@ -22,7 +22,7 @@ x-app: &app
 
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:25.8
+    image: clickhouse/clickhouse-server:26.8
     restart: unless-stopped
     environment:
       # An admin user for migrations from your laptop and integration tests. Local only.

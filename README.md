@@ -83,7 +83,7 @@ docs/             architecture, requirements, decisions, benchmarks, runbook
 
 ## Stack
 
-Python 3.12, asyncio, httpx, FastAPI. ClickHouse 25.8. Plain HTML, CSS and JavaScript for the widget. Docker Compose locally. AWS (EC2, S3, CloudFront, SSM) and Terraform for production, Grafana Cloud for monitoring.
+Python 3.12, asyncio, httpx, FastAPI. ClickHouse 26.8 LTS. Plain HTML, CSS and JavaScript for the widget. Docker Compose locally. AWS (EC2, S3, CloudFront, SSM) and Terraform for production, Grafana Cloud for monitoring.
 
 ## License
 

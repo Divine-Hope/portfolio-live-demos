@@ -14,6 +14,9 @@
             <max_execution_time>30</max_execution_time>
             <!-- A retried, deduplicated insert must not double-count in the rollup either. -->
             <deduplicate_blocks_in_dependent_materialized_views>1</deduplicate_blocks_in_dependent_materialized_views>
+            <!-- On by default since 26.3. Ingest already batches, and exactly-once relies on
+                 a synchronous insert committing under its dedup token (ADR 0006). -->
+            <async_insert>0</async_insert>
             <!-- An insert a second: log only the slow ones (system.query_log, kept 3 days). -->
             <log_queries>1</log_queries>
             <log_queries_min_query_duration_ms>500</log_queries_min_query_duration_ms>
