@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from prometheus_client import start_http_server
 
 from livedemos.archive import metrics
-from livedemos.archive.job import HOUR_S, Archiver
+from livedemos.archive.job import HOUR_S, Archiver, NothingToArchive
 from livedemos.clickhouse import ClickHouse, ClickHouseError
 from livedemos.config import archive_settings, clickhouse_settings
 from livedemos.logs import setup_logging
@@ -54,12 +54,16 @@ async def main(args: argparse.Namespace) -> int:
     archiver = Archiver(settings, ch)
     try:
         if args.hour is not None:
-            outcome = await archiver.archive_hour(args.hour)
+            try:
+                outcome = await archiver.archive_hour(args.hour, manual=True)
+            except NothingToArchive as exc:
+                log.error("not rewritten", extra={"reason": str(exc)})
+                return 2
             log.info("hour rewritten", extra={"result": outcome.result, "rows": outcome.rows})
-            return 0 if outcome.result != "mismatch" else 1
+            return 0 if outcome.result == "written" else 1
         if args.once:
             results = await archiver.run_once(datetime.now(UTC))
-            return 1 if any(r.result in ("mismatch", "error") for r in results) else 0
+            return 0 if all(r.result == "written" for r in results) else 1
         start_http_server(settings.metrics_port)
         await _serve(archiver, settings.interval_s)
         return 0

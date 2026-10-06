@@ -82,14 +82,16 @@ else
 endif
 
 .PHONY: archive-hour
-archive-hour: clickhouse ## Rewrite one hour's Parquet file, even if it exists: HOUR=2026-10-06T09
-	docker compose run --rm archive python -m livedemos.archive --hour $(HOUR)
+archive-hour: clickhouse ## Rewrite one hour's Parquet file from ClickHouse: HOUR=2026-10-06T09 (pauses the service)
+	docker compose stop archive
+	docker compose run --rm archive python -m livedemos.archive --hour $(HOUR); \
+		status=$$?; docker compose start archive; exit $$status
 
 .PHONY: rebuild-rollups
-rebuild-rollups: clickhouse ## Rebuild the per-minute rollup from the archive: FROM=2026-10-01 TO=2026-10-03 (stops ingest)
+rebuild-rollups: clickhouse ## Rebuild the per-minute rollup from the archive: FROM=2026-10-01 TO=2026-10-03 [ALLOW_MISSING=1] (stops ingest)
 	docker compose stop ingest
 	sleep 30   # the rebuild refuses while rows are still arriving
-	docker compose run --rm migrate python -m livedemos.archive.rebuild --from $(FROM) --to $(TO); \
+	docker compose run --rm migrate python -m livedemos.archive.rebuild --from $(FROM) --to $(TO) $(if $(ALLOW_MISSING),--allow-missing); \
 		status=$$?; docker compose start ingest; exit $$status
 
 .PHONY: bench

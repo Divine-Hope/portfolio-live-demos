@@ -91,7 +91,7 @@ Consumes `recentchange` from Wikimedia EventStreams over Server-Sent Events.
 
 The serving store ([ADR 0003](adr/0003-clickhouse-serving-store.md)). Tuned for a 2 GB host: 900 MiB server memory cap, small caches, fewer background threads. Of the system log tables only `query_log` and `part_log` stay, for 3 days, and the application users log only slow queries (over 100 ms for `api`, 500 ms for `ingest`).
 
-Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Three users with least privilege: `migrator` (schema), `ingest` (select and insert) and `api` (read-only, 3 s query limit, 200 MB memory limit). Passwords come from the environment.
+Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Four users with least privilege: `migrator` (schema, and rollup repairs and rebuilds), `ingest` (select and insert), `api` (read-only, 3 s query limit, 200 MB memory limit) and `archiver` (reads raw rows, writes the archive). Passwords come from the environment.
 
 The per-minute rollup is fed by a materialized view in the same INSERT, but not the same transaction. `make reconcile` checks it against raw rows per minute and language and rebuilds what differs.
 
@@ -126,10 +126,11 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 
 Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`, in the archive bucket ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)). ClickHouse writes it with one `INSERT INTO FUNCTION s3(...)`, signed by the instance role, so the archive service holds no AWS credentials. It's its own small service, not part of the API: archiving needs a ClickHouse user that can write to S3, and the API is public and read-only.
 
-- **Only missing hours, only once ingest has passed them.** Every 5 minutes it lists the files for the last 6 days and writes the hours that have none, once ingest has committed events 5 minutes past the hour's end. After an outage, ingest replays the stream oldest first, so an hour waits for the replay. A host rebuilt from scratch has fewer raw rows than its predecessor's files, so the scheduled job never replaces a file; rewriting one is a manual `--hour`.
-- **Checked.** Each file is read back and its row count compared with ClickHouse's.
-- **Rebuilds the rollup.** `python -m livedemos.archive.rebuild` recounts `wiki_edits_per_minute` for whole days from the files, with ingest stopped. It refuses if the rollup has hours the archive doesn't.
-- **Least privilege.** The `archiver` user can read `wiki_edits` and use `s3()`, nothing else. The instance role can put and get under `wikipedia/` and list it, but not delete.
+- **Every hour complete, for as long as raw rows exist.** Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every hour of the last 7 days that ingest has passed by 5 minutes, it compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay.
+- **Never fewer rows.** A file is never replaced by one with fewer rows. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
+- **Recoverable.** The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone. The host can put, get and list under `wikipedia/`, never delete.
+- **Rebuilds the rollup without risking it.** `python -m livedemos.archive.rebuild` needs a file for every hour in the range (or `--allow-missing` for real outages), counts the files into a staging table a day at a time, checks every file produced rows, and only then, with ingest stopped, replaces the range in the live rollup from staging.
+- **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at the archive bucket's URLs; any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it.
 
 ## Data model
 
@@ -196,9 +197,22 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | EC2 t4g.small | free trial until 31 Dec 2026, then about $12 |
 | EBS 25 GB gp3 + public IPv4 | about $6 |
 | CloudFront, Grafana Cloud, Cloudflare Pages | free tiers |
-| S3 | cents |
+| S3: fallback snapshot and Parquet archive | about 1 cent at first, about 6 cents after a year (below) |
 
 About $6 a month until the end of 2026. The real bill goes in the README once there is one.
+
+**The archive, estimated 2026-10-06.** Production kept 9,302 edits an hour over the previous 24 hours. Parquet with zstd took 36 bytes an edit in the local archive (fake stream, so real titles may cost more; checked against production files after the first deploy). That's about 0.34 MB an hour, 8 MB a day, 0.25 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
+
+| Item | Price | A month, once a year is stored |
+|---|---|---|
+| Newest month, S3 Standard | $0.023 per GB-month | 0.25 GB, $0.006 |
+| Months 2 to 6, Standard-IA | $0.0125 per GB-month | 1.2 GB, $0.015 |
+| Months 7 to 12, Glacier Instant Retrieval | $0.004 per GB-month | 1.5 GB, $0.006 |
+| Writes (730) and listings (about 730) | $0.005 per 1,000 | $0.007 |
+| Read-backs (about 2,200) | $0.004 per 10,000 | under $0.001 |
+| Lifecycle moves to IA and to Glacier IR | $0.01 and $0.02 per 1,000 | $0.022 |
+
+About 6 cents a month after a year, growing about half a cent a month after that. Files are 340 KB, above Standard-IA's 128 KB minimum, and they stay in each class longer than its minimum (30 and 90 days). Rebuilding a month of rollups reads 0.25 GB: under a cent in retrieval fees.
 
 ## Build order
 

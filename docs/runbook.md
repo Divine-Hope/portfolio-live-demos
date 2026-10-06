@@ -118,15 +118,23 @@ from its bookmark. Locally, `make reconcile REPAIR=1` does all three.
 ## The Parquet archive
 
 The `archive` service writes each finished hour to S3 within about 5 minutes of ingest
-passing it, and logs every file. Its metrics: `archive_newest_hour_timestamp_seconds`
-(should trail the clock by one to two hours) and `archive_failed_hours` (should be 0).
+passing it, logs every file, and rewrites an hour whose raw rows grow later. Healthy:
+`archive_hours_behind` is 0 and `archive_newest_hour_timestamp_seconds` trails the clock
+by one to two hours.
 
-- **Rewrite an hour** (a file is wrong, or a replay filled an hour after it was
-  archived): `docker compose -f compose.yaml -f compose.prod.yaml run --rm archive python -m livedemos.archive --hour 2026-10-06T09`.
-  It replaces the file with what ClickHouse has now. Locally: `make archive-hour HOUR=...`.
-- **Rebuild the rollup from the archive**, for whole UTC days, `--to` exclusive. Stop
-  ingest first; the rebuild refuses while rows are arriving and if the archive is missing
-  any hour the rollup has:
+- **Rewrite an hour** (a file that can't be read, or one you want rebuilt from what
+  ClickHouse has now). Stop the service first so the two don't write the same file:
+
+  ```
+  docker compose -f compose.yaml -f compose.prod.yaml stop archive
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm archive python -m livedemos.archive --hour 2026-10-06T09
+  docker compose -f compose.yaml -f compose.prod.yaml start archive
+  ```
+
+  It refuses an hour ClickHouse has no rows for (exit 2). The replaced version stays in
+  the bucket for 30 days. Locally: `make archive-hour HOUR=...`.
+- **Rebuild the rollup from the archive**, for whole UTC days, up to 31 at a time, `--to`
+  exclusive. Stop ingest first:
 
   ```
   docker compose -f compose.yaml -f compose.prod.yaml stop ingest
@@ -135,6 +143,10 @@ passing it, and logs every file. Its metrics: `archive_newest_hour_timestamp_sec
   docker compose -f compose.yaml -f compose.prod.yaml start ingest
   ```
 
+  It refuses while rows are arriving, and if any hour in the range has no file. An hour
+  with no file is either an outage or an hour that never got archived. Check
+  `ingest_gaps`; if they're outages, add `--allow-missing` to rebuild them as empty.
+  The live rollup only changes once every file has been read into a staging table.
   Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days,
   `reconcile` (below) then confirms the rollup matches raw again.
 
@@ -154,7 +166,8 @@ These are the signals; the alerts themselves are M4.
 | `rate(api_activity_queries_total{cache=~"timeout\|cooldown\|shed"}[5m]) > 0` | "Query it" is shedding load. |
 | `increase(api_activity_query_failures_total[5m]) > 0` | ClickHouse failed a "Query it" query. |
 | `time() - archive_newest_hour_timestamp_seconds > 3 * 3600` | No new hour archived for three hours: the archive service, S3 or ingest is stuck. |
-| `archive_failed_hours > 0` | An hour couldn't be written, or its file didn't match ClickHouse. It's retried every run; a mismatch needs `--hour`. |
+| `archive_hours_behind > 0` for 30 minutes | Hours whose file holds fewer rows than ClickHouse, or can't be read. Short-lived ones are retried; an unreadable file needs `--hour`. |
+| `time() - archive_oldest_behind_hour_timestamp_seconds > 5 * 86400` | An hour has been behind for 5 days; its raw rows expire after 7. |
 | `ClickHouse MemoryTrackingUncorrected - MemoryTracking` growing | The memory count is drifting. The memory worker corrects it; if this keeps growing, that correction is off. |
 
 For a slow query or a merge backlog, `system.query_log` (slow application queries) and

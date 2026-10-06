@@ -57,8 +57,10 @@
                 <query>GRANT DROP TABLE ON demos.schema_migrations_lock</query>
                 <!-- Reconcile repairs only while no ingest insert runs: it must see them. -->
                 <query>GRANT SELECT(query_id, current_database, user) ON system.processes</query>
-                <!-- Rebuilding the rollup reads the Parquet archive with s3(). -->
-                <query>GRANT S3, CREATE TEMPORARY TABLE ON *.*</query>
+                <!-- Rebuilding the rollup: read the archive (only), stage, then replace. -->
+                <query>GRANT READ ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>
+                <query>GRANT CREATE TEMPORARY TABLE ON *.*</query>
+                <query>GRANT TRUNCATE ON demos.wiki_edits_per_minute_staging</query>
             </grants>
         </migrator>
         <ingest>
@@ -89,9 +91,11 @@
             <networks><ip>::/0</ip></networks>
             <grants>
                 <query>GRANT SELECT ON demos.wiki_edits</query>
-                <!-- s3() as a source and a sink. A table function needs a temporary
-                     table. Which buckets it can reach is the instance role's call. -->
-                <query>GRANT S3, CREATE TEMPORARY TABLE ON *.*</query>
+                <query>GRANT SELECT, INSERT ON demos.archive_hours</query>
+                <!-- s3() reaches only the archive bucket (production) or the local stand-in;
+                     any other URL is refused. A table function needs a temporary table. -->
+                <query>GRANT READ, WRITE ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>
+                <query>GRANT CREATE TEMPORARY TABLE ON *.*</query>
             </grants>
         </archiver>
     </users>

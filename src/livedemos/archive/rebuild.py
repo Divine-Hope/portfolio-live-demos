@@ -3,8 +3,15 @@
     python -m livedemos.archive.rebuild --from 2026-10-01 --to 2026-10-03   # [from, to)
 
 For when the rollup is lost or wrong and the raw rows are gone (older than 7 days, or a
-host rebuilt from scratch). Deletes the rollup's minutes in the range, then recounts them
-from the archive's hour files.
+host rebuilt from scratch). Nothing live changes until the replacement is ready:
+
+1. Every hour in the range must have a file. An hour without one is either a real outage
+   (nothing was ingested) or an hour that never got archived, and the files can't tell
+   which. Check `ingest_gaps`, then pass `--allow-missing` to accept them as empty.
+2. Count the files into `wiki_edits_per_minute_staging`, one day per query, and check
+   every hour that has a file produced rows.
+3. With ingest stopped, replace the range in the live rollup from staging. Only this
+   step touches live data, and it reads nothing from S3.
 
 Like `reconcile --repair`, it needs ingest stopped (`make rebuild-rollups` does that), and
 it runs as `migrator`, the user that can rewrite tables.
@@ -18,11 +25,18 @@ import logging
 import sys
 from datetime import UTC, date, datetime, timedelta
 
-from livedemos.archive.job import HOUR_S, READ_SCHEMA, Archiver, days_glob, s3_function
+from livedemos.archive.job import (
+    HOUR_S,
+    READ_SCHEMA,
+    S3_SETTINGS,
+    Archiver,
+    days_glob,
+    s3_function,
+)
 from livedemos.clickhouse import ClickHouse
 from livedemos.config import ArchiveSettings, archive_settings, clickhouse_settings
 from livedemos.logs import setup_logging
-from livedemos.reconcile import (
+from livedemos.maintenance import (
     REBUILD_INSERT_SETTINGS,
     IngestRunning,
     require_ingest_still_stopped,
@@ -31,13 +45,19 @@ from livedemos.reconcile import (
 
 log = logging.getLogger(__name__)
 
-MAX_DAYS = 120  # one glob per run; a longer range is several runs
+MAX_DAYS = 31
+DAY_S = 24 * HOUR_S
 
 _RANGE = "minute >= fromUnixTimestamp({from_s:Int64}) AND minute < fromUnixTimestamp({to_s:Int64})"
+_COLUMNS = "minute, lang, edits, bot_edits"
 
 
 class ArchiveIncomplete(RuntimeError):
-    """The rollup has hours the archive doesn't: rebuilding would lose them."""
+    """Hours in the range have no file, or a file produced no rows."""
+
+
+def _iso(hour_s: int) -> str:
+    return datetime.fromtimestamp(hour_s, UTC).isoformat()
 
 
 async def rebuild(
@@ -46,6 +66,7 @@ async def rebuild(
     first: date,
     end: date,
     *,
+    allow_missing: bool = False,
     quiet: timedelta = timedelta(seconds=30),
 ) -> int:
     """Rebuild the rollup for days [first, end) from the archive. Returns rollup rows."""
@@ -53,40 +74,62 @@ async def rebuild(
     if not 0 < days <= MAX_DAYS:
         raise ValueError(f"the range must cover 1 to {MAX_DAYS} days")
     from_s = int(datetime(first.year, first.month, first.day, tzinfo=UTC).timestamp())
-    to_s = from_s + days * 24 * HOUR_S
+    to_s = from_s + days * DAY_S
     bounds = {"from_s": from_s, "to_s": to_s}
     hours = list(range(from_s, to_s, HOUR_S))
+
     archived = await Archiver(settings, ch).existing_hours(hours)
-    rolled = await ch.query(
-        f"SELECT DISTINCT toUnixTimestamp(toStartOfHour(minute)) AS h "
-        f"FROM wiki_edits_per_minute WHERE {_RANGE}",
+    missing = sorted(set(hours) - archived)
+    if missing and not allow_missing:
+        raise ArchiveIncomplete(
+            f"{len(missing)} hour(s) have no file, first {_iso(missing[0])}. If they're "
+            "outages (see ingest_gaps), rerun with --allow-missing to rebuild them as empty."
+        )
+
+    await ch.execute("TRUNCATE TABLE wiki_edits_per_minute_staging")
+    source = s3_function(settings, "Parquet", READ_SCHEMA)
+    for day_s in range(from_s, to_s, DAY_S):
+        day_hours = [h for h in range(day_s, day_s + DAY_S, HOUR_S) if h in archived]
+        if not day_hours:
+            continue
+        await ch.execute(
+            f"""
+            INSERT INTO wiki_edits_per_minute_staging ({_COLUMNS})
+            SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
+            FROM {source}
+            WHERE event_time >= fromUnixTimestamp({{from_s:Int64}})
+              AND event_time < fromUnixTimestamp({{to_s:Int64}})
+            GROUP BY minute, lang
+            """,
+            params={
+                "url": days_glob(settings.url, day_hours),
+                "from_s": day_s,
+                "to_s": day_s + DAY_S,
+            },
+            settings={**REBUILD_INSERT_SETTINGS, **S3_SETTINGS},
+        )
+    staged = await ch.query(
+        "SELECT DISTINCT toUnixTimestamp(toStartOfHour(minute)) AS h "
+        f"FROM wiki_edits_per_minute_staging WHERE {_RANGE}",
         params=bounds,
     )
-    missing = sorted({int(r["h"]) for r in rolled.rows} - archived)
-    if missing:
-        first_missing = datetime.fromtimestamp(missing[0], UTC).isoformat()
-        raise ArchiveIncomplete(
-            f"{len(missing)} hour(s) in the rollup have no archive file, from {first_missing}"
-        )
+    empty = sorted(archived - {int(r["h"]) for r in staged.rows})
+    if empty:  # a file is only written for an hour with rows
+        raise ArchiveIncomplete(f"{len(empty)} file(s) produced no rows, first {_iso(empty[0])}")
+
     mark = await require_ingest_stopped(ch, quiet=quiet)
     await ch.execute(
         f"ALTER TABLE wiki_edits_per_minute DELETE WHERE {_RANGE} SETTINGS mutations_sync = 1",
         params=bounds,
     )
-    source = s3_function(settings, "Parquet", READ_SCHEMA)
     await ch.execute(
-        f"""
-        INSERT INTO wiki_edits_per_minute (minute, lang, edits, bot_edits)
-        SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
-        FROM {source}
-        WHERE event_time >= fromUnixTimestamp({{from_s:Int64}})
-          AND event_time < fromUnixTimestamp({{to_s:Int64}})
-        GROUP BY minute, lang
-        """,
-        params={"url": days_glob(settings.url, hours), **bounds},
-        settings={**REBUILD_INSERT_SETTINGS, "use_hive_partitioning": "0"},
+        f"INSERT INTO wiki_edits_per_minute ({_COLUMNS}) "
+        f"SELECT {_COLUMNS} FROM wiki_edits_per_minute_staging WHERE {_RANGE}",
+        params=bounds,
+        settings=REBUILD_INSERT_SETTINGS,
     )
     await require_ingest_still_stopped(ch, mark)
+    await ch.execute("TRUNCATE TABLE wiki_edits_per_minute_staging")
     result = await ch.query(
         f"SELECT count() AS n FROM wiki_edits_per_minute WHERE {_RANGE}", params=bounds
     )
@@ -97,7 +140,9 @@ async def _main(args: argparse.Namespace) -> int:
     setup_logging()
     ch = ClickHouse(clickhouse_settings())
     try:
-        rows = await rebuild(ch, archive_settings(), args.first, args.end)
+        rows = await rebuild(
+            ch, archive_settings(), args.first, args.end, allow_missing=args.allow_missing
+        )
     except (IngestRunning, ArchiveIncomplete) as exc:
         log.error("not rebuilt", extra={"reason": str(exc)})
         return 1
@@ -111,6 +156,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--from", dest="first", type=date.fromisoformat, required=True)
     parser.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
+    parser.add_argument(
+        "--allow-missing", action="store_true", help="rebuild hours with no file as empty"
+    )
     return asyncio.run(_main(parser.parse_args()))
 
 

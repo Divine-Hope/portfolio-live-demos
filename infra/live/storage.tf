@@ -35,8 +35,18 @@ module "archive" {
   name   = "${var.project}-archive-${local.bucket_suffix}"
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "archive" {
+# A rewrite replaces an hour's object, and S3 keeps the last write. Versioning keeps the
+# one it replaced, for 30 days, so a bad rewrite can be undone.
+resource "aws_s3_bucket_versioning" "archive" {
   bucket = module.archive.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "archive" {
+  bucket     = module.archive.id
+  depends_on = [aws_s3_bucket_versioning.archive]
 
   rule {
     id     = "cheaper-with-age"
@@ -51,6 +61,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "archive" {
     transition {
       days          = 180
       storage_class = "GLACIER_IR"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
     }
 
     abort_incomplete_multipart_upload {

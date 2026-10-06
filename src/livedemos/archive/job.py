@@ -1,30 +1,35 @@
-"""Write each finished hour of raw edits to one Parquet file on S3.
+"""Write each finished hour of raw edits to one Parquet file on S3, and keep it complete.
 
     <url>/dt=YYYY-MM-DD/hour=HH.parquet
 
 ClickHouse does the work: one `INSERT INTO FUNCTION s3(...) SELECT ...` per hour, signed
 with the host's instance role, so no credentials pass through Python.
 
-Which hours: every hour inside the lookback that has finished, that ingest has moved past
-by `settle_s`, and that has no file yet. So the job only ever adds files. A host rebuilt
-from scratch has fewer raw rows for recent hours than the host before it; it must not
-replace that host's complete files with thinner ones. Overwriting an hour is a deliberate,
-manual act (`python -m livedemos.archive --hour ...`).
+Which hours: every hour inside the lookback that has finished, that ingest has passed by
+`settle_s`, and whose raw rows outnumber what its file holds. `archive_hours` records what
+each file holds, counted from the file itself after writing it. So:
 
-"Moved past" uses the newest committed event, not the clock. After an outage, ingest
-replays the stream from its bookmark, oldest first, and an hour is archived only once the
-replay has passed it.
+- a new hour is written once ingest has passed it;
+- an hour that gains rows later (a late event, a replay after an outage) is written
+  again, for as long as its raw rows are kept;
+- a file that didn't match its raw rows when written is fixed on the next run;
+- a file is never replaced by one with fewer rows. A host rebuilt from scratch has fewer
+  raw rows than its predecessor wrote; it finds those files (they aren't in its new
+  `archive_hours`), records what they hold, and leaves them alone.
 
-An hour with no raw rows gets no file: there is nothing to keep, and it stays eligible in
-case a replay fills it. Every file written is read back and its row count compared with
-ClickHouse's.
+"Passed" uses the newest committed event, not the clock: after an outage, ingest replays
+the stream oldest first, and an hour waits for the replay to pass it.
+
+An hour with no raw rows gets no file. Rewriting an hour by hand, whatever it holds, is
+`python -m livedemos.archive --hour ...` (stop the service first).
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
 
@@ -35,10 +40,11 @@ from livedemos.config import ArchiveSettings
 log = logging.getLogger(__name__)
 
 HOUR_S = 3_600
-_FILE = re.compile(r"dt=(\d{4}-\d{2}-\d{2})/hour=(\d{2})\.parquet$")
+_FILE = re.compile(r"dt=(\d{4}-\d{2}-\d{2})/hour=([01]\d|2[0-3])\.parquet$")
 
 # The archive's columns: the edit itself. The resume bookmark and ingest order (sse_id,
-# ingest_seq) are ingest's bookkeeping, not data. Parquet has no UUID type.
+# ingest_seq) are ingest's bookkeeping, not data. The id is a string, not Parquet's UUID
+# logical type, so every engine reads it the same way.
 _COLUMNS = """
     toString(event_id) AS event_id, event_time, ingested_at, wiki, lang, type,
     namespace, title, is_bot
@@ -51,9 +57,13 @@ _HOUR_RANGE = (
 )
 # The path in an `s3()` URL is matched by ClickHouse's own globbing; hive partitioning
 # is off, or ClickHouse would expect `dt` as a column on write.
-_S3_SETTINGS = {"use_hive_partitioning": "0"}
+S3_SETTINGS = {"use_hive_partitioning": "0"}
 
-Result = Literal["written", "empty", "mismatch", "error"]
+Result = Literal["written", "mismatch", "error"]
+
+
+class NothingToArchive(ValueError):
+    """A manual rewrite of an hour ClickHouse has no rows for: it would change nothing."""
 
 
 class Warehouse(Queryable, Protocol):
@@ -72,10 +82,14 @@ def days_glob(base: str, hours: list[int]) -> str:
 
 
 def hour_of_path(path: str) -> int | None:
+    """The hour a file holds, or None for anything that isn't an hour file."""
     match = _FILE.search(path)
     if not match:
         return None
-    day = datetime.strptime(match[1], "%Y-%m-%d").replace(tzinfo=UTC)
+    try:
+        day = datetime.strptime(match[1], "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError:  # 2026-02-30
+        return None
     return int(day.timestamp()) + int(match[2]) * HOUR_S
 
 
@@ -95,13 +109,14 @@ def s3_function(settings: ArchiveSettings, fmt: str, structure: str | None = Non
 class HourResult:
     hour_s: int
     result: Result
-    rows: int
+    rows: int  # rows in the file after this run
 
 
 @dataclass(frozen=True, slots=True)
 class Plan:
     due: list[int]  # hours to write, oldest first
-    newest_archived: int | None  # newest hour already in S3, among those considered
+    archived: dict[int, int]  # hour -> rows its file holds, for the hours considered
+    unreadable: list[int] = field(default_factory=list)  # files found but not readable
 
 
 class Archiver:
@@ -110,40 +125,46 @@ class Archiver:
         self._ch = ch
 
     async def plan(self, now: datetime) -> Plan:
-        """Hours that have finished, that ingest has passed, and that have no file yet."""
+        """Hours that have finished, that ingest has passed, and that their file lacks."""
         span = (await self._ch.query(_RAW_SPAN)).rows[0]
         if not int(span["n"]):
-            return Plan(due=[], newest_archived=None)
+            return Plan(due=[], archived={})
         first = max(
             int(span["oldest_s"]) // HOUR_S * HOUR_S,
             (int(now.timestamp()) - self._settings.lookback_s) // HOUR_S * HOUR_S,
         )
         # Hours that ended at least settle_s before the newest committed event.
         end = (int(span["newest_s"]) - self._settings.settle_s) // HOUR_S * HOUR_S
-        hours = list(range(first, end, HOUR_S))
-        if not hours:
-            return Plan(due=[], newest_archived=None)
-        existing = await self.existing_hours(hours)
-        return Plan(
-            due=[h for h in hours if h not in existing],
-            newest_archived=max(existing & set(hours), default=None),
-        )
+        if end <= first:
+            return Plan(due=[], archived={})
+        bounds = {"from_s": first, "to_s": end}
+        raw = await self._hour_counts(_RAW_COUNTS, bounds)
+        archived = await self._hour_counts(_RECORDED_COUNTS, bounds)
+        unreadable: list[int] = []
+        unrecorded = [h for h in raw if h not in archived]
+        if unrecorded:
+            adopted, unreadable = await self._adopt(unrecorded)
+            archived |= adopted
+        # An unreadable file is never overwritten automatically: it may hold more than
+        # this host has. It's reported, and `--hour` replaces it on purpose.
+        due = sorted(h for h, n in raw.items() if n > archived.get(h, 0) and h not in unreadable)
+        return Plan(due=due, archived=archived, unreadable=unreadable)
 
     async def existing_hours(self, hours: list[int]) -> set[int]:
         # Format `One` lists the matching files without reading them.
         result = await self._ch.query(
             f"SELECT _path AS path FROM {s3_function(self._settings, 'One')}",
             params={"url": days_glob(self._settings.url, hours)},
-            settings=_S3_SETTINGS,
+            settings=S3_SETTINGS,
         )
         found = {hour_of_path(str(r["path"])) for r in result.rows}
-        return {h for h in found if h is not None}
+        return {h for h in found if h is not None} & set(hours)
 
-    async def archive_hour(self, hour_s: int) -> HourResult:
-        """Write one hour's file, replacing any that's there, and check it."""
+    async def archive_hour(self, hour_s: int, *, manual: bool = False) -> HourResult:
+        """Write one hour's file, replacing any that's there, read it back and record it."""
         bounds = {"from_s": hour_s, "to_s": hour_s + HOUR_S}
-        if not await self._raw_count(bounds):
-            return HourResult(hour_s, "empty", 0)
+        if manual and not await self._raw_count(bounds):
+            raise NothingToArchive("ClickHouse has no rows for that hour; the file is unchanged")
         url = hour_url(self._settings.url, hour_s)
         await self._ch.execute(
             f"INSERT INTO FUNCTION {s3_function(self._settings, 'Parquet')} "
@@ -151,47 +172,77 @@ class Archiver:
             "ORDER BY event_time, event_id",
             params={"url": url, **bounds},
             settings={
-                **_S3_SETTINGS,
-                "s3_truncate_on_insert": "1",  # rerunning an hour replaces its file
+                **S3_SETTINGS,
+                "s3_truncate_on_insert": "1",  # replaces the file
                 "output_format_parquet_compression_method": "zstd",
             },
         )
         in_file = await self._file_count(url)
-        # Counted after writing: a late row that landed in between shows up as a mismatch.
+        await self._record(hour_s, in_file)
+        # Counted after the read-back: a row that landed in between is a mismatch now, and
+        # the next run writes the hour again because its raw rows outnumber the file's.
         raw = await self._raw_count(bounds)
         return HourResult(hour_s, "written" if in_file == raw else "mismatch", in_file)
 
     async def run_once(self, now: datetime) -> list[HourResult]:
         """Archive every due hour. One hour failing doesn't stop the others."""
         plan = await self.plan(now)
-        newest = plan.newest_archived
+        archived = dict(plan.archived)
         results: list[HourResult] = []
-        failed = 0
         for hour_s in plan.due:
             hour = datetime.fromtimestamp(hour_s, UTC).isoformat()
             try:
                 outcome = await self.archive_hour(hour_s)
-            except Exception:  # ClickHouse or S3; the hour stays due for the next run
-                failed += 1
-                results.append(HourResult(hour_s, "error", 0))
-                metrics.HOURS.labels(result="error").inc()
+            except Exception:  # ClickHouse or S3; the hour stays due
+                outcome = HourResult(hour_s, "error", archived.get(hour_s, 0))
                 log.exception("archiving an hour failed", extra={"hour": hour})
-                continue
+            else:
+                archived[hour_s] = outcome.rows
+                if outcome.result == "written":
+                    metrics.ROWS.inc(outcome.rows)
+                    log.info("archived hour", extra={"hour": hour, "rows": outcome.rows})
+                else:
+                    log.error("archived hour doesn't match raw rows", extra={"hour": hour})
             results.append(outcome)
             metrics.HOURS.labels(result=outcome.result).inc()
-            if outcome.result == "empty":
-                continue
-            if outcome.result == "written":
-                metrics.ROWS.inc(outcome.rows)
-                newest = max(newest or hour_s, hour_s)
-                log.info("archived hour", extra={"hour": hour, "rows": outcome.rows})
-            else:
-                failed += 1
-                log.error("archived hour doesn't match raw rows", extra={"hour": hour})
-        if newest is not None:
-            metrics.NEWEST_HOUR.set(newest)
-        metrics.FAILED.set(failed)
+        behind = sorted([r.hour_s for r in results if r.result != "written"] + plan.unreadable)
+        metrics.BEHIND.set(len(behind))
+        metrics.OLDEST_BEHIND.set(behind[0] if behind else 0)
+        if archived:
+            metrics.NEWEST_HOUR.set(max(archived))
+        if not behind:
+            metrics.LAST_SUCCESS.set(time.time())
         return results
+
+    async def _adopt(self, hours: list[int]) -> tuple[dict[int, int], list[int]]:
+        """Files with no record (a rebuilt host): record what they hold, from the files.
+
+        Returns (hour -> rows, hours whose file couldn't be read)."""
+        adopted: dict[int, int] = {}
+        unreadable: list[int] = []
+        for hour_s in sorted(await self.existing_hours(hours)):
+            hour = datetime.fromtimestamp(hour_s, UTC).isoformat()
+            try:
+                rows = await self._file_count(hour_url(self._settings.url, hour_s))
+            except Exception:
+                unreadable.append(hour_s)
+                log.exception("an archive file can't be read", extra={"hour": hour})
+                continue
+            await self._record(hour_s, rows)
+            adopted[hour_s] = rows
+            log.info("found an unrecorded file", extra={"hour": hour, "rows": rows})
+        return adopted, unreadable
+
+    async def _record(self, hour_s: int, rows: int) -> None:
+        await self._ch.execute(
+            "INSERT INTO archive_hours (hour, rows, written_at) "
+            "SELECT fromUnixTimestamp({hour_s:Int64}), {rows:UInt64}, now64(3)",
+            params={"hour_s": hour_s, "rows": rows},
+        )
+
+    async def _hour_counts(self, sql: str, bounds: dict[str, int]) -> dict[int, int]:
+        result = await self._ch.query(sql, params=bounds)
+        return {int(r["h"]): int(r["n"]) for r in result.rows}
 
     async def _raw_count(self, bounds: dict[str, int]) -> int:
         result = await self._ch.query(
@@ -203,7 +254,7 @@ class Archiver:
         result = await self._ch.query(
             f"SELECT count() AS n FROM {s3_function(self._settings, 'Parquet')}",
             params={"url": url},
-            settings=_S3_SETTINGS,
+            settings=S3_SETTINGS,
         )
         return int(result.rows[0]["n"])
 
@@ -213,4 +264,15 @@ SELECT toUnixTimestamp(min(event_time)) AS oldest_s,
        toUnixTimestamp(max(event_time)) AS newest_s,
        count() AS n
 FROM wiki_edits
+"""
+_RAW_COUNTS = f"""
+SELECT toUnixTimestamp(toStartOfHour(event_time)) AS h, count() AS n
+FROM wiki_edits WHERE {_HOUR_RANGE}
+GROUP BY h
+"""
+_RECORDED_COUNTS = """
+SELECT toUnixTimestamp(hour) AS h, argMax(rows, written_at) AS n
+FROM archive_hours
+WHERE hour >= fromUnixTimestamp({from_s:Int64}) AND hour < fromUnixTimestamp({to_s:Int64})
+GROUP BY h
 """

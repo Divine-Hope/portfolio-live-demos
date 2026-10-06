@@ -148,9 +148,9 @@ class ArchiveSettings(BaseSettings):
     # An hour is archived once ingest has committed events this far past its end, so
     # late events and a replay after an outage have landed first.
     settle_s: Annotated[int, Field(ge=0)] = 300
-    # How far back to look for missing hours. Inside raw retention (7 days), so every
-    # hour considered still has its rows.
-    lookback_s: Annotated[int, Field(gt=0, le=7 * 24 * 3_600)] = 6 * 24 * 3_600
+    # How far back to check hours against their files: all of raw retention. Raw rows
+    # expire by whole days, so every hour in the last 7 days still has all its rows.
+    lookback_s: Annotated[int, Field(gt=0, le=7 * 24 * 3_600)] = 7 * 24 * 3_600
     metrics_port: Annotated[int, Field(ge=1, le=65_535)] = 9102
 
     @model_validator(mode="after")
