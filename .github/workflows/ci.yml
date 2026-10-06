@@ -143,6 +143,7 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           IMAGE_TAG=0000000000000000000000000000000000000000 API_ORIGIN_SECRET=ci \
+            ARCHIVE_URL=https://example.invalid/wikipedia/edits \
             docker compose -f compose.yaml -f compose.prod.yaml config --quiet
       - name: Lint the host scripts
         run: shellcheck deploy/host/*.sh deploy/ci/*.sh
