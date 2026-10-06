@@ -5,7 +5,7 @@ from prometheus_client import Counter, Gauge, Histogram
 EVENTS = Counter(
     "ingest_events_total",
     "Events read from the stream, by outcome.",
-    ["outcome"],  # kept, duplicate, canary, other_wiki, other_type, malformed, future
+    ["outcome"],  # kept, duplicate, canary, other_wiki, other_type, malformed, future, before_floor
 )
 ROWS_WRITTEN = Counter("ingest_rows_written_total", "Rows committed to ClickHouse.")
 BATCHES = Counter("ingest_batches_total", "Batches flushed, by result.", ["result"])

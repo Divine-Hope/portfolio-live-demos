@@ -17,6 +17,9 @@ MATERIALIZE, and so on).
 
 Runs as the `migrator` user, the only one allowed to change the schema. Ingest and the API
 only read and write rows.
+
+After migrating, the command line also restores a host that has lost its raw rows from the
+Parquet archive (archive/restore.py).
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from datetime import UTC, datetime
 from importlib.resources import files
 
 from livedemos.clickhouse import ClickHouse, ClickHouseError
-from livedemos.config import clickhouse_settings
+from livedemos.config import archive_settings, clickhouse_settings
 from livedemos.logs import setup_logging
 
 log = logging.getLogger(__name__)
@@ -210,6 +213,26 @@ def _quote(text: str) -> str:
     return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+async def _restore(ch: ClickHouse) -> None:
+    # Imported here: the restore uses this module's lock.
+    from livedemos.archive.restore import restore
+
+    settings = archive_settings()
+    if not settings.restore:
+        log.warning("restoring from the archive is off (ARCHIVE_RESTORE=false)")
+        return
+    done = await restore(ch, settings, now=datetime.now(UTC))
+    if done.rollup_hours or done.raw_hours:
+        log.info(
+            "restored from the archive",
+            extra={
+                "rollup_hours": len(done.rollup_hours),
+                "raw_hours": len(done.raw_hours),
+                "raw_rows": done.raw_rows,
+            },
+        )
+
+
 async def _main(unlock: bool) -> None:
     setup_logging()
     ch = ClickHouse(clickhouse_settings())
@@ -219,6 +242,7 @@ async def _main(unlock: bool) -> None:
             log.info("lock removed")
         else:
             await migrate(ch)
+            await _restore(ch)
     finally:
         await ch.aclose()
 

@@ -38,3 +38,7 @@ chmod 700 /opt/livedemos
 install -m 644 /opt/livedemos/deploy/host/livedemos.service /etc/systemd/system/livedemos.service
 systemctl daemon-reload
 systemctl enable --now livedemos.service
+
+# Host upkeep (security updates) last, and best effort: the stack is already running,
+# and every deploy runs it again.
+/opt/livedemos/deploy/host/harden.sh || echo "host upkeep failed; the next deploy retries it"

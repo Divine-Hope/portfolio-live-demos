@@ -41,6 +41,7 @@ from livedemos.config import ArchiveSettings, archive_settings, clickhouse_setti
 from livedemos.logs import setup_logging
 from livedemos.maintenance import (
     REBUILD_INSERT_SETTINGS,
+    IngestMark,
     IngestRunning,
     require_ingest_still_stopped,
     require_ingest_stopped,
@@ -72,15 +73,22 @@ async def rebuild(
     *,
     allow_missing: bool = False,
     quiet: timedelta = timedelta(seconds=30),
+    mark: IngestMark | None = None,
 ) -> int:
-    """Rebuild the rollup for days [first, end) from the archive. Returns rollup rows."""
+    """Rebuild the rollup for days [first, end) from the archive. Returns rollup rows.
+
+    `mark`: where ingest was before the caller started; checked before anything is
+    replaced, so ingest writing at any point since makes it refuse.
+    """
     days = (end - first).days
     if not 0 < days <= MAX_DAYS:
         raise ValueError(f"the range must cover 1 to {MAX_DAYS} days")
     from_s = int(datetime(first.year, first.month, first.day, tzinfo=UTC).timestamp())
     to_s = from_s + days * DAY_S
     async with exclusive(ch):
-        return await _rebuild(ch, settings, from_s, to_s, allow_missing=allow_missing, quiet=quiet)
+        return await _rebuild(
+            ch, settings, from_s, to_s, allow_missing=allow_missing, quiet=quiet, mark=mark
+        )
 
 
 async def _rebuild(
@@ -91,6 +99,7 @@ async def _rebuild(
     *,
     allow_missing: bool,
     quiet: timedelta,
+    mark: IngestMark | None,
 ) -> int:
     bounds = {"from_s": from_s, "to_s": to_s}
     hours = list(range(from_s, to_s, HOUR_S))
@@ -149,7 +158,10 @@ async def _rebuild(
             f"{len(short)} file(s) don't hold the rows recorded for them, first {_iso(short[0])}"
         )
 
-    mark = await require_ingest_stopped(ch, quiet=quiet)
+    if mark is None:
+        mark = await require_ingest_stopped(ch, quiet=quiet)
+    else:
+        await require_ingest_still_stopped(ch, mark)
     months = sorted({f"{datetime.fromtimestamp(d, UTC):%Y%m}" for d in range(from_s, to_s, DAY_S)})
     # Everything else in those months as it is now, including hours with no file, so the
     # swap changes only the hours rebuilt from the archive.

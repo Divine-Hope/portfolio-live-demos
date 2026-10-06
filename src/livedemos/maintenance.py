@@ -77,4 +77,10 @@ async def require_ingest_still_stopped(ch: ClickHouse, mark: IngestMark) -> None
 # previous rebuild's), which dedup would drop silently, after the DELETE. 26.8 doesn't
 # dedup INSERT ... SELECT by default, but `deduplicate_insert_select` can turn it on, and
 # then it wins over `insert_deduplicate`. Rebuilds are deliberate: turn both off.
-REBUILD_INSERT_SETTINGS = {"insert_deduplicate": "0", "deduplicate_insert_select": "disable"}
+# A rebuild reads a day of Parquet per query: well over the writer profile's 30 s limit on
+# a busy small host, so it gets 10 minutes.
+REBUILD_INSERT_SETTINGS = {
+    "insert_deduplicate": "0",
+    "deduplicate_insert_select": "disable",
+    "max_execution_time": "600",
+}

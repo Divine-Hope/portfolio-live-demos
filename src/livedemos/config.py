@@ -152,6 +152,9 @@ class ArchiveSettings(BaseSettings):
     # expire by whole days, so every hour in the last 7 days still has all its rows.
     lookback_s: Annotated[int, Field(gt=0, le=7 * 24 * 3_600)] = 7 * 24 * 3_600
     metrics_port: Annotated[int, Field(ge=1, le=65_535)] = 9102
+    # After migrating, refill the rollup from the archive if raw rows are gone
+    # (archive/restore.py). Off only to start a host while the archive can't be read.
+    restore: bool = True
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:

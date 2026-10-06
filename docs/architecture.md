@@ -85,7 +85,9 @@ Consumes `recentchange` from Wikimedia EventStreams over Server-Sent Events.
 - **Ignores events from the future.** Anything dated more than 5 minutes ahead is skipped, so one bad timestamp can't pin every window.
 - **Backpressure by disconnecting.** If ClickHouse is down, ingest closes the stream and waits. Wikimedia keeps the events; nothing piles up in memory.
 - **Idle watchdog.** `recentchange` never goes quiet. 30 seconds of silence means a half-open socket, so it reconnects.
-- **First boot** subscribes with `?since=` one hour back, so charts are full from minute one. A bookmark older than the source's retention, at start or before any reconnect, records a gap instead of pretending. So does a start whose raw rows have expired while the rollup remembers earlier runs.
+- **First boot** subscribes with `?since=` one hour back, so charts are full from minute one. A bookmark older than the source's retention, at start or before any reconnect, records a gap from the start of its minute instead of pretending.
+- **After a restore from the archive** (a host rebuilt from scratch): the newest raw rows have no bookmark. It replays from 30 minutes before the newest archived event and skips the restored ids, so anything the old host ingested after its last archive run comes back, and nothing is counted twice. Events older than the restored raw rows are dropped: their minutes were rebuilt into the rollup.
+- **No raw rows, but the rollup has minutes** (an outage outlived raw retention): replays what the source still has after the rollup's last minute, and records a gap from that minute, which may be partial.
 
 ### ClickHouse (`src/livedemos/migrations/`, `clickhouse/`)
 
@@ -130,6 +132,7 @@ Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=Y
 - **Never fewer rows.** A scheduled write goes ahead only if ClickHouse has more rows than the file, checked again just before writing. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, checks each one's events fall inside its hour, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
 - **Recoverable.** The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone. The host can put, get and list under `wikipedia/`, never delete.
 - **Rebuilds the rollup without risking it.** `python -m livedemos.archive.rebuild` needs a file for every hour in the range, or `--allow-missing` to rebuild the hours that have one and leave the rest as they are. It counts the files into a staging table a day at a time and checks every file produced as many rows as `archive_hours` recorded for it. Then, with ingest stopped, it adds the rest of each affected month and swaps whole months into the live rollup with `REPLACE PARTITION`: each month is all old or all new, never empty. It holds the same lock as migrations and reconcile repairs, so none of them overlap.
+- **Restores itself.** After migrating, `migrate` checks for raw rows. With none (a host rebuilt from scratch), before ingest starts, it puts the newest two archived days back into the raw table (the rollup fills through its view, and the archive service finds rows matching its files) and rebuilds older days, up to 90 days back, straight into the rollup. If that stopped part way (an insert over many files isn't atomic), the next run finds raw rows that don't match the files and does the raw days again. With rows ingest wrote itself, it does nothing.
 - **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at archive-bucket URLs (`livedemos-archive-*`); any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it. The pattern can't name the exact bucket: its name holds the account id, which stays out of this public repo. The S3 permissions themselves belong to the instance role, which every container on the host can reach; isolating that per container would cost more than this project's budget.
 
 ## Data model
@@ -169,7 +172,8 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
 | api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
-| Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet | no-data alert |
+| Whole host lost | `terraform apply -replace`; `migrate` restores raw rows and the rollup from Parquet, ingest replays the outage from the stream. No manual data steps | no-data alert |
+| Host hardware or OS stops answering | CloudWatch recovers (system check) or reboots (instance check) the instance | alarm email |
 
 ## Security
 
