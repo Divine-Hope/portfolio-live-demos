@@ -41,6 +41,25 @@ data "aws_iam_policy_document" "host" {
     actions   = ["s3:PutObject"]
     resources = ["${module.snapshots.arn}/v1/*"]
   }
+
+  # The hourly Parquet archive, written and read back by ClickHouse's s3() with these
+  # credentials. No delete: the host can add and rewrite hours, never remove them.
+  statement {
+    sid       = "ReadWriteArchive"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${module.archive.arn}/wikipedia/*"]
+  }
+
+  statement {
+    sid       = "ListArchive"
+    actions   = ["s3:ListBucket"]
+    resources = [module.archive.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["wikipedia/*"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "host" {

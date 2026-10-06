@@ -116,23 +116,58 @@ async def _ingest_state(ch: ClickHouse) -> tuple[int, int]:
     return int(running.rows[0]["n"]), int(seq.rows[0]["seq"]) if seq.rows else 0
 
 
+@dataclass(frozen=True, slots=True)
+class IngestMark:
+    """Where ingest was when a rollup rewrite started: highest seq, last ingested_at."""
+
+    seq: int
+    last_ms: int
+
+
+async def require_ingest_stopped(
+    ch: ClickHouse, *, quiet: timedelta = timedelta(seconds=30)
+) -> IngestMark:
+    """Raise IngestRunning unless no ingest insert runs and nothing landed for `quiet`.
+
+    Rewriting rollup minutes while ingest writes could count a late event twice: once
+    through the view, once in the rebuild. Pass the mark to `require_ingest_still_stopped`
+    when done.
+    """
+    running, seq = await _ingest_state(ch)
+    if running:
+        raise IngestRunning("an ingest insert is still running; stop ingest first")
+    last_ms = await _last_ingest_ms(ch)
+    if last_ms and datetime.now(UTC).timestamp() * 1000 - last_ms < quiet.total_seconds() * 1000:
+        raise IngestRunning("rows are still arriving; stop ingest first")
+    return IngestMark(seq=seq, last_ms=last_ms)
+
+
+async def require_ingest_still_stopped(ch: ClickHouse, mark: IngestMark) -> None:
+    running, seq = await _ingest_state(ch)
+    if running or seq != mark.seq or await _last_ingest_ms(ch) != mark.last_ms:
+        raise IngestRunning("ingest wrote during the rewrite; stop it and run again")
+
+
+# The rollup keeps hashes of recent inserts to drop retried ones. A rebuild can produce a
+# block identical to an earlier one (the view's original block for those minutes, or a
+# previous rebuild's), which dedup would drop silently, after the DELETE. 26.8 doesn't
+# dedup INSERT ... SELECT by default, but `deduplicate_insert_select` can turn it on, and
+# then it wins over `insert_deduplicate`. Rebuilds are deliberate: turn both off.
+REBUILD_INSERT_SETTINGS = {"insert_deduplicate": "0", "deduplicate_insert_select": "disable"}
+
+
 async def repair(
     ch: ClickHouse, mismatches: list[Mismatch], *, quiet: timedelta = timedelta(seconds=30)
 ) -> int:
     """Rebuild every listed minute (all languages) from raw rows. Returns minutes rebuilt.
 
-    Refuses unless no ingest insert is running and nothing was ingested for `quiet`, and
-    fails if an insert ran or landed while it worked (rerun it, with ingest stopped).
+    Refuses unless ingest is stopped (`require_ingest_stopped`), and fails if an insert
+    ran or landed while it worked (rerun it, with ingest stopped).
     """
     minutes = sorted({int(m.minute.timestamp()) for m in mismatches})
     if not minutes:
         return 0
-    running, seq_before = await _ingest_state(ch)
-    if running:
-        raise IngestRunning("an ingest insert is still running; stop ingest before repairing")
-    before = await _last_ingest_ms(ch)
-    if before and datetime.now(UTC).timestamp() * 1000 - before < quiet.total_seconds() * 1000:
-        raise IngestRunning("rows are still arriving; stop ingest before repairing")
+    mark = await require_ingest_stopped(ch, quiet=quiet)
     # Integers, not timestamps: ClickHouse binds them as an Array(UInt32) and compares
     # toUnixTimestamp(minute), so no time zone or format can creep in.
     await ch.execute(
@@ -150,10 +185,9 @@ async def repair(
         GROUP BY minute, lang
         """,
         params={"minutes": minutes},
+        settings=REBUILD_INSERT_SETTINGS,
     )
-    running, seq_after = await _ingest_state(ch)
-    if running or seq_after != seq_before or await _last_ingest_ms(ch) != before:
-        raise IngestRunning("ingest wrote during the repair; stop it and run reconcile again")
+    await require_ingest_still_stopped(ch, mark)
     return len(minutes)
 
 

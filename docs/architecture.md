@@ -49,6 +49,7 @@ flowchart TB
         ING["ingest<br/>Python, asyncio"]
         CH[("ClickHouse<br/>raw 7 days + per-minute rollups")]
         API["api<br/>FastAPI, 1 s snapshot"]
+        ARC["archive<br/>hourly job"]
     end
 
     S3[("S3<br/>Parquet archive, fallback snapshot")]
@@ -59,12 +60,14 @@ flowchart TB
     ING -- "1 s batches, bookmark in the rows" --> CH
     CH --> API
     API -- "live.json, activity" --> CF
-    API -. "hourly Parquet, 60 s snapshot" .-> S3
+    API -- "60 s snapshot" --> S3
+    ARC -- "INSERT INTO FUNCTION s3()" --> CH
+    CH -- "hourly Parquet" --> S3
     S3 -. "secondary origin" .-> CF
     CF -- "poll every 2 s" --> PAGE
 ```
 
-What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3). Locally, nginx stands in for CloudFront and serves the widget. Cloudflare Pages and the dashed lines come in M4 and later.
+What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
 
 ## Components
 
@@ -119,6 +122,15 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 
 `web/index.html` is a local stand-in for the live demos page: the widget inside the "Northwind" demo host app, plus a working "Query it" panel.
 
+### archive (`src/livedemos/archive/`)
+
+Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`, in the archive bucket ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)). ClickHouse writes it with one `INSERT INTO FUNCTION s3(...)`, signed by the instance role, so the archive service holds no AWS credentials. It's its own small service, not part of the API: archiving needs a ClickHouse user that can write to S3, and the API is public and read-only.
+
+- **Only missing hours, only once ingest has passed them.** Every 5 minutes it lists the files for the last 6 days and writes the hours that have none, once ingest has committed events 5 minutes past the hour's end. After an outage, ingest replays the stream oldest first, so an hour waits for the replay. A host rebuilt from scratch has fewer raw rows than its predecessor's files, so the scheduled job never replaces a file; rewriting one is a manual `--hour`.
+- **Checked.** Each file is read back and its row count compared with ClickHouse's.
+- **Rebuilds the rollup.** `python -m livedemos.archive.rebuild` recounts `wiki_edits_per_minute` for whole days from the files, with ingest stopped. It refuses if the rollup has hours the archive doesn't.
+- **Least privilege.** The `archiver` user can read `wiki_edits` and use `s3()`, nothing else. The instance role can put and get under `wikipedia/` and list it, but not delete.
+
 ## Data model
 
 | Table | Engine | Grain | Retention |
@@ -127,7 +139,7 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 | `wiki_edits_per_minute` | SummingMergeTree, fed by a materialized view | minute x language | 90 days |
 | `ingest_gaps` | MergeTree | one row per known gap | 90 days |
 
-History beyond 7 days will live as Parquet on S3 ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)).
+History beyond 7 days lives as hourly Parquet on S3 (see archive above). Files move to cheaper storage classes after 30 and 180 days.
 
 ## Freshness budget
 
@@ -156,7 +168,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
 | api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
-| Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet (M4) | no-data alert |
+| Whole host lost | `terraform apply`, ingest backfills from the stream, rollups rebuild from Parquet | no-data alert |
 
 ## Security
 
@@ -172,6 +184,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | Edge cache and fan-out | nginx `web` container, 1 s micro-cache, cache lock | CloudFront, 1 s cache, request collapsing |
 | Static site and widget | nginx serves `web/` | Cloudflare Pages |
 | Fallback when api is down | none | CloudFront origin group, S3 `live.json` |
+| Parquet archive | SeaweedFS `s3` container, unsigned | S3 archive bucket, instance role |
 | Source | real stream, or `fake-stream` offline | real stream |
 | Secrets | `.env` | SSM Parameter Store |
 | Logs and metrics | `docker compose logs`, `/metrics` | Grafana Alloy to Grafana Cloud |

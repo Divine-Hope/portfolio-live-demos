@@ -1,0 +1,9 @@
+<!--
+  s3() calls that pass no keys sign with the host's instance role (IMDSv2), so the archive
+  needs no credentials of its own. Locally, SeaweedFS takes unsigned requests (NOSIGN).
+-->
+<clickhouse>
+    <s3>
+        <use_environment_credentials>1</use_environment_credentials>
+    </s3>
+</clickhouse>

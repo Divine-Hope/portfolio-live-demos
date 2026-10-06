@@ -134,6 +134,32 @@ class ApiSettings(BaseSettings):
         return [code.strip() for code in self.langs.split(",") if code.strip()]
 
 
+class ArchiveSettings(BaseSettings):
+    """Settings for the hourly Parquet archive (ADR 0004)."""
+
+    model_config = SettingsConfigDict(env_prefix="ARCHIVE_", extra="ignore")
+
+    # Where hour files go, as ClickHouse sees it. Production: the archive bucket over
+    # HTTPS, signed with the instance role. Locally: SeaweedFS, unsigned.
+    url: str = "http://s3:8333/archive/wikipedia/edits"
+    # Send no credentials. Only for the local S3 stand-in.
+    nosign: bool = False
+    interval_s: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 300.0
+    # An hour is archived once ingest has committed events this far past its end, so
+    # late events and a replay after an outage have landed first.
+    settle_s: Annotated[int, Field(ge=0)] = 300
+    # How far back to look for missing hours. Inside raw retention (7 days), so every
+    # hour considered still has its rows.
+    lookback_s: Annotated[int, Field(gt=0, le=7 * 24 * 3_600)] = 6 * 24 * 3_600
+    metrics_port: Annotated[int, Field(ge=1, le=65_535)] = 9102
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if not re.fullmatch(r"https?://\S+[^/]", self.url):
+            raise ValueError("url must be an http(s) URL without a trailing slash")
+        return self
+
+
 @lru_cache
 def clickhouse_settings() -> ClickHouseSettings:
     return ClickHouseSettings()
@@ -147,3 +173,8 @@ def ingest_settings() -> IngestSettings:
 @lru_cache
 def api_settings() -> ApiSettings:
     return ApiSettings()
+
+
+@lru_cache
+def archive_settings() -> ArchiveSettings:
+    return ArchiveSettings()

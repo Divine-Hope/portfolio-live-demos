@@ -81,6 +81,17 @@ else
 	docker compose run --rm migrate python -m livedemos.reconcile
 endif
 
+.PHONY: archive-hour
+archive-hour: clickhouse ## Rewrite one hour's Parquet file, even if it exists: HOUR=2026-10-06T09
+	docker compose run --rm archive python -m livedemos.archive --hour $(HOUR)
+
+.PHONY: rebuild-rollups
+rebuild-rollups: clickhouse ## Rebuild the per-minute rollup from the archive: FROM=2026-10-01 TO=2026-10-03 (stops ingest)
+	docker compose stop ingest
+	sleep 30   # the rebuild refuses while rows are still arriving
+	docker compose run --rm migrate python -m livedemos.archive.rebuild --from $(FROM) --to $(TO); \
+		status=$$?; docker compose start ingest; exit $$status
+
 .PHONY: bench
 bench: clickhouse ## Benchmark every query at 7 days of retained data (separate database)
 	$(CH_TEST_ENV) uv run python -m livedemos.devtools.bench
@@ -147,6 +158,7 @@ test: ## Unit tests (no services needed)
 .PHONY: clickhouse
 clickhouse: .env
 	docker compose up -d --wait clickhouse
+	docker compose up -d s3 s3-bucket   # the archive's local S3, for integration tests too
 
 .PHONY: test-integration
 test-integration: clickhouse ## Integration tests against ClickHouse, including the resume proof

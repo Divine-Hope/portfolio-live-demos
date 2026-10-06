@@ -90,7 +90,9 @@ terraform -chdir=infra/live apply -replace=aws_instance.host
 ```
 
 User data installs Docker, checks out the repo and starts the stack with the image tag
-in SSM. ClickHouse starts empty; ingest backfills the last hour from Wikimedia.
+in SSM. ClickHouse starts empty; ingest backfills the last hour from Wikimedia. History stays in
+the archive bucket. To get the per-minute chart back for older days, rebuild the rollup
+from the archive (below).
 
 ## Schema changes
 
@@ -113,6 +115,29 @@ logged. To rebuild them, stop ingest first (repair refuses while an ingest inser
 running or rows are still arriving, and fails if either happens during it), then add `--repair`, then start ingest; it resumes
 from its bookmark. Locally, `make reconcile REPAIR=1` does all three.
 
+## The Parquet archive
+
+The `archive` service writes each finished hour to S3 within about 5 minutes of ingest
+passing it, and logs every file. Its metrics: `archive_newest_hour_timestamp_seconds`
+(should trail the clock by one to two hours) and `archive_failed_hours` (should be 0).
+
+- **Rewrite an hour** (a file is wrong, or a replay filled an hour after it was
+  archived): `docker compose -f compose.yaml -f compose.prod.yaml run --rm archive python -m livedemos.archive --hour 2026-10-06T09`.
+  It replaces the file with what ClickHouse has now. Locally: `make archive-hour HOUR=...`.
+- **Rebuild the rollup from the archive**, for whole UTC days, `--to` exclusive. Stop
+  ingest first; the rebuild refuses while rows are arriving and if the archive is missing
+  any hour the rollup has:
+
+  ```
+  docker compose -f compose.yaml -f compose.prod.yaml stop ingest
+  sleep 30
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.archive.rebuild --from 2026-10-01 --to 2026-10-03
+  docker compose -f compose.yaml -f compose.prod.yaml start ingest
+  ```
+
+  Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days,
+  `reconcile` (below) then confirms the rollup matches raw again.
+
 ## What to alert on
 
 These are the signals; the alerts themselves are M4.
@@ -128,6 +153,9 @@ These are the signals; the alerts themselves are M4.
 | `time() - api_last_snapshot_timestamp_seconds > 10` | The API can't build snapshots; CloudFront is serving the S3 copy. |
 | `rate(api_activity_queries_total{cache=~"timeout\|cooldown\|shed"}[5m]) > 0` | "Query it" is shedding load. |
 | `increase(api_activity_query_failures_total[5m]) > 0` | ClickHouse failed a "Query it" query. |
+| `time() - archive_newest_hour_timestamp_seconds > 3 * 3600` | No new hour archived for three hours: the archive service, S3 or ingest is stuck. |
+| `archive_failed_hours > 0` | An hour couldn't be written, or its file didn't match ClickHouse. It's retried every run; a mismatch needs `--hour`. |
+| `ClickHouse MemoryTrackingUncorrected - MemoryTracking` growing | The memory count is drifting. The memory worker corrects it; if this keeps growing, that correction is off. |
 
 For a slow query or a merge backlog, `system.query_log` (slow application queries) and
 `system.part_log` keep 3 days.

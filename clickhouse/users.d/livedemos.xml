@@ -1,8 +1,10 @@
 <!--
-  Three application users, least privilege:
-    migrator  changes the schema; only the one-shot `migrate` job runs as it
+  Four application users, least privilege:
+    migrator  changes the schema; only the one-shot `migrate` job runs as it. Also
+              rewrites the rollup (reconcile repairs, rebuilds from the archive)
     ingest    reads and inserts rows; can't change the schema
     api       read-only, with tight per-query limits (it faces the public internet)
+    archiver  reads raw rows and writes them to S3 as Parquet; nothing else
   Passwords come from environment variables, never from this file.
 -->
 <clickhouse>
@@ -55,6 +57,8 @@
                 <query>GRANT DROP TABLE ON demos.schema_migrations_lock</query>
                 <!-- Reconcile repairs only while no ingest insert runs: it must see them. -->
                 <query>GRANT SELECT(query_id, current_database, user) ON system.processes</query>
+                <!-- Rebuilding the rollup reads the Parquet archive with s3(). -->
+                <query>GRANT S3, CREATE TEMPORARY TABLE ON *.*</query>
             </grants>
         </migrator>
         <ingest>
@@ -78,5 +82,17 @@
                 <query>GRANT SELECT ON demos.*</query>
             </grants>
         </api>
+        <archiver>
+            <password from_env="CLICKHOUSE_ARCHIVER_PASSWORD"/>
+            <profile>writer</profile>
+            <quota>default</quota>
+            <networks><ip>::/0</ip></networks>
+            <grants>
+                <query>GRANT SELECT ON demos.wiki_edits</query>
+                <!-- s3() as a source and a sink. A table function needs a temporary
+                     table. Which buckets it can reach is the instance role's call. -->
+                <query>GRANT S3, CREATE TEMPORARY TABLE ON *.*</query>
+            </grants>
+        </archiver>
     </users>
 </clickhouse>

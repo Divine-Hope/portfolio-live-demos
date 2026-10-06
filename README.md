@@ -65,6 +65,25 @@ No internet, or don't want to hit Wikimedia? `make up-offline` runs the same sta
 | `/embed/wikipedia/?lang=all&theme=dark` | The embeddable widget |
 | `/readyz`, `/metrics` | Readiness and Prometheus metrics |
 
+## Query the archive
+
+Every hour of edits lands in S3 as Parquet, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`.
+Any engine reads it. With DuckDB and your AWS credentials:
+
+```sql
+INSTALL httpfs; LOAD httpfs;
+CREATE SECRET (TYPE s3, PROVIDER credential_chain, REGION 'eu-west-1');
+
+SELECT dt, lang, count(*) AS edits, round(avg(is_bot::int), 3) AS bot_share
+FROM read_parquet('s3://<archive-bucket>/wikipedia/edits/dt=*/hour=*.parquet',
+                  hive_partitioning = true)
+WHERE dt >= '2026-10-01'
+GROUP BY dt, lang ORDER BY dt, lang;
+```
+
+Locally the archive is in SeaweedFS: use `CREATE SECRET (TYPE s3, KEY_ID 'any', SECRET 'any',
+ENDPOINT 'localhost:8333', URL_STYLE 'path', USE_SSL false)` and `s3://archive/...`.
+
 ## Repo layout
 
 ```
@@ -73,6 +92,7 @@ src/livedemos/
   api/            snapshot loop, Query it, health
   devtools/       fake EventStreams server, and the benchmark
   migrations/     versioned ClickHouse schema, applied once each by `migrate`
+  archive/        hourly Parquet archive on S3, and rebuilding the rollup from it
   reconcile.py    rollup-versus-raw check and repair
 clickhouse/       low-memory server config, least-privilege users
 web/              embeddable widget and a local demo host page
