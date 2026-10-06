@@ -367,3 +367,29 @@ async def test_the_migrator_reads_the_archive_but_cant_write_it(
             params={"url": hour_url(settings.url, H0)},
             settings={"use_hive_partitioning": "0"},
         )
+
+
+@pytest.mark.usefixtures("demos_schema")
+@pytest.mark.parametrize(
+    ("user", "password_env", "allowed"),
+    [
+        ("archiver", "CLICKHOUSE_ARCHIVER_PASSWORD", "1"),
+        ("migrator", "CLICKHOUSE_MIGRATOR_PASSWORD", "1"),
+        ("ingest", "CLICKHOUSE_INGEST_PASSWORD", "0"),
+        ("api", "CLICKHOUSE_API_PASSWORD", "0"),
+    ],
+)
+async def test_only_the_archive_users_may_sign_s3_with_the_instance_role(
+    user: str, password_env: str, allowed: str
+) -> None:
+    """26.8 refuses the server's own credentials to s3() unless the profile allows it.
+    Locally S3 is unsigned, so this is the only test that sees the production path."""
+    client = ClickHouse(user_settings(user, password_env))
+    try:
+        result = await client.query(
+            "SELECT value FROM system.settings "
+            "WHERE name = 's3_allow_server_credentials_in_user_queries'"
+        )
+    finally:
+        await client.aclose()
+    assert result.rows[0]["value"] == allowed
