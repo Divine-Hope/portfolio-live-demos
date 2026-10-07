@@ -229,9 +229,19 @@ aws ssm put-parameter --profile livedemos --region eu-west-1 --overwrite \
 The next deploy (or re-running the last one) puts it in the host's `.env`. To rotate it,
 do the same with a new token, then delete the old one in Grafana Cloud.
 
-**Dashboard:** "Live demos: pipeline". Change `deploy/grafana/build_dashboard.py`, run it,
-commit both files, and import `livedemos.json` (Dashboards > New > Import, same uid, so it
-replaces the old one).
+**Dashboard and alert rules:** "Live demos: pipeline" and the rule group `livedemos` are
+code. Change `deploy/grafana/build_dashboard.py` or `build_alerts.py`, run it, commit both
+files, then load them with a service account token (Editor role, made for the occasion):
+`GRAFANA_URL=https://<stack>.grafana.net GRAFANA_TOKEN=... uv run python deploy/grafana/load.py`.
+
+Set once by hand, in Alerting: the email contact point `livedemos-email` (the budget
+address; kept out of this repo) and a notification policy route `project = livedemos` to
+it, grouped by `alertname`, repeating every 4 hours.
+
+**Outside-in check:** Testing & synthetics > Synthetics, `livedemos-live-json`, as in
+`deploy/grafana/synthetic-check.json`: once a minute from London, failing unless
+`live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure.
+About 44,000 runs a month, inside the free tier's 100,000.
 
 **Logs:** Explore, Loki, `{host="livedemos", service="ingest"}`; add `| json` to filter on
 fields, such as `| json | level="error"`.
@@ -239,9 +249,114 @@ fields, such as `| json | level="error"`.
 **Is Alloy healthy?** `docker compose -f compose.yaml -f compose.prod.yaml logs --tail 50 alloy`.
 A 401 means the token is wrong or missing.
 
-## What to alert on
+## Alerts
 
-These are the signals; the alerts themselves are M4.
+Grafana alert rules, emailed to the budget address. They're code:
+`deploy/grafana/build_alerts.py` writes `alerts.json` (rule group `livedemos`); load it as
+the "Grafana Cloud" section says. Each one resolves by itself when the cause is fixed. Shell
+commands below run on the host, in `/opt/livedemos`, with
+`dc="docker compose -f compose.yaml -f compose.prod.yaml"`.
+
+### Ingest stalled
+
+The newest committed event was over 60 s old for 5 minutes (or ingest's metrics stopped).
+The live page says Paused.
+
+1. `$dc logs --tail 50 ingest`: reconnecting (the stream), insert errors (ClickHouse), or
+   waiting for an earlier insert.
+2. `curl -s localhost:9101/metrics | grep -E 'ingest_(connected|reconnects|batches)'`.
+3. `$dc ps`: is ClickHouse healthy? If not, see its logs; ingest resumes by itself.
+
+### No data from a service
+
+A scrape of ingest, the API, the archive or ClickHouse failed for 5 minutes, or nothing
+arrived at all, meaning Alloy or the host is down.
+
+1. Several services at once: is the host up? `/readyz` through CloudFront, the EC2 console,
+   the CloudWatch host alarms.
+2. One service: `$dc ps` and `$dc logs --tail 50 <service>`.
+3. Everything but the host is fine: `$dc logs --tail 50 alloy` (a 401 is the token).
+
+### Container near its memory limit
+
+A container used over 85% of its `mem_limit` for 5 minutes.
+
+1. The dashboard's memory panel: a step (a deploy, a backfill) or a slow climb (a leak)?
+2. ClickHouse: `MemoryTracking` against its 900 MiB server cap; merges or a heavy query in
+   `system.processes`.
+3. If it's steady and real, raise the limit in `compose.yaml`, keeping the host's total
+   under its 2 GB.
+
+### OOM kill
+
+The kernel killed a process for memory in the last 10 minutes.
+
+1. `dmesg -T | grep -i -A2 oom`: which process, and whether a container limit or the host
+   ran out.
+2. `$dc ps`: did the container restart? Ingest resumes from its bookmark; the archive
+   catches up on its next run.
+3. Then as for "Container near its memory limit".
+
+### Host swapping in
+
+Over 100 pages a second read back from swap for 10 minutes: the host itself is short of
+memory, and everything slows down.
+
+1. `free -m` and the dashboard's host memory panel.
+2. `docker stats --no-stream`: which container grew.
+3. A lasting need: `instance_type` to `t4g.medium` ("Resize the host", above).
+
+### Disk over 80%
+
+The root disk, which holds ClickHouse's data, is over 80% full.
+
+1. `df -h /` and `du -sh /var/lib/docker/*`.
+2. `docker system df`: old images (deploys prune those older than a week) and logs.
+3. ClickHouse: `SELECT table, formatReadableSize(sum(bytes_on_disk)) FROM system.parts
+   WHERE active GROUP BY table`. Raw rows should expire after 7 days.
+
+### API 5xx over 1%
+
+Over 1% of the API's responses at the origin were errors for 10 minutes. CloudFront serves
+its fallback copy meanwhile, so the page says Paused rather than breaking.
+
+1. Is it the fire drill switch? `aws ssm get-parameter --name /livedemos/api-drill-5xx`.
+2. `$dc logs --tail 50 api`: snapshot failures mean ClickHouse.
+3. `curl -s localhost:8000/readyz`.
+
+### Archive behind
+
+No new hour archived for three hours.
+
+1. `$dc logs --tail 50 archive`.
+2. S3: credentials (the instance role) or the bucket policy. The archive section above has
+   the details.
+3. Is ingest past the hour? An hour waits until ingest is 5 minutes past its end.
+
+### live.json check failing
+
+Grafana's outside-in check of the public `live.json` failed (an error, or a payload that
+isn't `live`) on every probe for 3 minutes.
+
+1. `curl -sI https://<api_domain>/v1/wikipedia/live.json`: an error from CloudFront, or the
+   fallback copy (`"status": "fallback"`)?
+2. Fallback: the origin is down or erroring; see the other alerts.
+3. A CloudFront error with the origin healthy: the distribution or its certificate.
+
+### Fire drill
+
+Each alert, triggered on purpose:
+
+| Alert | Trigger | Undo |
+|---|---|---|
+| Ingest stalled, No data | `$dc stop ingest` | `$dc start ingest` |
+| No data (everything) | `$dc stop alloy` | `$dc start alloy` |
+| Disk over 80% | `fallocate -l <size> /var/tmp/drill` (enough to pass 80%) | `rm /var/tmp/drill` |
+| API 5xx, live.json check | `aws ssm put-parameter --overwrite --name /livedemos/api-drill-5xx --value true`, then redeploy | the same with `false`, then redeploy |
+
+## Other signals
+
+Worth a look on the dashboard or in Explore; not alerts.
 
 | Signal | Means |
 |---|---|

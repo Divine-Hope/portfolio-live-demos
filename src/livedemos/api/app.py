@@ -112,6 +112,14 @@ def create_app(
         return await call_next(request)
 
     @app.middleware("http")
+    async def drill(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if settings.drill_5xx and request.url.path.startswith("/v1/"):
+            return JSONResponse({"error": "fire drill"}, status_code=503)
+        return await call_next(request)
+
+    @app.middleware("http")
     async def observe(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
