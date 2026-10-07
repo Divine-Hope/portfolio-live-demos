@@ -98,6 +98,19 @@ the newest archived event and skipping the events it restored. The archive servi
 its predecessor's files and leaves them. The chart is continuous, or shows a labelled gap
 if the outage outlived the stream's retention.
 
+**Drill, 2026-10-07 08:41 UTC** (`apply -replace`, image already built, 45 archived hours):
+
+| Step | Time after the apply started |
+|---|---|
+| Old instance destroyed, new one created | 53 s (apply complete) |
+| CloudFront serves the fallback snapshot ("Paused") | from 66 s |
+| Stack up with the restored data, honestly "stale" (newest event 47 minutes old) | 334 s |
+| Ingest has replayed the outage: live | 470 s (7 min 50 s) |
+
+The chart afterwards: the 51 minutes it shared with a copy taken just before the drill
+matched exactly in every language, and the 8 minutes of the outage were filled by the
+replay at normal levels. No gap, no dip, nothing counted twice.
+
 If `migrate` fails on the restore (the archive can't be read), nothing else starts. Fix
 the cause, or start without it and rebuild later:
 `ARCHIVE_RESTORE=false docker compose -f compose.yaml -f compose.prod.yaml up -d`.
