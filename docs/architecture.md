@@ -201,12 +201,12 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 
 | Item | Monthly |
 |---|---|
-| EC2: one host in an Auto Scaling Group | free until 31 Dec 2026 (on-demand t4g.small, free trial); then Spot, about $6 to $9 |
+| EC2: one host in an Auto Scaling Group | free until 31 Dec 2026 (on-demand t4g.small, free trial); then Spot, $6.06 to $11.17 by type |
 | EBS 16 GB gp3 ($0.088/GB) + public IPv4 ($0.005/h) | $1.41 + $3.65 |
 | CloudFront, Grafana Cloud, Cloudflare Pages | free tiers |
 | S3: fallback snapshot and Parquet archive | about 1 cent at first, about 7 cents after a year (below) |
 
-About $5 a month until the end of 2026, then about $11 to $14 on Spot, against $18.50 on
+About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on
 demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on
 2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md).
 The real bill goes in the README once there is one.

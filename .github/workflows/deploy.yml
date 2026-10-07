@@ -190,14 +190,23 @@ jobs:
 
       - name: Run the deploy script on the host
         run: |
-          # The Auto Scaling Group can replace the host, so find it by its Name tag. During a
-          # replacement there are two for a few minutes; deploy to both.
+          # The Auto Scaling Group can replace the host, so look it up: every host the group
+          # has put in service (one, or two during a replacement), and the host from before
+          # the group while it lasts (legacy-host.tf). A host still starting up isn't a
+          # target: it starts from the image tag recorded above anyway.
           name=$(aws ssm get-parameter --name /livedemos-deploy/host-name --query Parameter.Value --output text)
-          mapfile -t instances < <(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=$name" "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | grep .)
+          mapfile -t instances < <(
+            {
+              aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$name" \
+                --query 'AutoScalingGroups[].Instances[?LifecycleState==`InService`].InstanceId' --output text
+              aws ec2 describe-instances \
+                --filters "Name=tag:Name,Values=$name" "Name=instance-state-name,Values=running" \
+                --query 'Reservations[].Instances[?length(Tags[?Key==`aws:autoscaling:groupName`]) == `0`].InstanceId' \
+                --output text
+            } | tr '\t' '\n' | grep . | sort -u
+          )
           if [ "${#instances[@]}" -eq 0 ]; then
-            echo "::error::no running host tagged $name"
+            echo "::error::no host in service for $name"
             exit 1
           fi
           params=$(jq -nc --arg cmd "/opt/livedemos/deploy/host/deploy.sh $SHA" '{commands: [$cmd]}')

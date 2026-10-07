@@ -118,10 +118,9 @@ tf-init: ## AWS: connect infra/live to the state bucket
 	$(TF) -chdir=infra/live init -input=false -backend-config=backend.hcl
 
 .PHONY: host-id
-host-id: ## AWS: the running host's instance id (the Auto Scaling Group can replace it)
-	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-instances --region eu-west-1 \
-		--filters Name=tag:Name,Values=livedemos-host Name=instance-state-name,Values=running \
-		--query 'Reservations[].Instances[].InstanceId' --output text
+host-id: ## AWS: the live host's instance id: whichever holds the Elastic IP
+	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-addresses --region eu-west-1 \
+		--filters Name=tag:Name,Values=livedemos-host --query 'Addresses[0].InstanceId' --output text
 
 .PHONY: tf-plan
 tf-plan: ## AWS: show what infra/live would change, and save the plan

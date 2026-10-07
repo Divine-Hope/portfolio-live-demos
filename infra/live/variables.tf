@@ -30,7 +30,7 @@ variable "availability_zones" {
 variable "instance_types" {
   description = "2 GB+ Graviton types the host may run on, in order of preference for on-demand. Spot picks by price and spare capacity."
   type        = list(string)
-  default     = ["t4g.small", "c6g.medium", "c7g.medium", "t4g.medium", "m6g.medium"]
+  default     = ["t4g.small", "c6g.medium", "c7g.medium"]
 }
 
 variable "on_demand" {

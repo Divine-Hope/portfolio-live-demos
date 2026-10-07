@@ -69,6 +69,18 @@ data "aws_iam_policy_document" "host" {
     sid       = "TakeTheElasticIpOnItsInterface"
     actions   = ["ec2:AssociateAddress"]
     resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:network-interface/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:ResourceTag/Name"
+      values   = [local.host_group]
+    }
+  }
+
+  # Say when a new host is live (or can't be), for the group's launch hook.
+  statement {
+    sid       = "CompleteItsLaunch"
+    actions   = ["autoscaling:CompleteLifecycleAction"]
+    resources = [local.host_group_arn]
   }
 
   # The hourly Parquet archive, written and read back by ClickHouse's s3() with these
@@ -104,10 +116,19 @@ resource "aws_iam_instance_profile" "host" {
 
 locals {
   host_group = "${var.project}-host"
+  host_group_arn = join(":", [
+    "arn:aws:autoscaling:${var.region}:${data.aws_caller_identity.current.account_id}",
+    "autoScalingGroup:*:autoScalingGroupName/${local.host_group}",
+  ])
+  # CPU credits only exist for T types; any other type launched with the setting fails.
+  # So two launch templates, the same but for that.
+  launch_templates = { burstable = true, fixed = false }
 }
 
 resource "aws_launch_template" "host" {
-  name_prefix            = "${var.project}-host-"
+  for_each = local.launch_templates
+
+  name_prefix            = "${var.project}-host-${each.key}-"
   image_id               = data.aws_ssm_parameter.al2023_arm64.insecure_value
   update_default_version = true
 
@@ -123,8 +144,11 @@ resource "aws_launch_template" "host" {
   }
 
   # Standard credits: a runaway process slows down instead of running up a bill.
-  credit_specification {
-    cpu_credits = "standard"
+  dynamic "credit_specification" {
+    for_each = each.value ? [1] : []
+    content {
+      cpu_credits = "standard"
+    }
   }
 
   # IMDSv2 only. Hop limit 2 so containers (the api writing to S3) can reach it.
@@ -155,16 +179,15 @@ resource "aws_launch_template" "host" {
     compose_version = var.compose_version
     compose_sha256  = var.compose_sha256
     eip_allocation  = aws_eip.host.allocation_id
+    host_group      = local.host_group
   }))
 
-  tag_specifications {
-    resource_type = "instance"
-    tags          = { Name = local.host_group }
-  }
-
-  tag_specifications {
-    resource_type = "volume"
-    tags          = { Name = local.host_group }
+  dynamic "tag_specifications" {
+    for_each = ["instance", "volume", "network-interface"]
+    content {
+      resource_type = tag_specifications.value
+      tags          = { Name = local.host_group }
+    }
   }
 
   # A new AMI isn't a reason to change anything: hosts install security updates themselves
@@ -183,9 +206,20 @@ resource "aws_autoscaling_group" "host" {
   desired_capacity    = 1
   vpc_zone_identifier = [for s in aws_subnet.public : s.id]
 
-  # A replacement restores from the archive before it's live: about 8 minutes (runbook).
+  # A new host only counts as in service once it's live and holds the Elastic IP: user
+  # data completes this hook (CONTINUE), or abandons it if the stack can't start, and the
+  # group then terminates it and tries again. One that never answers is abandoned after an
+  # hour. Until then the old host, if it's still there, keeps serving: Capacity
+  # Rebalancing only retires it once the replacement is in service.
+  initial_lifecycle_hook {
+    name                 = "live"
+    lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"
+    default_result       = "ABANDON"
+    heartbeat_timeout    = 3600
+  }
+
   health_check_type         = "EC2"
-  health_check_grace_period = 900
+  health_check_grace_period = 300
 
   # Start a replacement when AWS warns a Spot host is at risk, not only when it's taken.
   capacity_rebalance = true
@@ -200,7 +234,7 @@ resource "aws_autoscaling_group" "host" {
 
     launch_template {
       launch_template_specification {
-        launch_template_id = aws_launch_template.host.id
+        launch_template_id = aws_launch_template.host["fixed"].id
         version            = "$Latest"
       }
 
@@ -208,15 +242,13 @@ resource "aws_autoscaling_group" "host" {
         for_each = var.instance_types
         content {
           instance_type = override.value
+          launch_template_specification {
+            launch_template_id = aws_launch_template.host[startswith(override.value, "t") ? "burstable" : "fixed"].id
+            version            = "$Latest"
+          }
         }
       }
     }
-  }
-
-  # A new launch template (an AMI, user data) doesn't replace a running host. To roll it
-  # out: aws autoscaling start-instance-refresh --auto-scaling-group-name livedemos-host
-  lifecycle {
-    ignore_changes = [desired_capacity]
   }
 
   tag {
@@ -224,6 +256,9 @@ resource "aws_autoscaling_group" "host" {
     value               = var.project
     propagate_at_launch = true
   }
+
+  # The host must be allowed to complete its hook and take the Elastic IP before it boots.
+  depends_on = [aws_iam_role_policy.host]
 }
 
 # Launches, terminations and failed launches, by email.

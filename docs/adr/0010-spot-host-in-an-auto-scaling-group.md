@@ -50,27 +50,34 @@ manual steps, in 7 min 50 s in the drill, with the chart continuous afterwards.
 - **Shape:** the host is the only instance of an Auto Scaling Group (min 1, max 2,
   desired 1) across three zones. If it's reclaimed or fails its EC2 health check, the group
   launches a replacement, and Capacity Rebalancing starts one as soon as AWS warns a Spot
-  host is at risk. A replacement restores itself, then takes the Elastic IP only once its
-  newest event is under a minute old, so CloudFront moves to it when it's live. Every
+  host is at risk. A launch hook keeps the replacement out of service until it's live: it
+  restores itself, waits until its newest event is under a minute old (20 minutes at most,
+  so a Wikimedia outage can't block it), takes the Elastic IP, and only then completes the
+  hook. If its stack doesn't start, it abandons the hook and the group tries again. Every
   launch and termination is emailed.
 - **Purchase:** on demand (t4g.small, free) until the free trial ends on 31 Dec 2026, then
-  Spot (`on_demand = false`) with price-capacity-optimized allocation over t4g.small,
-  c6g.medium, c7g.medium, t4g.medium and m6g.medium. It'll mostly land on the cheap,
-  rarely interrupted c6g.medium.
+  Spot (`on_demand = false`, then an instance refresh) with price-capacity-optimized
+  allocation over t4g.small, c6g.medium and c7g.medium. All three are 2 GB Graviton; T
+  types get standard CPU credits, through a second launch template.
 - **Disk:** 16 GB instead of 25 (5.5 GB used).
 
 ## Consequences
 
-- About $5 a month until the end of 2026, then about $11 to $14, against $18.50 on
-  demand. Still a little over $10: the public IPv4 address alone is $3.65.
-- Each Spot reclaim costs about 8 minutes of "Paused", or none when the warning comes early
-  enough for the replacement to be live first, plus a few emails. At under 5% a month that's
-  rare; the outage budget is honest either way, since the page never fakes data.
+- About $5 a month until the end of 2026. From 2027 on Spot, $11.12 to $16.23 a month
+  (EBS and IPv4 included) depending on which type the allocation picks, at today's
+  prices: t4g.small or c6g.medium at the low end, c7g.medium at the top. Against $18.50 on
+  demand. Still over $10: the public IPv4 address alone is $3.65.
+- Each Spot reclaim costs up to about 8 minutes of "Paused" when the host goes before its
+  replacement is live, and none when the rebalance warning comes early enough: the old host
+  is only retired once the replacement is in service. Plus a few emails.
+- Two hosts overlap during a replacement. Each has its own ClickHouse; both archive to the
+  same bucket, so the archive reads a file back before replacing it and never replaces it
+  with fewer rows; deploys go to both.
 - A replacement has 2 days of raw rows, not 7. The page and "Query it" (24 hours on raw
   rows, 3 and 7 days on the rollup) are unaffected; the 90-day rollup comes back whole.
 - The per-instance CloudWatch recover and reboot alarms go: the group's health check
   replaces a broken host instead.
-- Deploys find the host by tag, and deploy to both during a replacement.
+- Deploys go to every host the group has put in service.
 - The measured week shrinks to what only time can show: freshness over a week, "Query it"
   latency on the host, origin requests against page views, and the real bill. They're
   collected by Grafana and Cost Explorer as the system runs, not by holding deploys.

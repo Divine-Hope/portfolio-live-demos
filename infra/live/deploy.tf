@@ -77,10 +77,10 @@ data "aws_iam_policy_document" "deploy" {
     resources = ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"]
   }
 
-  # The host changes when the group replaces it, so the workflow looks it up by tag.
+  # The host changes when the group replaces it, so the workflow looks it up.
   statement {
     sid       = "FindTheHost"
-    actions   = ["ec2:DescribeInstances"]
+    actions   = ["ec2:DescribeInstances", "autoscaling:DescribeAutoScalingGroups"]
     resources = ["*"] # no resource-level permissions for Describe*
   }
 
@@ -101,8 +101,9 @@ resource "aws_iam_role_policy" "deploy" {
 # in the host's .env.
 resource "aws_ssm_parameter" "deploy" {
   for_each = {
-    "host-name"  = local.host_group
-    "api-domain" = aws_cloudfront_distribution.api.domain_name
+    "host-name"   = local.host_group
+    "instance-id" = aws_instance.host.id # legacy-host.tf; goes with it
+    "api-domain"  = aws_cloudfront_distribution.api.domain_name
   }
   name  = "/${var.project}-deploy/${each.key}"
   type  = "String"

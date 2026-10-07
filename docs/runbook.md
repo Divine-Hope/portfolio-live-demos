@@ -83,13 +83,27 @@ same way; CloudFront picks up the new value in the same apply.
 
 The host is the only instance of the Auto Scaling Group `livedemos-host` ([ADR
 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). If it's reclaimed (Spot) or fails
-its EC2 health check, the group launches a replacement in any of three zones, which
-restores itself (below) and takes the Elastic IP only once its data is live. Every launch
-and termination is emailed.
+its EC2 health check, the group launches a replacement in any of three zones. A launch
+hook (`live`) keeps it out of service while it restores itself (below); it takes the
+Elastic IP once its data is live, then completes the hook. A host whose stack doesn't start
+abandons the hook and the group tries again. Every launch and termination is emailed.
+`make host-id` is whichever host holds the Elastic IP. A new host's progress is in
+`/var/log/cloud-init-output.log`.
+
+### Moving to the Auto Scaling Group (once)
+
+1. Apply with `infra/live/legacy-host.tf` in place: it adds the group and keeps the old
+   host. The group's first host restores, goes live and takes the Elastic IP; the old one
+   stops getting traffic.
+2. Check: `make -s host-id` is the group's host, `/readyz` through CloudFront, and
+   `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names livedemos-host`
+   shows it `InService`.
+3. Delete `legacy-host.tf` and the `instance-id` deploy parameter, then `make tf-plan
+   tf-apply` by hand: it destroys the old host and its two alarms.
 
 - **On demand or Spot:** `on_demand` in `terraform.tfvars` (true until the t4g.small free
-  trial ends on 2026-12-31, then false), then `make tf-plan tf-apply`. The running host
-  stays until it's replaced.
+  trial ends on 2026-12-31, then false), `make tf-plan tf-apply`, then an instance refresh
+  (below): the running host only changes when it's replaced.
 - **Which types:** `instance_types`, all Graviton with 2 GB or more. On demand uses the
   first; Spot picks by price and spare capacity.
 - **Roll out a new launch template** (user data, disk size, types for on demand):
