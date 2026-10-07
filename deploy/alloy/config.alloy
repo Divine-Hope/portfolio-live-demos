@@ -72,7 +72,7 @@ prometheus.scrape "clickhouse" {
 prometheus.relabel "clickhouse" {
 	rule {
 		source_labels = ["__name__"]
-		regex         = "ClickHouseMetrics_(Query|MemoryTracking|MemoryTrackingUncorrected|PartsActive|DelayedInserts|BackgroundMergesAndMutationsPoolTask|HTTPConnection)|ClickHouseProfileEvents_(Query|SelectQuery|InsertQuery|FailedQuery|FailedSelectQuery|FailedInsertQuery|InsertedRows|InsertedBytes|SelectedRows|Merge|MergedRows|DelayedInserts|RejectedInserts|QueryMemoryLimitExceeded|S3ReadRequestsErrors|S3WriteRequestsErrors)|ClickHouseAsyncMetrics_(Uptime|MemoryResident|CGroupMemoryUsed|CGroupMemoryTotal|MaxPartCountForPartition|TotalPartsOfMergeTreeTables|TotalBytesOfMergeTreeTables|FilesystemMainPathUsedBytes|FilesystemMainPathTotalBytes)"
+		regex         = "up|ClickHouseMetrics_(Query|MemoryTracking|MemoryTrackingUncorrected|PartsActive|DelayedInserts|BackgroundMergesAndMutationsPoolTask|HTTPConnection)|ClickHouseProfileEvents_(Query|SelectQuery|InsertQuery|FailedQuery|FailedSelectQuery|FailedInsertQuery|InsertedRows|InsertedBytes|SelectedRows|Merge|MergedRows|DelayedInserts|RejectedInserts|QueryMemoryLimitExceeded|S3ReadRequestsErrors|S3WriteRequestsErrors)|ClickHouseAsyncMetrics_(Uptime|MemoryResident|CGroupMemoryUsed|CGroupMemoryTotal|MaxPartCountForPartition|TotalPartsOfMergeTreeTables|TotalBytesOfMergeTreeTables|FilesystemMainPathUsedBytes|FilesystemMainPathTotalBytes)"
 		action        = "keep"
 	}
 	forward_to = [prometheus.remote_write.cloud.receiver]
@@ -107,6 +107,12 @@ prometheus.relabel "host" {
 	rule {
 		target_label = "job"
 		replacement  = "host"
+	}
+
+	// The container's hostname otherwise, which changes whenever Alloy is recreated.
+	rule {
+		target_label = "instance"
+		replacement  = "livedemos"
 	}
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
