@@ -229,9 +229,19 @@ aws ssm put-parameter --profile livedemos --region eu-west-1 --overwrite \
 The next deploy (or re-running the last one) puts it in the host's `.env`. To rotate it,
 do the same with a new token, then delete the old one in Grafana Cloud.
 
-**Dashboard:** "Live demos: pipeline". Change `deploy/grafana/build_dashboard.py`, run it,
-commit both files, and import `livedemos.json` (Dashboards > New > Import, same uid, so it
-replaces the old one).
+**Dashboard and alert rules:** "Live demos: pipeline" and the rule group `livedemos` are
+code. Change `deploy/grafana/build_dashboard.py` or `build_alerts.py`, run it, commit both
+files, then load them with a service account token (Editor role, made for the occasion):
+`GRAFANA_URL=https://<stack>.grafana.net GRAFANA_TOKEN=... uv run python deploy/grafana/load.py`.
+
+Set once by hand, in Alerting: the email contact point `livedemos-email` (the budget
+address; kept out of this repo) and a notification policy route `project = livedemos` to
+it, grouped by `alertname`, repeating every 4 hours.
+
+**Outside-in check:** Testing & synthetics > Synthetics, `livedemos-live-json`, as in
+`deploy/grafana/synthetic-check.json`: once a minute from London, failing unless
+`live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure.
+About 44,000 runs a month, inside the free tier's 100,000.
 
 **Logs:** Explore, Loki, `{host="livedemos", service="ingest"}`; add `| json` to filter on
 fields, such as `| json | level="error"`.
