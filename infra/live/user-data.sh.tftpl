@@ -39,6 +39,20 @@ install -m 644 /opt/livedemos/deploy/host/livedemos.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now livedemos.service
 
+# Take the Elastic IP, and with it CloudFront's traffic, once this host's data is live:
+# restored from the archive and caught up with the stream (newest event under a minute
+# old). While a replacement catches up, the old host, if it's still running, keeps
+# serving. After 30 minutes, take it anyway: being live late beats never.
+token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+instance_id=$(curl -fsS -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id)
+for _ in $(seq 1 180); do
+  age=$(curl -fsS localhost/metrics 2>/dev/null | awk '/^api_last_event_age_seconds /{print $2}' || true)
+  if [ -n "$age" ] && awk -v a="$age" 'BEGIN{exit !(a < 60)}'; then break; fi
+  sleep 10
+done
+aws ec2 associate-address --region "${region}" --allocation-id "${eip_allocation}" \
+  --instance-id "$instance_id" --allow-reassociation
+
 # Host upkeep (security updates) last, and best effort: the stack is already running,
 # and every deploy runs it again.
 /opt/livedemos/deploy/host/harden.sh || echo "host upkeep failed; the next deploy retries it"

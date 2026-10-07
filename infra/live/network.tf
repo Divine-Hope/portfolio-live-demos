@@ -1,5 +1,6 @@
-# One public subnet and no NAT gateway: a NAT gateway alone would cost more than the
-# whole stack. The host reaches the internet through its Elastic IP.
+# Public subnets only, one per Availability Zone, and no NAT gateway: a NAT gateway alone
+# would cost more than the whole stack. The host reaches the internet through its public
+# IP. Three zones, so the Auto Scaling Group can find Spot capacity in any of them.
 
 resource "aws_vpc" "main" {
   cidr_block           = "10.20.0.0/16"
@@ -20,11 +21,13 @@ resource "aws_internet_gateway" "main" {
 }
 
 resource "aws_subnet" "public" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.20.1.0/24"
-  availability_zone = var.availability_zone
+  for_each = { for i, az in var.availability_zones : az => i }
 
-  tags = { Name = "${var.project}-public" }
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = "10.20.${each.value + 1}.0/24"
+  availability_zone = each.key
+
+  tags = { Name = "${var.project}-public-${each.key}" }
 }
 
 resource "aws_route_table" "public" {
@@ -39,7 +42,9 @@ resource "aws_route" "internet" {
 }
 
 resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
+  for_each = aws_subnet.public
+
+  subnet_id      = each.value.id
   route_table_id = aws_route_table.public.id
 }
 
@@ -68,4 +73,15 @@ resource "aws_vpc_security_group_egress_rule" "all" {
   description       = "Wikimedia stream, image pulls, SSM, S3"
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
+}
+
+# The single host's subnet and its route, kept as the first zone's.
+moved {
+  from = aws_subnet.public
+  to   = aws_subnet.public["eu-west-1a"]
+}
+
+moved {
+  from = aws_route_table_association.public
+  to   = aws_route_table_association.public["eu-west-1a"]
 }

@@ -13,3 +13,4 @@ Short notes on decisions that shaped this project: the context, what was decided
 | [0007](0007-single-host-docker-compose.md) | One EC2 host running Docker Compose | Accepted |
 | [0008](0008-grafana-cloud-observability.md) | Grafana Cloud for observability, CloudWatch only for AWS-level alarms | Accepted |
 | [0009](0009-versioned-migrations-separate-user.md) | Versioned migrations, applied by a user only they run as | Accepted |
+| [0010](0010-spot-host-in-an-auto-scaling-group.md) | Keep 2 GB, run it as a Spot host in an Auto Scaling Group of one | Accepted |

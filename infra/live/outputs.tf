@@ -13,9 +13,9 @@ output "live_url" {
   value       = "https://${aws_cloudfront_distribution.api.domain_name}/v1/wikipedia/live.json"
 }
 
-output "instance_id" {
-  description = "For `aws ssm start-session --target <id>`."
-  value       = aws_instance.host.id
+output "host_group" {
+  description = "The host's Auto Scaling Group. `make host-id` finds its instance."
+  value       = aws_autoscaling_group.host.name
 }
 
 output "snapshots_bucket" {

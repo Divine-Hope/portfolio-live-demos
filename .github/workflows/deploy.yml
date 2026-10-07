@@ -190,23 +190,36 @@ jobs:
 
       - name: Run the deploy script on the host
         run: |
-          instance=$(aws ssm get-parameter --name /livedemos-deploy/instance-id --query Parameter.Value --output text)
+          # The Auto Scaling Group can replace the host, so find it by its Name tag. During a
+          # replacement there are two for a few minutes; deploy to both.
+          name=$(aws ssm get-parameter --name /livedemos-deploy/host-name --query Parameter.Value --output text)
+          mapfile -t instances < <(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=$name" "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' --output text | tr '\t' '\n' | grep .)
+          if [ "${#instances[@]}" -eq 0 ]; then
+            echo "::error::no running host tagged $name"
+            exit 1
+          fi
           params=$(jq -nc --arg cmd "/opt/livedemos/deploy/host/deploy.sh $SHA" '{commands: [$cmd]}')
-          command=$(aws ssm send-command --instance-ids "$instance" --document-name AWS-RunShellScript \
+          command=$(aws ssm send-command --instance-ids "${instances[@]}" --document-name AWS-RunShellScript \
             --comment "deploy $SHA" --parameters "$params" --query Command.CommandId --output text)
 
-          status=Pending
-          for _ in $(seq 1 90); do   # up to 7.5 minutes; most of it is the image pull
-            sleep 5
-            status=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$instance" \
-              --query Status --output text 2>/dev/null || echo Pending)
-            case "$status" in Success | Failed | Cancelled | TimedOut) break ;; esac
+          failed=0
+          for instance in "${instances[@]}"; do
+            status=Pending
+            for _ in $(seq 1 90); do   # up to 7.5 minutes; most of it is the image pull
+              sleep 5
+              status=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$instance" \
+                --query Status --output text 2>/dev/null || echo Pending)
+              case "$status" in Success | Failed | Cancelled | TimedOut) break ;; esac
+            done
+            echo "== $instance: $status"
+            aws ssm get-command-invocation --command-id "$command" --instance-id "$instance" \
+              --query '[StandardOutputContent, StandardErrorContent]' --output text || true
+            [ "$status" = Success ] || failed=1
           done
-
-          aws ssm get-command-invocation --command-id "$command" --instance-id "$instance" \
-            --query '[StandardOutputContent, StandardErrorContent]' --output text || true
-          if [ "$status" != Success ]; then
-            echo "::error::deploy script ended with status $status"
+          if [ "$failed" != 0 ]; then
+            echo "::error::the deploy script failed on a host"
             exit 1
           fi
 

@@ -45,7 +45,7 @@ CloudFront sends one request a second to the API whatever the viewer count: one 
 flowchart TB
     WM["Wikimedia EventStreams<br/>(SSE, resumable)"]
 
-    subgraph EC2["One EC2 t4g.small, Docker Compose"]
+    subgraph EC2["One EC2 host (Auto Scaling Group of 1), Docker Compose"]
         ING["ingest<br/>Python, asyncio"]
         CH[("ClickHouse<br/>raw 7 days + per-minute rollups")]
         API["api<br/>FastAPI, 1 s snapshot"]
@@ -67,7 +67,7 @@ flowchart TB
     CF -- "poll every 2 s" --> PAGE
 ```
 
-What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
+What runs in AWS today: the same containers under Docker Compose on one EC2 host (an Auto Scaling Group of one, so a lost host replaces itself), behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
 
 ## Components
 
@@ -176,8 +176,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
 | api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
-| Whole host lost | `terraform apply -replace`; `migrate` restores raw rows and the rollup from Parquet, ingest replays the outage from the stream. No manual data steps | no-data alert |
-| Host hardware or OS stops answering | CloudWatch recovers (system check) or reboots (instance check) the instance | alarm email |
+| Whole host lost (a Spot reclaim, a failed health check, hardware) | The Auto Scaling Group launches a replacement; `migrate` restores raw rows and the rollup from Parquet, ingest replays the outage from the stream, and the new host takes the Elastic IP once it's live. No manual steps | launch and termination emails, no-data alert |
 
 ## Security
 
@@ -202,12 +201,15 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 
 | Item | Monthly |
 |---|---|
-| EC2 t4g.small | free trial until 31 Dec 2026, then about $12 |
-| EBS 25 GB gp3 + public IPv4 | about $6 |
+| EC2: one host in an Auto Scaling Group | free until 31 Dec 2026 (on-demand t4g.small, free trial); then Spot, about $6 to $9 |
+| EBS 16 GB gp3 ($0.088/GB) + public IPv4 ($0.005/h) | $1.41 + $3.65 |
 | CloudFront, Grafana Cloud, Cloudflare Pages | free tiers |
 | S3: fallback snapshot and Parquet archive | about 1 cent at first, about 7 cents after a year (below) |
 
-About $6 a month until the end of 2026. The real bill goes in the README once there is one.
+About $5 a month until the end of 2026, then about $11 to $14 on Spot, against $18.50 on
+demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on
+2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md).
+The real bill goes in the README once there is one.
 
 **The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Its first 30 archive files held 270,562 edits in 13.3 MB: 49 bytes an edit with zstd. That's about 0.46 MB an hour, 11 MB a day, 0.33 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 
