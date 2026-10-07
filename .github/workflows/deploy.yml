@@ -195,6 +195,7 @@ jobs:
           # the group while it lasts (legacy-host.tf). A host still starting up isn't a
           # target: it starts from the image tag recorded above anyway.
           name=$(aws ssm get-parameter --name /livedemos-deploy/host-name --query Parameter.Value --output text)
+          # shellcheck disable=SC2016  # backticks below are JMESPath literals, not shell
           mapfile -t instances < <(
             {
               aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$name" \
