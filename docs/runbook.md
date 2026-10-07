@@ -352,7 +352,22 @@ Each alert, triggered on purpose:
 | Ingest stalled, No data | `$dc stop ingest` | `$dc start ingest` |
 | No data (everything) | `$dc stop alloy` | `$dc start alloy` |
 | Disk over 80% | `fallocate -l <size> /var/tmp/drill` (enough to pass 80%) | `rm /var/tmp/drill` |
-| API 5xx, live.json check | `aws ssm put-parameter --overwrite --name /livedemos/api-drill-5xx --value true`, then redeploy | the same with `false`, then redeploy |
+| API 5xx, live.json check | `API_DRILL_5XX=true $dc up -d api` (or the SSM parameter `/livedemos/api-drill-5xx` and a redeploy) | `$dc up -d api` |
+
+**Drill, 2026-10-07 (UTC).** Every alert emailed and resolved by itself:
+
+| Trigger | Alert | Firing | Resolved |
+|---|---|---|---|
+| `stop ingest` at 12:22 | live.json check | 12:26 | 12:29 |
+| | Ingest stalled, No data (ingest) | 12:28 | 12:29, a minute after `start ingest` |
+| `stop alloy` at 12:31 | Ingest stalled, No data (all four) | 12:41 to 12:42 | 12:44, a minute after `start alloy` |
+| 15 GB file at 12:43 (disk 82%) | Disk over 80% | 12:50 | 12:52 |
+| drill switch on at 12:51 | live.json check | 12:54 | 13:05 |
+| | API 5xx over 1% | 13:03 | 13:08 |
+
+The live.json check fired 3 to 4 minutes after the page stopped being live. Losing
+Alloy takes about 10 minutes to alert: a series counts as gone 5 minutes after its last
+sample, then the rule waits 5 more.
 
 ## Other signals
 
