@@ -208,18 +208,23 @@ resource "aws_autoscaling_group" "host" {
 
   # A new host only counts as in service once it's live and holds the Elastic IP: user
   # data completes this hook (CONTINUE), or abandons it if the stack can't start, and the
-  # group then terminates it and tries again. One that never answers is abandoned after an
-  # hour. Until then the old host, if it's still there, keeps serving: Capacity
+  # group then terminates it and tries again. One that never answers is abandoned after two
+  # hours: the longest the user data can take (install, a 30-minute restore, 25 minutes of
+  # readiness waits), with room. Until then the old host, if it's still there, keeps serving: Capacity
   # Rebalancing only retires it once the replacement is in service.
   initial_lifecycle_hook {
     name                 = "live"
     lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"
     default_result       = "ABANDON"
-    heartbeat_timeout    = 3600
+    heartbeat_timeout    = 7200 # the most a hook allows
   }
 
   health_check_type         = "EC2"
   health_check_grace_period = 300
+
+  # Don't hold the apply until the host is in service: that's up to an hour or two, and
+  # the runbook checks it. Terraform's default would fail the apply after 10 minutes.
+  wait_for_capacity_timeout = "0"
 
   # Start a replacement when AWS warns a Spot host is at risk, not only when it's taken.
   capacity_rebalance = true

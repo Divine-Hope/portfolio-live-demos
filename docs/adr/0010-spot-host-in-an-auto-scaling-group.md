@@ -70,9 +70,9 @@ manual steps, in 7 min 50 s in the drill, with the chart continuous afterwards.
 - Each Spot reclaim costs up to about 8 minutes of "Paused" when the host goes before its
   replacement is live, and none when the rebalance warning comes early enough: the old host
   is only retired once the replacement is in service. Plus a few emails.
-- Two hosts overlap during a replacement. Each has its own ClickHouse; both archive to the
-  same bucket, so the archive reads a file back before replacing it and never replaces it
-  with fewer rows; deploys go to both.
+- Two hosts overlap during a replacement, each with its own ClickHouse. Only the one
+  holding the Elastic IP archives (it checks its public IP each run), and the archive also
+  reads a file back before replacing it, so neither can shrink a file. Deploys go to both.
 - A replacement has 2 days of raw rows, not 7. The page and "Query it" (24 hours on raw
   rows, 3 and 7 days on the rollup) are unaffected; the 90-day rollup comes back whole.
 - The per-instance CloudWatch recover and reboot alarms go: the group's health check
