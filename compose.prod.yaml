@@ -63,10 +63,11 @@ services:
     logging: *logging
 
   # Metrics and logs to Grafana Cloud (deploy/alloy/config.alloy, ADR 0008). Production
-  # only: locally there's nowhere to send them. It reads the Docker socket (container
-  # logs, memory per container) and the host's /proc and /sys, all read-only.
+  # only: locally there's nowhere to send them. It reads the host's /proc and /sys, and
+  # the Docker socket for container logs and memory. The socket is root-equivalent, read-
+  # only or not, so the image is pinned by digest: it's trusted like the host itself.
   alloy:
-    image: grafana/alloy:v1.20.1
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
     restart: unless-stopped
     command:
       - run
@@ -86,8 +87,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      - /:/host/root:ro
-      - /var/lib/docker:/var/lib/docker:ro
+      # cAdvisor finds each container's layer here. Not /var/lib/docker/containers: the
+      # containers' configs hold their environment, passwords included.
+      - /var/lib/docker/image:/var/lib/docker/image:ro
     cgroup: host              # cAdvisor reads every container's cgroup
     mem_limit: 160m
     oom_score_adj: 800        # the first to go: losing metrics for a minute costs nothing

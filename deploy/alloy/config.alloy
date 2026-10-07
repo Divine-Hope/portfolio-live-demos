@@ -55,7 +55,7 @@ prometheus.scrape "app" {
 prometheus.relabel "app" {
 	rule {
 		source_labels = ["__name__"]
-		regex         = "python_gc_.*|python_info|process_(virtual_memory|max_fds|open_fds|start_time)_.*"
+		regex         = "python_gc_.*|python_info|process_(virtual_memory|start_time)_.*|process_(open|max)_fds"
 		action        = "drop"
 	}
 	forward_to = [prometheus.remote_write.cloud.receiver]
@@ -72,24 +72,20 @@ prometheus.scrape "clickhouse" {
 prometheus.relabel "clickhouse" {
 	rule {
 		source_labels = ["__name__"]
-		regex         = "ClickHouseMetrics_(Query|MemoryTracking|MemoryTrackingUncorrected|PartsActive|DelayedInserts|BackgroundMergesAndMutationsPoolTask|HTTPConnection)|ClickHouseProfileEvents_(Query|SelectQuery|InsertQuery|FailedQuery|FailedSelectQuery|FailedInsertQuery|InsertedRows|InsertedBytes|SelectedRows|Merge|MergedRows|DelayedInserts|RejectedInserts|QueryMemoryLimitExceeded|S3ReadRequestsErrors|S3WriteRequestsErrors)|ClickHouseAsyncMetrics_(Uptime|MemoryResident|CGroupMemoryUsed|CGroupMemoryTotal|MaxPartCountForPartition|TotalPartsOfMergeTreeTables|TotalBytesOfMergeTreeTables)"
+		regex         = "ClickHouseMetrics_(Query|MemoryTracking|MemoryTrackingUncorrected|PartsActive|DelayedInserts|BackgroundMergesAndMutationsPoolTask|HTTPConnection)|ClickHouseProfileEvents_(Query|SelectQuery|InsertQuery|FailedQuery|FailedSelectQuery|FailedInsertQuery|InsertedRows|InsertedBytes|SelectedRows|Merge|MergedRows|DelayedInserts|RejectedInserts|QueryMemoryLimitExceeded|S3ReadRequestsErrors|S3WriteRequestsErrors)|ClickHouseAsyncMetrics_(Uptime|MemoryResident|CGroupMemoryUsed|CGroupMemoryTotal|MaxPartCountForPartition|TotalPartsOfMergeTreeTables|TotalBytesOfMergeTreeTables|FilesystemMainPathUsedBytes|FilesystemMainPathTotalBytes)"
 		action        = "keep"
 	}
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
 
 // ---- The host ---------------------------------------------------------------------------
+// Disk use comes from ClickHouse (FilesystemMainPath*, above): its data is on the root
+// disk, so the host's / isn't mounted into Alloy at all.
 
 prometheus.exporter.unix "host" {
 	procfs_path    = "/host/proc"
 	sysfs_path     = "/host/sys"
-	rootfs_path    = "/host/root"
-	set_collectors = ["cpu", "meminfo", "loadavg", "filesystem", "diskstats", "netdev", "vmstat", "pressure"]
-
-	filesystem {
-		mount_points_exclude = "^/(dev|proc|run|sys|var/lib/docker/.+)($|/)"
-		fs_types_exclude     = "^(overlay|tmpfs|squashfs|nsfs|proc|sysfs|cgroup2?)$"
-	}
+	set_collectors = ["cpu", "meminfo", "loadavg", "diskstats", "netdev", "vmstat", "pressure"]
 
 	netdev {
 		device_exclude = "^(lo|veth.*|br-.*|docker.*)$"
@@ -174,6 +170,13 @@ discovery.relabel "logs" {
 	rule {
 		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
 		target_label  = "service"
+	}
+
+	// Not Alloy's own logs: a push error it logs would be shipped, fail, and be logged again.
+	rule {
+		source_labels = ["service"]
+		regex         = "alloy"
+		action        = "drop"
 	}
 }
 

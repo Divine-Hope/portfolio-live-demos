@@ -57,14 +57,12 @@ resource "aws_ssm_parameter" "image_tag" {
 }
 
 # Alloy's Grafana Cloud access policy token (metrics:write, logs:write). Created in Grafana
-# Cloud, so it can't be generated here: Terraform makes the parameter, and the token goes
-# in by hand (docs/runbook.md, "Grafana Cloud"). Terraform never reads or resets it.
+# Cloud, so it can't be generated here: Terraform makes the parameter with a placeholder,
+# write-only so no value ever lands in state, and the token goes in by hand
+# (docs/runbook.md, "Grafana Cloud"). Bumping the version would reset it to the placeholder.
 resource "aws_ssm_parameter" "grafana_cloud_token" {
-  name  = "${local.ssm_prefix}/grafana-cloud-token"
-  type  = "SecureString"
-  value = "unset"
-
-  lifecycle {
-    ignore_changes = [value]
-  }
+  name             = "${local.ssm_prefix}/grafana-cloud-token"
+  type             = "SecureString"
+  value_wo         = "unset"
+  value_wo_version = 1
 }

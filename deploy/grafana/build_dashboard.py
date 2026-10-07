@@ -123,11 +123,11 @@ PANELS = [
         y=32,
     ),
     panel(
-        "Disk used",
+        "Disk used (the root disk, where ClickHouse keeps its data)",
         [
             (
-                "1 - node_filesystem_avail_bytes{mountpoint='/'}"
-                " / node_filesystem_size_bytes{mountpoint='/'}",
+                "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes)"
+                " / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
                 "/",
             )
         ],

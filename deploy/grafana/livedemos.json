@@ -405,7 +405,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Disk used",
+      "title": "Disk used (the root disk, where ClickHouse keeps its data)",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -426,7 +426,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "1 - node_filesystem_avail_bytes{mountpoint='/'} / node_filesystem_size_bytes{mountpoint='/'}",
+          "expr": "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes) / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
           "legendFormat": "/",
           "datasource": {
             "type": "prometheus",

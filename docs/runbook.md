@@ -61,7 +61,9 @@ plans again and refuses if that plan changes anything other than what you approv
      `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
 3. Repository variables: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`),
    `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`) and
-   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`).
+   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`) and `TF_GRAFANA_CLOUD`
+   (the `grafana_cloud` from `terraform.tfvars`, on one line:
+   `{prom_url="https://.../api/prom/push",prom_user="123",loki_url="https://.../loki/api/v1/push",loki_user="456"}`).
 
 ## Rotate a secret
 
