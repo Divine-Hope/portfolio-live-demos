@@ -22,7 +22,7 @@ def test_languages_come_back_in_a_stable_order() -> None:
 
 @pytest.mark.parametrize(
     ("lang", "window"),
-    [("fr", "5m"), ("en,xx", "5m"), (",", "5m"), ("en", "7d"), ("en", "1; DROP TABLE x")],
+    [("fr", "5m"), ("en,xx", "5m"), (",", "5m"), ("en", "30d"), ("en", "1; DROP TABLE x")],
 )
 def test_rejects_anything_not_allowlisted(lang: str, window: str) -> None:
     with pytest.raises(BadRequest):
@@ -114,7 +114,11 @@ async def test_queries_across_keys_are_capped() -> None:
                 running -= 1
 
     service = ActivityService(Counting(delay_s=0.02), ttl_s=10, max_concurrency=2, max_pending=9)
-    keys = [parse_request(lang, w, allowed=LANGS) for lang in LANGS for w in ("5m", "1h", "24h")]
+    keys = [
+        parse_request(lang, w, allowed=LANGS)
+        for lang in LANGS
+        for w in ("5m", "1h", "24h", "3d", "7d")
+    ]
     await asyncio.gather(*(service.get(k) for k in keys))
     assert peak <= 2
 

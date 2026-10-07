@@ -311,6 +311,12 @@ async def test_query_it_reports_clickhouse_timing(ch: ClickHouse) -> None:
     assert payload["query"]["rows_read"] >= 200
     assert payload["query"]["elapsed_ms"] > 0
 
+    # A week comes from the rollup: same edits, no distinct-page count, few rows read.
+    week = await service.get(parse_request("en", "7d", allowed=["en", "pt", "de"]))
+    assert week["edits"] == 200
+    assert week["pages_edited"] is None
+    assert week["query"]["rows_read"] < 200
+
 
 async def test_a_retry_cant_run_alongside_the_insert_it_retries(ch: ClickHouse) -> None:
     """What ingest's retry relies on: while an insert runs, its query id is taken; once it

@@ -35,6 +35,19 @@ WHERE event_time > fromUnixTimestamp64Milli({to_ms:Int64}) - toIntervalSecond({w
 GROUP BY lang
 """
 
+# 3 and 7 days: from the per-minute rollup. Raw rows only last 7 days (and a rebuilt host
+# restores 2), and a week of them is millions of rows; the rollup is about 10,000 rows per
+# language a week. It can't count distinct pages, so those windows don't.
+WINDOW_TOTALS_FROM_ROLLUP = """
+SELECT lang, sum(edits) AS edits, sum(bot_edits) AS bot_edits
+FROM wiki_edits_per_minute
+WHERE minute > toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64}))
+              - toIntervalSecond({window_s:UInt32})
+  AND minute <= fromUnixTimestamp64Milli({to_ms:Int64})
+  AND lang IN {langs:Array(String)}
+GROUP BY lang
+"""
+
 TOP_ARTICLES = """
 SELECT lang, title, count() AS edits
 FROM wiki_edits
