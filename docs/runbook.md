@@ -8,7 +8,7 @@ Day-to-day operations for the production host. Everything here uses your SSO pro
 There's no SSH key and port 22 is closed. Session Manager:
 
 ```
-aws ssm start-session --target "$(terraform -chdir=infra/live output -raw instance_id)"
+aws ssm start-session --target "$(make -s host-id)"
 sudo -i
 cd /opt/livedemos
 docker compose -f compose.yaml -f compose.prod.yaml ps
@@ -79,17 +79,45 @@ terraform -chdir=infra/live apply -replace='random_password.secret["clickhouse-a
 Compose recreates every container whose settings changed. The origin secret works the
 same way; CloudFront picks up the new value in the same apply.
 
-## Resize the host
+## The host and its Auto Scaling Group
 
-Change `instance_type` (e.g. `t4g.medium`) in `infra/live/terraform.tfvars`, then
-`make tf-plan tf-apply`. AWS stops and starts the instance. The Elastic IP keeps
-CloudFront pointed at it, and `livedemos.service` brings the stack back.
+The host is the only instance of the Auto Scaling Group `livedemos-host` ([ADR
+0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). If it's reclaimed (Spot) or fails
+its EC2 health check, the group launches a replacement in any of three zones. A launch
+hook (`live`) keeps it out of service while it restores itself (below); it takes the
+Elastic IP once its data is live, then completes the hook. A host whose stack doesn't start
+abandons the hook and the group tries again. Every launch and termination is emailed.
+`make host-id` is whichever host holds the Elastic IP. A new host's progress is in
+`/var/log/cloud-init-output.log`.
+
+### Moving to the Auto Scaling Group (once)
+
+1. Apply with `infra/live/legacy-host.tf` in place: it adds the group and keeps the old
+   host. The group's first host restores, goes live and takes the Elastic IP; the old one
+   stops getting traffic.
+2. Check: `make -s host-id` is the group's host, `/readyz` through CloudFront, and
+   `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names livedemos-host`
+   shows it `InService`.
+3. Delete `legacy-host.tf` and the `instance-id` deploy parameter, then `make tf-plan
+   tf-apply` by hand: it destroys the old host and its two alarms.
+
+- **On demand or Spot:** `on_demand` in `terraform.tfvars` (true until the t4g.small free
+  trial ends on 2026-12-31, then false), `make tf-plan tf-apply`, then an instance refresh
+  (below): the running host only changes when it's replaced.
+- **Which types:** `instance_types`, all Graviton with 2 GB or more. On demand uses the
+  first; Spot picks by price and spare capacity.
+- **Roll out a new launch template** (user data, disk size, types for on demand):
+  `aws autoscaling start-instance-refresh --auto-scaling-group-name livedemos-host`.
 
 ## Rebuild the host from scratch
 
 ```
-terraform -chdir=infra/live apply -replace=aws_instance.host
+aws autoscaling terminate-instance-in-auto-scaling-group --no-should-decrement-desired-capacity \
+  --instance-id "$(make -s host-id)"
 ```
+
+The group launches a replacement, exactly as after a Spot reclaim. (Before the group,
+this was `terraform apply -replace=aws_instance.host`.)
 
 No data steps. User data installs Docker, checks out the repo, applies host upkeep
 (`deploy/host/harden.sh`) and starts the stack with the image tag in SSM. ClickHouse starts
@@ -126,16 +154,18 @@ the fallback for a minute or two. To see what happened: `journalctl -u dnf-autom
 reboot-if-needed --since -7d`. To skip this week's reboot: `systemctl stop
 reboot-if-needed.timer` (the next deploy turns it back on).
 
-## Host alarms (CloudWatch)
+## Host replacements
 
-Both email the budget address (confirm the subscription once) and act on their own:
+The Auto Scaling Group emails the budget address (confirm the subscription once) on every
+launch and termination, and when either fails. A termination you didn't start is a Spot
+reclaim or a failed health check: the group is already launching a replacement.
 
-| Alarm | Means | Does | First checks |
-|---|---|---|---|
-| `livedemos-host-system-check` | AWS's side failed (hardware, host network) for 2 minutes | Recovers the instance onto new hardware; same ID, IPs and disk | AWS Health dashboard; once it's back, `/readyz` |
-| `livedemos-host-instance-check` | The OS stopped answering for 3 minutes (kernel panic, memory exhausted) | Reboots it | After the reboot: `journalctl -b -1 -p err`, `dmesg \| grep -i oom`, `docker stats` |
-
-If either keeps firing, rebuild the host from scratch (above).
+1. `aws autoscaling describe-scaling-activities --auto-scaling-group-name livedemos-host
+   --max-items 5`: why it happened.
+2. The replacement takes about 8 minutes to be live (the drill above); meanwhile CloudFront
+   serves the fallback copy, unless the old host is still up and serving.
+3. A failed launch (no Spot capacity in any zone, for every type): set `on_demand = true`
+   and apply, or add a type to `instance_types`.
 
 ## Schema changes
 
@@ -273,7 +303,7 @@ A scrape of ingest, the API, the archive or ClickHouse failed for 5 minutes, or 
 arrived at all, meaning Alloy or the host is down.
 
 1. Several services at once: is the host up? `/readyz` through CloudFront, the EC2 console,
-   the CloudWatch host alarms.
+   the Auto Scaling Group's activity (a replacement in progress).
 2. One service: `$dc ps` and `$dc logs --tail 50 <service>`.
 3. Everything but the host is fine: `$dc logs --tail 50 alloy` (a 401 is the token).
 
@@ -304,7 +334,8 @@ memory, and everything slows down.
 
 1. `free -m` and the dashboard's host memory panel.
 2. `docker stats --no-stream`: which container grew.
-3. A lasting need: `instance_type` to `t4g.medium` ("Resize the host", above).
+3. A lasting need: put `t4g.medium` first in `instance_types` ("The host and its Auto
+   Scaling Group", above).
 
 ### Disk over 80%
 

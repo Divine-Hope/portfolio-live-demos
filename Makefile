@@ -117,6 +117,11 @@ tf-bootstrap: ## AWS: create the Terraform state bucket (once per account)
 tf-init: ## AWS: connect infra/live to the state bucket
 	$(TF) -chdir=infra/live init -input=false -backend-config=backend.hcl
 
+.PHONY: host-id
+host-id: ## AWS: the live host's instance id: whichever holds the Elastic IP
+	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-addresses --region eu-west-1 \
+		--filters Name=tag:Name,Values=livedemos-host --query 'Addresses[0].InstanceId' --output text
+
 .PHONY: tf-plan
 tf-plan: ## AWS: show what infra/live would change, and save the plan
 	$(TF) -chdir=infra/live plan -input=false -out=tfplan

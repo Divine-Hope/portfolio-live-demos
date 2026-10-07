@@ -1,7 +1,7 @@
 # 0007. One EC2 host running Docker Compose
 
 Date: 2026-10-04
-Status: Accepted
+Status: Accepted. The host is now an Auto Scaling Group of one ([0010](0010-spot-host-in-an-auto-scaling-group.md))
 
 ## Context
 

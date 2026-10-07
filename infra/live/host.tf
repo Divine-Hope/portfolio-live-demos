@@ -1,5 +1,9 @@
-# One small host running the same Docker Compose stack as local. No SSH key exists:
-# `aws ssm start-session --target <instance id>` gets a shell.
+# One small host running the same Docker Compose stack as local, kept alive by an Auto
+# Scaling Group of exactly one (ADR 0010). If it's reclaimed (Spot) or fails its health
+# check, the group launches another, which restores itself from the archive (the same path
+# as the rebuild drill) and only then takes the Elastic IP, so CloudFront moves to it when
+# it's live. No SSH key exists: `aws ssm start-session --target <instance id>` gets a shell;
+# `make host-id` finds the id.
 
 data "aws_ssm_parameter" "al2023_arm64" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"
@@ -42,6 +46,43 @@ data "aws_iam_policy_document" "host" {
     resources = ["${module.snapshots.arn}/v1/*"]
   }
 
+  # Takes the Elastic IP once its stack is live (user data). Only that address, and only
+  # for instances of this group.
+  statement {
+    sid       = "TakeTheElasticIp"
+    actions   = ["ec2:AssociateAddress"]
+    resources = [aws_eip.host.arn]
+  }
+
+  statement {
+    sid       = "TakeTheElasticIpForThisGroup"
+    actions   = ["ec2:AssociateAddress"]
+    resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:ResourceTag/Name"
+      values   = [local.host_group]
+    }
+  }
+
+  statement {
+    sid       = "TakeTheElasticIpOnItsInterface"
+    actions   = ["ec2:AssociateAddress"]
+    resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:network-interface/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ec2:ResourceTag/Name"
+      values   = [local.host_group]
+    }
+  }
+
+  # Say when a new host is live (or can't be), for the group's launch hook.
+  statement {
+    sid       = "CompleteItsLaunch"
+    actions   = ["autoscaling:CompleteLifecycleAction"]
+    resources = [local.host_group_arn]
+  }
+
   # The hourly Parquet archive, written and read back by ClickHouse's s3() with these
   # credentials. No delete: the host can add and rewrite hours, never remove them.
   statement {
@@ -73,17 +114,41 @@ resource "aws_iam_instance_profile" "host" {
   role = aws_iam_role.host.name
 }
 
-resource "aws_instance" "host" {
-  ami                    = data.aws_ssm_parameter.al2023_arm64.insecure_value
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.host.id]
-  iam_instance_profile   = aws_iam_instance_profile.host.name
-  monitoring             = false # detailed monitoring costs extra; Grafana Cloud covers it (M4)
+locals {
+  host_group = "${var.project}-host"
+  host_group_arn = join(":", [
+    "arn:aws:autoscaling:${var.region}:${data.aws_caller_identity.current.account_id}",
+    "autoScalingGroup:*:autoScalingGroupName/${local.host_group}",
+  ])
+  # CPU credits only exist for T types; any other type launched with the setting fails.
+  # So two launch templates, the same but for that.
+  launch_templates = { burstable = true, fixed = false }
+}
+
+resource "aws_launch_template" "host" {
+  for_each = local.launch_templates
+
+  name_prefix            = "${var.project}-host-${each.key}-"
+  image_id               = data.aws_ssm_parameter.al2023_arm64.insecure_value
+  update_default_version = true
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.host.name
+  }
+
+  # A public IP of its own, for the internet until it takes the Elastic IP.
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.host.id]
+    delete_on_termination       = true
+  }
 
   # Standard credits: a runaway process slows down instead of running up a bill.
-  credit_specification {
-    cpu_credits = "standard"
+  dynamic "credit_specification" {
+    for_each = each.value ? [1] : []
+    content {
+      cpu_credits = "standard"
+    }
   }
 
   # IMDSv2 only. Hop limit 2 so containers (the api writing to S3) can reach it.
@@ -93,37 +158,136 @@ resource "aws_instance" "host" {
     http_put_response_hop_limit = 2
   }
 
-  root_block_device {
-    volume_type           = "gp3"
-    volume_size           = var.root_volume_gb
-    encrypted             = true
-    delete_on_termination = true
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = var.root_volume_gb
+      encrypted             = true
+      delete_on_termination = true
+    }
   }
 
-  user_data = templatefile("${path.module}/user-data.sh.tftpl", {
+  monitoring {
+    enabled = false # detailed monitoring costs extra; Grafana Cloud covers it
+  }
+
+  user_data = base64encode(templatefile("${path.module}/user-data.sh.tftpl", {
     region          = var.region
     ssm_prefix      = local.ssm_prefix
     repo_url        = var.repo_url
     compose_version = var.compose_version
     compose_sha256  = var.compose_sha256
-  })
+    eip_allocation  = aws_eip.host.allocation_id
+    host_group      = local.host_group
+  }))
 
-  # User data only runs on first boot, and a new AMI shouldn't rebuild a running host.
-  # To rebuild on purpose: terraform apply -replace=aws_instance.host
-  lifecycle {
-    ignore_changes = [ami, user_data]
+  dynamic "tag_specifications" {
+    for_each = ["instance", "volume", "network-interface"]
+    content {
+      resource_type = tag_specifications.value
+      tags          = { Name = local.host_group }
+    }
   }
 
-  tags = { Name = "${var.project}-host" }
+  # A new AMI isn't a reason to change anything: hosts install security updates themselves
+  # (deploy/host/harden.sh). Refreshing the image is an instance refresh, on purpose.
+  lifecycle {
+    ignore_changes = [image_id]
+  }
 
   depends_on = [aws_ssm_parameter.settings, aws_ssm_parameter.secrets, aws_ssm_parameter.image_tag]
 }
 
-# A fixed address, so CloudFront's origin name survives a stop/start (e.g. resizing).
+resource "aws_autoscaling_group" "host" {
+  name                = local.host_group
+  min_size            = 1
+  max_size            = 2 # room for a replacement before the old host goes
+  desired_capacity    = 1
+  vpc_zone_identifier = [for s in aws_subnet.public : s.id]
+
+  # A new host only counts as in service once it's live and holds the Elastic IP: user
+  # data completes this hook (CONTINUE), or abandons it if the stack can't start, and the
+  # group then terminates it and tries again. One that never answers is abandoned after two
+  # hours: the longest the user data can take (install, a 30-minute restore, 25 minutes of
+  # readiness waits), with room. Until then the old host, if it's still there, keeps serving: Capacity
+  # Rebalancing only retires it once the replacement is in service.
+  initial_lifecycle_hook {
+    name                 = "live"
+    lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"
+    default_result       = "ABANDON"
+    heartbeat_timeout    = 7200 # the most a hook allows
+  }
+
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+
+  # Don't hold the apply until the host is in service: that's up to an hour or two, and
+  # the runbook checks it. Terraform's default would fail the apply after 10 minutes.
+  wait_for_capacity_timeout = "0"
+
+  # Start a replacement when AWS warns a Spot host is at risk, not only when it's taken.
+  capacity_rebalance = true
+
+  mixed_instances_policy {
+    instances_distribution {
+      on_demand_allocation_strategy            = "prioritized"
+      on_demand_base_capacity                  = var.on_demand ? 1 : 0
+      on_demand_percentage_above_base_capacity = 0
+      spot_allocation_strategy                 = "price-capacity-optimized"
+    }
+
+    launch_template {
+      launch_template_specification {
+        launch_template_id = aws_launch_template.host["fixed"].id
+        version            = "$Latest"
+      }
+
+      dynamic "override" {
+        for_each = var.instance_types
+        content {
+          instance_type = override.value
+          launch_template_specification {
+            launch_template_id = aws_launch_template.host[startswith(override.value, "t") ? "burstable" : "fixed"].id
+            version            = "$Latest"
+          }
+        }
+      }
+    }
+  }
+
+  tag {
+    key                 = "project"
+    value               = var.project
+    propagate_at_launch = true
+  }
+
+  # The host must be allowed to complete its hook and take the Elastic IP before it boots.
+  depends_on = [aws_iam_role_policy.host]
+}
+
+# Launches, terminations and failed launches, by email.
+resource "aws_autoscaling_notification" "host" {
+  group_names = [aws_autoscaling_group.host.name]
+  notifications = [
+    "autoscaling:EC2_INSTANCE_LAUNCH",
+    "autoscaling:EC2_INSTANCE_TERMINATE",
+    "autoscaling:EC2_INSTANCE_LAUNCH_ERROR",
+    "autoscaling:EC2_INSTANCE_TERMINATE_ERROR",
+  ]
+  topic_arn = aws_sns_topic.host_alarms.arn
+}
+
+# A fixed address for CloudFront's origin. Whichever host is live holds it: each new one
+# takes it in its user data, once its stack is up.
 resource "aws_eip" "host" {
-  domain   = "vpc"
-  instance = aws_instance.host.id
-  tags     = { Name = "${var.project}-host" }
+  domain = "vpc"
+  tags   = { Name = "${var.project}-host" }
+
+  # The host it was attached to before the group existed; the group's host takes it over.
+  lifecycle {
+    ignore_changes = [instance, network_interface]
+  }
 
   depends_on = [aws_internet_gateway.main]
 }

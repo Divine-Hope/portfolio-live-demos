@@ -157,6 +157,25 @@ async def test_a_scheduled_write_never_goes_ahead_with_fewer_rows(
     assert await file_count(edits, settings, H0) == 50
 
 
+async def test_a_file_another_host_grew_is_not_overwritten(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """Two hosts during a replacement: the other wrote 60 rows; this one has 50, and its
+    own record still says 40. It reads the file, leaves it, and records what it holds."""
+    archiver = Archiver(settings, edits)
+    extra = rows(10, start=at(H0 + 1000), first_seq=9000)
+    await edits.insert("wiki_edits", extra)
+    await archiver.archive_hour(H0, manual=True)  # the other host's 60-row file
+    await edits.execute(
+        "ALTER TABLE wiki_edits DELETE WHERE event_id IN {ids:Array(UUID)} "
+        "SETTINGS mutations_sync = 1",
+        params={"ids": [str(r["event_id"]) for r in extra]},
+    )
+    with pytest.raises(FewerRows):
+        await archiver.archive_hour(H0, floor=40)
+    assert await file_count(edits, settings, H0) == 60
+
+
 async def test_a_manual_rewrite_of_an_empty_hour_is_refused(
     edits: ClickHouse, settings: ArchiveSettings
 ) -> None:

@@ -158,6 +158,10 @@ class ArchiveSettings(BaseSettings):
     # After migrating, refill the rollup from the archive if raw rows are gone
     # (archive/restore.py). Off only to start a host while the archive can't be read.
     restore: bool = True
+    # Production: archive only while this host holds this public IP (the Elastic IP), so
+    # when the Auto Scaling Group overlaps two hosts only the live one writes (ADR 0010).
+    # Empty (local): always archive.
+    only_on_ip: str = ""
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:

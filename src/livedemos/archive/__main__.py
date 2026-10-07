@@ -16,6 +16,7 @@ import sys
 import time
 from datetime import UTC, datetime
 
+import httpx
 from prometheus_client import start_http_server
 
 from livedemos.archive import metrics
@@ -32,14 +33,38 @@ def _hour(value: str) -> int:
     return int(start.timestamp()) // HOUR_S * HOUR_S
 
 
-async def _serve(archiver: Archiver, interval_s: float) -> None:
+async def public_ip() -> str | None:
+    """This host's public IP, from the instance metadata service (IMDSv2)."""
+    imds = "http://169.254.169.254/latest"
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            token = await client.put(
+                f"{imds}/api/token", headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"}
+            )
+            token.raise_for_status()
+            ip = await client.get(
+                f"{imds}/meta-data/public-ipv4", headers={"X-aws-ec2-metadata-token": token.text}
+            )
+            ip.raise_for_status()
+            return ip.text.strip()
+    except httpx.HTTPError:
+        return None
+
+
+async def _serve(archiver: Archiver, interval_s: float, only_on_ip: str) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+    was_live: bool | None = None
     while not stop.is_set():
+        live = not only_on_ip or await public_ip() == only_on_ip
+        if live != was_live:
+            log.info("archiving" if live else "not the live host; not archiving")
+            was_live = live
         try:
-            await archiver.run_once(datetime.now(UTC))
+            if live:
+                await archiver.run_once(datetime.now(UTC))
         except ClickHouseError:  # couldn't even plan; try again next time
             log.exception("archive run failed")
         metrics.LAST_RUN.set(time.time())
@@ -65,7 +90,7 @@ async def main(args: argparse.Namespace) -> int:
             results = await archiver.run_once(datetime.now(UTC))
             return 0 if all(r.result == "written" for r in results) else 1
         start_http_server(settings.metrics_port)
-        await _serve(archiver, settings.interval_s)
+        await _serve(archiver, settings.interval_s, settings.only_on_ip)
         return 0
     finally:
         await ch.aclose()

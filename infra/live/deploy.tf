@@ -45,8 +45,8 @@ resource "aws_iam_role" "deploy" {
   max_session_duration = 3600
 }
 
-# Just enough to deploy: record the image tag, run the deploy script on the one host,
-# and read the result.
+# Just enough to deploy: record the image tag, run the deploy script on the host (any
+# instance of the group, found by its Name tag), and read the result.
 data "aws_iam_policy_document" "deploy" {
   statement {
     sid       = "RecordImageTag"
@@ -61,12 +61,27 @@ data "aws_iam_policy_document" "deploy" {
   }
 
   statement {
-    sid     = "RunOnTheHostOnly"
-    actions = ["ssm:SendCommand"]
-    resources = [
-      aws_instance.host.arn,
-      "arn:aws:ssm:${var.region}::document/AWS-RunShellScript",
-    ]
+    sid       = "RunOnTheHostOnly"
+    actions   = ["ssm:SendCommand"]
+    resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ssm:resourceTag/Name"
+      values   = [local.host_group]
+    }
+  }
+
+  statement {
+    sid       = "WithTheShellDocument"
+    actions   = ["ssm:SendCommand"]
+    resources = ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"]
+  }
+
+  # The host changes when the group replaces it, so the workflow looks it up.
+  statement {
+    sid       = "FindTheHost"
+    actions   = ["ec2:DescribeInstances", "autoscaling:DescribeAutoScalingGroups"]
+    resources = ["*"] # no resource-level permissions for Describe*
   }
 
   statement {
@@ -86,7 +101,8 @@ resource "aws_iam_role_policy" "deploy" {
 # in the host's .env.
 resource "aws_ssm_parameter" "deploy" {
   for_each = {
-    "instance-id" = aws_instance.host.id
+    "host-name"   = local.host_group
+    "instance-id" = aws_instance.host.id # legacy-host.tf; goes with it
     "api-domain"  = aws_cloudfront_distribution.api.domain_name
   }
   name  = "/${var.project}-deploy/${each.key}"

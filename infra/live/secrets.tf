@@ -35,6 +35,7 @@ resource "aws_ssm_parameter" "settings" {
     "api-snapshot-bucket" = module.snapshots.id
     "archive-url"         = "https://${module.archive.id}.s3.${var.region}.amazonaws.com/wikipedia/edits"
     "aws-default-region"  = var.region
+    "host-public-ip"      = aws_eip.host.public_ip # the archive runs only on the host holding it
     "grafana-prom-url"    = var.grafana_cloud.prom_url
     "grafana-prom-user"   = var.grafana_cloud.prom_user
     "grafana-loki-url"    = var.grafana_cloud.loki_url

@@ -3,6 +3,17 @@
 # and registers the service that runs the stack on every boot.
 set -euxo pipefail
 
+# Tell the Auto Scaling Group whether this host made it (its launch hook, host.tf): if
+# anything below fails, abandon, and the group replaces it.
+token=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+instance_id=$(curl -fsS -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/instance-id)
+launch_result() {
+  aws autoscaling complete-lifecycle-action --region "${region}" \
+    --auto-scaling-group-name "${host_group}" --lifecycle-hook-name live \
+    --instance-id "$instance_id" --lifecycle-action-result "$1"
+}
+trap 'launch_result ABANDON || true' ERR
+
 # 1 GB of swap: ClickHouse merges can spike memory on a 2 GB host.
 if [ ! -f /swapfile ]; then
   fallocate -l 1G /swapfile
@@ -38,6 +49,48 @@ chmod 700 /opt/livedemos
 install -m 644 /opt/livedemos/deploy/host/livedemos.service /etc/systemd/system/livedemos.service
 systemctl daemon-reload
 systemctl enable --now livedemos.service
+
+# Take the Elastic IP, and with it CloudFront's traffic, once this host's data is live:
+# restored from the archive and caught up with the stream (newest event under a minute
+# old). Meanwhile the old host, if it's still running, keeps serving. The stack must
+# answer within 10 minutes or the launch is abandoned; data that's still behind after 15
+# more is taken anyway (the page says how old it is), so an outage at Wikimedia can't
+# make every new host fail. The hook allows 2 hours for all of this (host.tf).
+# "Answers": the API built a snapshot in the last 10 seconds, so it and ClickHouse are up.
+# (/metrics, not /readyz: that one wants CloudFront's secret header.)
+metric() { curl -fsS localhost/metrics 2>/dev/null | awk -v m="$1" '$1 == m {print $2}' || true; }
+ready=0
+for _ in $(seq 1 60); do
+  built=$(metric api_last_snapshot_timestamp_seconds)
+  if [ -n "$built" ] && awk -v b="$built" -v now="$(date +%s)" 'BEGIN{exit !(now - b < 10)}'; then
+    ready=1
+    break
+  fi
+  sleep 10
+done
+[ "$ready" = 1 ]
+for _ in $(seq 1 90); do
+  age=$(metric api_last_event_age_seconds)   # NaN while there's no data at all
+  if [ -n "$age" ] && [ "$age" != NaN ] && awk -v a="$age" 'BEGIN{exit !(a < 60)}'; then break; fi
+  sleep 10
+done
+for attempt in $(seq 1 12); do   # IAM can take a minute to reach a brand-new host
+  if aws ec2 associate-address --region "${region}" --allocation-id "${eip_allocation}" \
+    --instance-id "$instance_id" --allow-reassociation; then break; fi
+  [ "$attempt" -lt 12 ]
+  sleep 15
+done
+trap - ERR
+# Must succeed: a host left waiting would be abandoned, live, when the hook times out.
+for attempt in $(seq 1 10); do
+  if launch_result CONTINUE; then break; fi
+  if [ "$attempt" -eq 10 ]; then
+    echo "couldn't complete the launch hook; abandoning, so the group replaces this host" >&2
+    launch_result ABANDON || true
+    exit 1
+  fi
+  sleep 15
+done
 
 # Host upkeep (security updates) last, and best effort: the stack is already running,
 # and every deploy runs it again.

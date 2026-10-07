@@ -11,6 +11,9 @@ SNAPSHOT_SECONDS = Histogram(
 LAST_EVENT_AGE = Gauge(
     "api_last_event_age_seconds", "Age of the newest event when the snapshot was built."
 )
+# Not 0 before there's an event: nothing would look perfectly fresh (a new host takes
+# production traffic once this is under a minute; infra/live/user-data.sh.tftpl).
+LAST_EVENT_AGE.set(float("nan"))
 LAST_SNAPSHOT_TS = Gauge(
     "api_last_snapshot_timestamp_seconds",
     "Wall-clock time of the last successful snapshot. Alert on time() minus this.",

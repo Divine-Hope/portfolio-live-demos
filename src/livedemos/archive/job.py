@@ -188,6 +188,14 @@ class Archiver:
             raise NothingToArchive("ClickHouse has no rows for that hour; the file is unchanged")
         if not manual and raw_before <= floor:
             raise FewerRows(f"{raw_before} raw rows, the file has {floor}; not rewritten")
+        if not manual and await self.existing_hours([hour_s]):
+            # Read the file itself too, not only this host's record of it: while the Auto
+            # Scaling Group replaces the host, two hosts archive at once, and the other
+            # may have written more since (ADR 0010).
+            in_file = await self._checked_count(hour_s)
+            if raw_before <= in_file:
+                await self._record(hour_s, in_file)
+                raise FewerRows(f"{raw_before} raw rows, the file has {in_file}; not rewritten")
         url = hour_url(self._settings.url, hour_s)
         await self._ch.execute(
             f"INSERT INTO FUNCTION {s3_function(self._settings, 'Parquet')} "

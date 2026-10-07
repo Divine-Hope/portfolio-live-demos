@@ -234,7 +234,6 @@ class Snapshotter:
 
     @staticmethod
     def _pack(payload: LivePayload, age: float | None) -> Snapshot:
-        if age is not None:
-            metrics.LAST_EVENT_AGE.set(age)
+        metrics.LAST_EVENT_AGE.set(float("nan") if age is None else age)
         body = json.dumps(payload, separators=(",", ":")).encode()
         return Snapshot(body=body, built_at=time.monotonic(), last_event_age_s=age)

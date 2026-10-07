@@ -45,7 +45,7 @@ CloudFront sends one request a second to the API whatever the viewer count: one 
 flowchart TB
     WM["Wikimedia EventStreams<br/>(SSE, resumable)"]
 
-    subgraph EC2["One EC2 t4g.small, Docker Compose"]
+    subgraph EC2["One EC2 host (Auto Scaling Group of 1), Docker Compose"]
         ING["ingest<br/>Python, asyncio"]
         CH[("ClickHouse<br/>raw 7 days + per-minute rollups")]
         API["api<br/>FastAPI, 1 s snapshot"]
@@ -67,7 +67,7 @@ flowchart TB
     CF -- "poll every 2 s" --> PAGE
 ```
 
-What runs in AWS today: the same containers under Docker Compose on one EC2 host, behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
+What runs in AWS today: the same containers under Docker Compose on one EC2 host (an Auto Scaling Group of one, so a lost host replaces itself), behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
 
 ## Components
 
@@ -130,6 +130,7 @@ Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=Y
 
 - **Every hour complete, for as long as raw rows exist.** Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every whole hour of the last 7 days that ingest has passed by 5 minutes, it compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay. "Whole" means it started after the first raw row and after the retention cutoff: raw rows expire part by part, so the hour the cutoff falls in may be missing its start.
 - **Never fewer rows.** A scheduled write goes ahead only if ClickHouse has more rows than the file, checked again just before writing. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, checks each one's events fall inside its hour, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
+- **One writer.** In production the service archives only while its host holds the Elastic IP, so while the Auto Scaling Group overlaps two hosts only the live one writes ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). Before replacing a file it also reads the file itself, not only its own record of it.
 - **Recoverable.** The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone. The host can put, get and list under `wikipedia/`, never delete.
 - **Rebuilds the rollup without risking it.** `python -m livedemos.archive.rebuild` needs a file for every hour in the range, or `--allow-missing` to rebuild the hours that have one and leave the rest as they are. It counts the files into a staging table a day at a time and checks every file produced as many rows as `archive_hours` recorded for it. Then, with ingest stopped, it adds the rest of each affected month and swaps whole months into the live rollup with `REPLACE PARTITION`: each month is all old or all new, never empty. It holds the same lock as migrations and reconcile repairs, so none of them overlap.
 - **Restores itself.** After migrating, `migrate` checks for raw rows. With none (a host rebuilt from scratch), before ingest starts, it puts the newest two archived days back into the raw table (the rollup fills through its view, and the archive service finds rows matching its files) and rebuilds older days, up to 90 days back, straight into the rollup. If that stopped part way (an insert over many files isn't atomic), the next run finds raw rows that don't match the files and does the raw days again. With rows ingest wrote itself, it does nothing.
@@ -176,8 +177,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
 | api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
-| Whole host lost | `terraform apply -replace`; `migrate` restores raw rows and the rollup from Parquet, ingest replays the outage from the stream. No manual data steps | no-data alert |
-| Host hardware or OS stops answering | CloudWatch recovers (system check) or reboots (instance check) the instance | alarm email |
+| Whole host lost (a Spot reclaim, a failed health check, hardware) | The Auto Scaling Group launches a replacement; `migrate` restores raw rows and the rollup from Parquet, ingest replays the outage from the stream, and the new host takes the Elastic IP once it's live. No manual steps | launch and termination emails, no-data alert |
 
 ## Security
 
@@ -202,12 +202,15 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 
 | Item | Monthly |
 |---|---|
-| EC2 t4g.small | free trial until 31 Dec 2026, then about $12 |
-| EBS 25 GB gp3 + public IPv4 | about $6 |
+| EC2: one host in an Auto Scaling Group | free until 31 Dec 2026 (on-demand t4g.small, free trial); then Spot, $6.06 to $11.17 by type |
+| EBS 16 GB gp3 ($0.088/GB) + public IPv4 ($0.005/h) | $1.41 + $3.65 |
 | CloudFront, Grafana Cloud, Cloudflare Pages | free tiers |
 | S3: fallback snapshot and Parquet archive | about 1 cent at first, about 7 cents after a year (below) |
 
-About $6 a month until the end of 2026. The real bill goes in the README once there is one.
+About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on
+demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on
+2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md).
+The real bill goes in the README once there is one.
 
 **The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Its first 30 archive files held 270,562 edits in 13.3 MB: 49 bytes an edit with zstd. That's about 0.46 MB an hour, 11 MB a day, 0.33 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 

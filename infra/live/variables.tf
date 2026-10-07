@@ -21,22 +21,28 @@ variable "monthly_budget_usd" {
   default     = 10
 }
 
-variable "availability_zone" {
-  description = "The one AZ the host runs in."
-  type        = string
-  default     = "eu-west-1a"
+variable "availability_zones" {
+  description = "Zones the host may run in. The first one keeps the subnet the single host used."
+  type        = list(string)
+  default     = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
 }
 
-variable "instance_type" {
-  description = "Host size. Changing it is a stop and start, not a rebuild."
-  type        = string
-  default     = "t4g.small"
+variable "instance_types" {
+  description = "2 GB+ Graviton types the host may run on, in order of preference for on-demand. Spot picks by price and spare capacity."
+  type        = list(string)
+  default     = ["t4g.small", "c6g.medium", "c7g.medium"]
+}
+
+variable "on_demand" {
+  description = "true: one on-demand host (the first instance type). false: Spot. On demand until the t4g.small free trial ends on 2026-12-31 (ADR 0010)."
+  type        = bool
+  default     = true
 }
 
 variable "root_volume_gb" {
   description = "Root EBS volume (gp3), holding Docker images and ClickHouse data."
   type        = number
-  default     = 25
+  default     = 16 # 5.5 GB used on 2026-10-07; the disk alert fires at 80%
 }
 
 variable "repo_url" {

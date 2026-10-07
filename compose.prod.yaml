@@ -56,6 +56,7 @@ services:
     environment:
       ARCHIVE_URL: ${ARCHIVE_URL:?ARCHIVE_URL is not set}   # the archive bucket, signed
       ARCHIVE_NOSIGN: "false"
+      ARCHIVE_ONLY_ON_IP: ${HOST_PUBLIC_IP:-}                  # only the live host archives
     depends_on: !override
       clickhouse:
         condition: service_healthy
