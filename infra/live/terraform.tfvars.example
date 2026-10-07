@@ -3,3 +3,11 @@ budget_email = "you@example.com"
 
 # The state bucket from infra/bootstrap (same as backend.hcl).
 state_bucket = "livedemos-tfstate-ACCOUNT_ID-eu-west-1"
+
+# From your Grafana Cloud stack: Connections > Hosted Prometheus metrics / Hosted logs.
+grafana_cloud = {
+  prom_url  = "https://prometheus-prod-NN-prod-REGION.grafana.net/api/prom/push"
+  prom_user = "1234567"
+  loki_url  = "https://logs-prod-NNN.grafana.net/loki/api/v1/push"
+  loki_user = "1234567"
+}

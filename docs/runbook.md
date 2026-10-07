@@ -61,7 +61,9 @@ plans again and refuses if that plan changes anything other than what you approv
      `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
 3. Repository variables: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`),
    `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`) and
-   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`).
+   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`) and `TF_GRAFANA_CLOUD`
+   (the `grafana_cloud` from `terraform.tfvars`, on one line:
+   `{prom_url="https://.../api/prom/push",prom_user="123",loki_url="https://.../loki/api/v1/push",loki_user="456"}`).
 
 ## Rotate a secret
 
@@ -210,6 +212,32 @@ by one to two hours.
   `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'
   SETTINGS mutations_sync = 1`, as admin, so it's gone before the run); it then finds the
   file and records it. Start the service again.
+
+## Grafana Cloud
+
+Alloy (`deploy/alloy/config.alloy`) sends metrics and logs to the stack. Its endpoints
+and user ids are Terraform settings (`grafana_cloud` in `terraform.tfvars`, and the
+`TF_GRAFANA_CLOUD` repository variable for the pipeline). The token isn't: create it in
+Grafana Cloud (Administration > Cloud access policies, scopes `metrics:write` and
+`logs:write`), copy it, then without it touching your shell history:
+
+```
+aws ssm put-parameter --profile livedemos --region eu-west-1 --overwrite \
+  --name /livedemos/grafana-cloud-token --type SecureString --value "$(pbpaste)"
+```
+
+The next deploy (or re-running the last one) puts it in the host's `.env`. To rotate it,
+do the same with a new token, then delete the old one in Grafana Cloud.
+
+**Dashboard:** "Live demos: pipeline". Change `deploy/grafana/build_dashboard.py`, run it,
+commit both files, and import `livedemos.json` (Dashboards > New > Import, same uid, so it
+replaces the old one).
+
+**Logs:** Explore, Loki, `{host="livedemos", service="ingest"}`; add `| json` to filter on
+fields, such as `| json | level="error"`.
+
+**Is Alloy healthy?** `docker compose -f compose.yaml -f compose.prod.yaml logs --tail 50 alloy`.
+A 401 means the token is wrong or missing.
 
 ## What to alert on
 

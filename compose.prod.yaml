@@ -62,6 +62,39 @@ services:
         condition: service_completed_successfully
     logging: *logging
 
+  # Metrics and logs to Grafana Cloud (deploy/alloy/config.alloy, ADR 0008). Production
+  # only: locally there's nowhere to send them. It reads the host's /proc and /sys, and
+  # the Docker socket for container logs and memory. The socket is root-equivalent, read-
+  # only or not, so the image is pinned by digest: it's trusted like the host itself.
+  alloy:
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    environment:
+      GRAFANA_PROM_URL: ${GRAFANA_PROM_URL:-}
+      GRAFANA_PROM_USER: ${GRAFANA_PROM_USER:-}
+      GRAFANA_LOKI_URL: ${GRAFANA_LOKI_URL:-}
+      GRAFANA_LOKI_USER: ${GRAFANA_LOKI_USER:-}
+      GRAFANA_CLOUD_TOKEN: ${GRAFANA_CLOUD_TOKEN:-}
+      GOMEMLIMIT: 110MiB      # the Go runtime collects before the container cap
+    volumes:
+      - ./deploy/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # cAdvisor finds each container's layer here. Not /var/lib/docker/containers: the
+      # containers' configs hold their environment, passwords included.
+      - /var/lib/docker/image:/var/lib/docker/image:ro
+    cgroup: host              # cAdvisor reads every container's cgroup
+    mem_limit: 160m
+    oom_score_adj: 800        # the first to go: losing metrics for a minute costs nothing
+    logging: *logging
+
   web:
     profiles: ["local-only"]  # CloudFront and Cloudflare Pages replace it in production
 
@@ -73,3 +106,6 @@ services:
 
   s3-bucket:
     profiles: ["local-only"]
+
+volumes:
+  alloy-data:   # Alloy's write-ahead log, so a restart doesn't drop the last minutes

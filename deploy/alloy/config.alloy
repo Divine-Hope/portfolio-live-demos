@@ -1,0 +1,201 @@
+// Grafana Alloy on the production host: metrics and logs to Grafana Cloud (ADR 0008).
+//
+// Settings come from the environment (the host's .env, written from SSM):
+//   GRAFANA_PROM_URL, GRAFANA_PROM_USER   hosted Prometheus remote-write endpoint and user
+//   GRAFANA_LOKI_URL, GRAFANA_LOKI_USER   hosted Loki push endpoint and user
+//   GRAFANA_CLOUD_TOKEN                   access policy token (metrics:write, logs:write)
+//
+// Everything is scraped once a minute: the free tier counts active series at one sample
+// a minute, and every alert here works on 5-minute windows. Labels stay bounded: services,
+// routes, outcomes and a short list of ClickHouse and host metrics, never titles or IPs.
+
+// ---- Where it goes ----------------------------------------------------------------------
+
+prometheus.remote_write "cloud" {
+	endpoint {
+		url = sys.env("GRAFANA_PROM_URL")
+
+		basic_auth {
+			username = sys.env("GRAFANA_PROM_USER")
+			password = sys.env("GRAFANA_CLOUD_TOKEN")
+		}
+	}
+	external_labels = {
+		host = "livedemos",
+	}
+}
+
+loki.write "cloud" {
+	endpoint {
+		url = sys.env("GRAFANA_LOKI_URL")
+
+		basic_auth {
+			username = sys.env("GRAFANA_LOKI_USER")
+			password = sys.env("GRAFANA_CLOUD_TOKEN")
+		}
+	}
+	external_labels = {
+		host = "livedemos",
+	}
+}
+
+// ---- The app ----------------------------------------------------------------------------
+
+prometheus.scrape "app" {
+	targets = [
+		{"__address__" = "ingest:9101", "job" = "ingest"},
+		{"__address__" = "api:8000", "job" = "api"},
+		{"__address__" = "archive:9102", "job" = "archive"},
+	]
+	scrape_interval = "60s"
+	forward_to      = [prometheus.relabel.app.receiver]
+}
+
+// Python's default process and GC metrics: keep memory and CPU, drop the rest.
+prometheus.relabel "app" {
+	rule {
+		source_labels = ["__name__"]
+		regex         = "python_gc_.*|python_info|process_(virtual_memory|start_time)_.*|process_(open|max)_fds"
+		action        = "drop"
+	}
+	forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+// ---- ClickHouse: about 3,000 series exposed, about 40 kept ------------------------------
+
+prometheus.scrape "clickhouse" {
+	targets         = [{"__address__" = "clickhouse:9363", "job" = "clickhouse"}]
+	scrape_interval = "60s"
+	forward_to      = [prometheus.relabel.clickhouse.receiver]
+}
+
+prometheus.relabel "clickhouse" {
+	rule {
+		source_labels = ["__name__"]
+		regex         = "ClickHouseMetrics_(Query|MemoryTracking|MemoryTrackingUncorrected|PartsActive|DelayedInserts|BackgroundMergesAndMutationsPoolTask|HTTPConnection)|ClickHouseProfileEvents_(Query|SelectQuery|InsertQuery|FailedQuery|FailedSelectQuery|FailedInsertQuery|InsertedRows|InsertedBytes|SelectedRows|Merge|MergedRows|DelayedInserts|RejectedInserts|QueryMemoryLimitExceeded|S3ReadRequestsErrors|S3WriteRequestsErrors)|ClickHouseAsyncMetrics_(Uptime|MemoryResident|CGroupMemoryUsed|CGroupMemoryTotal|MaxPartCountForPartition|TotalPartsOfMergeTreeTables|TotalBytesOfMergeTreeTables|FilesystemMainPathUsedBytes|FilesystemMainPathTotalBytes)"
+		action        = "keep"
+	}
+	forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+// ---- The host ---------------------------------------------------------------------------
+// Disk use comes from ClickHouse (FilesystemMainPath*, above): its data is on the root
+// disk, so the host's / isn't mounted into Alloy at all.
+
+prometheus.exporter.unix "host" {
+	procfs_path    = "/host/proc"
+	sysfs_path     = "/host/sys"
+	set_collectors = ["cpu", "meminfo", "loadavg", "diskstats", "netdev", "vmstat", "pressure"]
+
+	netdev {
+		device_exclude = "^(lo|veth.*|br-.*|docker.*)$"
+	}
+
+	// oom_kill counts every OOM kill on the host, including a container hitting its limit.
+	vmstat {
+		fields = "^(oom_kill|pswpin|pswpout|pgmajfault)$"
+	}
+}
+
+prometheus.scrape "host" {
+	targets         = prometheus.exporter.unix.host.targets
+	scrape_interval = "60s"
+	forward_to      = [prometheus.relabel.host.receiver]
+}
+
+prometheus.relabel "host" {
+	rule {
+		target_label = "job"
+		replacement  = "host"
+	}
+	forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+// ---- Memory and CPU per container -------------------------------------------------------
+
+prometheus.exporter.cadvisor "containers" {
+	docker_host                  = "unix:///var/run/docker.sock"
+	docker_only                  = true
+	store_container_labels       = false
+	allowlisted_container_labels = ["com.docker.compose.service"]
+	enabled_metrics              = ["cpu", "memory"]
+	storage_duration             = "2m"
+}
+
+prometheus.scrape "containers" {
+	targets         = prometheus.exporter.cadvisor.containers.targets
+	scrape_interval = "60s"
+	forward_to      = [prometheus.relabel.containers.receiver]
+}
+
+prometheus.relabel "containers" {
+	rule {
+		source_labels = ["__name__"]
+		regex         = "container_(memory_working_set_bytes|memory_rss|memory_swap|memory_failcnt|spec_memory_limit_bytes|cpu_usage_seconds_total)"
+		action        = "keep"
+	}
+	// One series per compose service, not per container id: ids change on every deploy.
+	rule {
+		source_labels = ["container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		regex  = "id|image|name|container_label_com_docker_compose_service"
+		action = "labeldrop"
+	}
+
+	rule {
+		source_labels = ["service"]
+		regex         = ""
+		action        = "drop"
+	}
+	forward_to = [prometheus.remote_write.cloud.receiver]
+}
+
+// ---- Logs -------------------------------------------------------------------------------
+
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project=livedemos"]
+	}
+}
+
+discovery.relabel "logs" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	// Not Alloy's own logs: a push error it logs would be shipped, fail, and be logged again.
+	rule {
+		source_labels = ["service"]
+		regex         = "alloy"
+		action        = "drop"
+	}
+}
+
+loki.source.docker "containers" {
+	host          = "unix:///var/run/docker.sock"
+	targets       = discovery.docker.containers.targets
+	relabel_rules = discovery.relabel.logs.rules
+	forward_to    = [loki.process.logs.receiver]
+}
+
+// The app logs one JSON object per line (src/livedemos/logs.py): `level` becomes a label;
+// the other fields stay in the line, for `| json` in queries. ClickHouse logs plain text.
+loki.process "logs" {
+	stage.json {
+		expressions = {level = "level"}
+	}
+
+	stage.labels {
+		values = {level = ""}
+	}
+	forward_to = [loki.write.cloud.receiver]
+}

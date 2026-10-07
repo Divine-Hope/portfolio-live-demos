@@ -73,3 +73,13 @@ variable "github_repo_ids" {
   type        = object({ owner = number, repo = number })
   default     = { owner = 61884028, repo = 1404802454 }
 }
+
+variable "grafana_cloud" {
+  description = "Grafana Cloud endpoints and user ids for Alloy (not secret; the token is set in SSM by hand). Set in terraform.tfvars and the TF_VAR_grafana_cloud repository variable."
+  type = object({
+    prom_url  = string # remote write, ending /api/prom/push
+    prom_user = string
+    loki_url  = string # push, ending /loki/api/v1/push
+    loki_user = string
+  })
+}

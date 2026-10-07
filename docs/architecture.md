@@ -135,6 +135,10 @@ Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=Y
 - **Restores itself.** After migrating, `migrate` checks for raw rows. With none (a host rebuilt from scratch), before ingest starts, it puts the newest two archived days back into the raw table (the rollup fills through its view, and the archive service finds rows matching its files) and rebuilds older days, up to 90 days back, straight into the rollup. If that stopped part way (an insert over many files isn't atomic), the next run finds raw rows that don't match the files and does the raw days again. With rows ingest wrote itself, it does nothing.
 - **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at archive-bucket URLs (`livedemos-archive-*`); any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it. The pattern can't name the exact bucket: its name holds the account id, which stays out of this public repo. The S3 permissions themselves belong to the instance role, which every container on the host can reach; isolating that per container would cost more than this project's budget.
 
+### alloy (`deploy/alloy/`, production only)
+
+Grafana Alloy ships metrics and logs to Grafana Cloud's free tier ([ADR 0008](adr/0008-grafana-cloud-observability.md)). Once a minute it scrapes ingest, the API, the archive service, ClickHouse's Prometheus endpoint (a short allowlist of its 3,000 series), the host (`node_*`: memory, swap, OOM kills, disk, CPU) and memory per container (cAdvisor, labelled by compose service). It tails this project's container logs (not its own) from the Docker socket; the app's JSON `level` becomes a label. The socket is root-equivalent, so the image is pinned by digest and trusted like the host; it doesn't get the host's `/` or Docker's container configs (they hold passwords), only `/proc`, `/sys` and Docker's image metadata. It's capped at 160 MB and goes first if the host runs out of memory. Labels stay bounded: services, routes, outcomes, never titles or IPs. The dashboard is code: `deploy/grafana/build_dashboard.py` writes `livedemos.json`.
+
 ## Data model
 
 | Table | Engine | Grain | Retention |
@@ -184,7 +188,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 
 ## Local and production, side by side
 
-| Concern | Local (`compose.yaml`) | Production (planned) |
+| Concern | Local (`compose.yaml`) | Production |
 |---|---|---|
 | Edge cache and fan-out | nginx `web` container, 1 s micro-cache, cache lock | CloudFront, 1 s cache, request collapsing |
 | Static site and widget | nginx serves `web/` | Cloudflare Pages |
