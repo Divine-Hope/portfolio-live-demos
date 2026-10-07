@@ -102,7 +102,7 @@ The per-minute rollup is fed by a materialized view in the same INSERT, but not 
 | Route | What it does |
 |---|---|
 | `GET /v1/wikipedia/live.json` | The widget's data. Rebuilt every second from a handful of small queries, served from memory. `Cache-Control: max-age=1`. 503 when there's no snapshot yet or it's more than 10 s old, which also triggers CDN failover. |
-| `GET /v1/wikipedia/activity?lang=&window=` | "Query it". An ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. Concurrent misses for one key share one query; at most 2 queries run and 4 are admitted at once; nobody waits more than 5 s; a failure is remembered for 5 s. Over any of those: 503 with `Retry-After`. |
+| `GET /v1/wikipedia/activity?lang=&window=` | "Query it". Windows `5m`, `1h` and `24h` count raw rows; `3d` and `7d` sum the per-minute rollup (a few thousand rows a language, and complete after a host rebuild, which restores only 2 days of raw rows), so their `pages_edited` is `null`. An ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. Concurrent misses for one key share one query; at most 2 queries run and 4 are admitted at once; nobody waits more than 5 s; a failure is remembered for 5 s. Over any of those: 503 with `Retry-After`. |
 | `GET /healthz`, `/readyz` | Liveness, and readiness (fresh snapshot and ClickHouse reachable). |
 | `GET /metrics` | Prometheus. |
 
