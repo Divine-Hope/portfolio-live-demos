@@ -70,8 +70,7 @@ RULES = [
         "Ingest stalled",
         # Age at scrape time, not now: scrapes are a minute apart, so time() minus the
         # value would read up to 60 s even when nothing is wrong.
-        "max(timestamp(ingest_last_event_timestamp_seconds)"
-        " - ingest_last_event_timestamp_seconds)",
+        "max(timestamp(ingest_last_event_timestamp_seconds) - ingest_last_event_timestamp_seconds)",
         "gt",
         60,
         pending="5m",
