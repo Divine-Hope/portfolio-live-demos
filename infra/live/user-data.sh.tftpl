@@ -84,7 +84,11 @@ trap - ERR
 # Must succeed: a host left waiting would be abandoned, live, when the hook times out.
 for attempt in $(seq 1 10); do
   if launch_result CONTINUE; then break; fi
-  if [ "$attempt" -eq 10 ]; then echo "couldn't complete the launch hook" >&2; exit 1; fi
+  if [ "$attempt" -eq 10 ]; then
+    echo "couldn't complete the launch hook; abandoning, so the group replaces this host" >&2
+    launch_result ABANDON || true
+    exit 1
+  fi
   sleep 15
 done
 
