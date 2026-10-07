@@ -89,6 +89,18 @@ def test_origin_secret_is_required_when_configured(guarded_client: TestClient) -
     assert right.status_code == 503  # past the check; no snapshot yet in this test
 
 
+def test_the_fire_drill_switch_fails_every_v1_request_and_counts_it() -> None:
+    app = create_app(
+        ApiSettings(tick_interval_s=3_600, drill_5xx=True),
+        ClickHouseSettings(url="http://127.0.0.1:9", timeout_s=0.2),
+    )
+    with TestClient(app) as client:
+        assert client.get("/v1/wikipedia/live.json").status_code == 503
+        assert client.get("/healthz").status_code == 200
+        metrics_text = client.get("/metrics").text
+    assert 'api_requests_total{route="unmatched",status="503"}' in metrics_text
+
+
 def test_health_and_metrics_stay_open_for_the_host(guarded_client: TestClient) -> None:
     assert guarded_client.get("/healthz").status_code == 200
     assert guarded_client.get("/metrics").status_code == 200

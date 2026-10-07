@@ -115,6 +115,9 @@ class ApiSettings(BaseSettings):
     # Empty (local) turns the writer off.
     snapshot_bucket: str = ""
     snapshot_interval_s: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60.0
+    # Fire drills only: every /v1/ request gets a 503, to prove the 5xx and synthetic
+    # check alerts fire (docs/runbook.md). CloudFront then serves its fallback copy.
+    drill_5xx: bool = False
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:

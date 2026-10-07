@@ -1,0 +1,456 @@
+{
+  "title": "livedemos",
+  "interval": "1m",
+  "rules": [
+    {
+      "uid": "ld-ingest-stalled",
+      "title": "Ingest stalled",
+      "condition": "B",
+      "for": "5m",
+      "noDataState": "Alerting",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "The newest committed event is over 60 s old. The live page says Paused.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#ingest-stalled"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "max(timestamp(ingest_last_event_timestamp_seconds) - ingest_last_event_timestamp_seconds)",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    60
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-target-down",
+      "title": "No data from a service",
+      "condition": "B",
+      "for": "5m",
+      "noDataState": "Alerting",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "A service isn't answering its metrics scrape, or nothing arrives at all (Alloy or the host is down).",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#no-data-from-a-service"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "min by (job) (up{job=~\"ingest|api|archive|clickhouse\"})",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "lt",
+                  "params": [
+                    1
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-container-memory",
+      "title": "Container near its memory limit",
+      "condition": "B",
+      "for": "5m",
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "A container has used over 85% of its memory limit for 5 minutes.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#container-near-its-memory-limit"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "max by (service) (container_memory_working_set_bytes / container_spec_memory_limit_bytes)",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0.85
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-oom-kill",
+      "title": "OOM kill",
+      "condition": "B",
+      "for": "0s",
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "The kernel killed a process for memory in the last 10 minutes.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#oom-kill"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "increase(node_vmstat_oom_kill[10m])",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-swap-in",
+      "title": "Host swapping in",
+      "condition": "B",
+      "for": "10m",
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "Over 100 pages a second read back from swap for 10 minutes: the host is short of memory.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#host-swapping-in"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "rate(node_vmstat_pswpin[5m])",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    100
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-disk",
+      "title": "Disk over 80%",
+      "condition": "B",
+      "for": "5m",
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "The root disk, which holds ClickHouse's data, is over 80% full.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#disk-over-80"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes) / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0.8
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-api-5xx",
+      "title": "API 5xx over 1%",
+      "condition": "B",
+      "for": "10m",
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "Over 1% of API responses at the origin are errors. CloudFront is serving its fallback copy.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#api-5xx-over-1"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "sum(rate(api_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(api_requests_total[5m])), 1e-9)",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0.01
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-archive-stale",
+      "title": "Archive behind",
+      "condition": "B",
+      "for": "15m",
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "No new hour archived for three hours.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#archive-behind"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "time() - max(archive_newest_hour_timestamp_seconds)",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    10800
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "uid": "ld-live-json-check",
+      "title": "live.json check failing",
+      "condition": "B",
+      "for": "3m",
+      "noDataState": "Alerting",
+      "execErrState": "Error",
+      "labels": {
+        "project": "livedemos"
+      },
+      "annotations": {
+        "summary": "The outside-in check of the public live.json is failing: an error, or the payload isn't live.",
+        "runbook_url": "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md#livejson-check-failing"
+      },
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${prometheus}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "min(probe_success{job=\"livedemos-live-json\"})",
+            "instant": true,
+            "range": false
+          }
+        },
+        {
+          "refId": "B",
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "lt",
+                  "params": [
+                    1
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

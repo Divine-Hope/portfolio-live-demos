@@ -1,0 +1,21 @@
+{
+  "job": "livedemos-live-json",
+  "target": "https://d1ij81u3v32tos.cloudfront.net/v1/wikipedia/live.json",
+  "frequency": 60000,
+  "timeout": 10000,
+  "enabled": true,
+  "probes": [21],
+  "labels": [],
+  "basicMetricsOnly": true,
+  "alertSensitivity": "none",
+  "settings": {
+    "http": {
+      "method": "GET",
+      "ipVersion": "V4",
+      "noFollowRedirects": true,
+      "failIfNotSSL": true,
+      "validStatusCodes": [200],
+      "failIfBodyNotMatchesRegexp": ["\"status\":\\s*\"live\""]
+    }
+  }
+}

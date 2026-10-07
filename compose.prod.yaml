@@ -45,6 +45,7 @@ services:
       API_ORIGIN_SECRET: ${API_ORIGIN_SECRET:?API_ORIGIN_SECRET is not set}
       API_SNAPSHOT_BUCKET: ${API_SNAPSHOT_BUCKET:-}   # fallback copy for CloudFront
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}     # credentials: the instance role
+      API_DRILL_5XX: ${API_DRILL_5XX:-false}          # fire drills only (docs/runbook.md)
     ports: !override
       - "80:8000"             # CloudFront's origin; the security group allows only CloudFront
     logging: *logging

@@ -45,6 +45,18 @@ resource "aws_ssm_parameter" "settings" {
   value = each.value
 }
 
+# Fire drill switch for the API's 5xx alert: "true" makes every /v1/ request fail (docs/
+# runbook.md, "Fire drill"). Set by hand during a drill; Terraform only creates it.
+resource "aws_ssm_parameter" "api_drill_5xx" {
+  name  = "${local.ssm_prefix}/api-drill-5xx"
+  type  = "String"
+  value = "false"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
 # The commit SHA of the image to run. Each deploy writes it; Terraform only creates it.
 resource "aws_ssm_parameter" "image_tag" {
   name  = "${local.ssm_prefix}/image-tag"
