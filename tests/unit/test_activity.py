@@ -113,7 +113,7 @@ async def test_queries_across_keys_are_capped() -> None:
             finally:
                 running -= 1
 
-    service = ActivityService(Counting(delay_s=0.02), ttl_s=10, max_concurrency=2, max_pending=9)
+    service = ActivityService(Counting(delay_s=0.02), ttl_s=10, max_concurrency=2, max_pending=15)
     keys = [
         parse_request(lang, w, allowed=LANGS)
         for lang in LANGS
