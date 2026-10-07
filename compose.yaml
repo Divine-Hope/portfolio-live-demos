@@ -38,6 +38,7 @@ services:
       - clickhouse-data:/var/lib/clickhouse
       - ./clickhouse/config.d/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
       - ./clickhouse/config.d/s3.xml:/etc/clickhouse-server/config.d/s3.xml:ro
+      - ./clickhouse/config.d/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
       - ./clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro
     ports:
       - "127.0.0.1:8123:8123"

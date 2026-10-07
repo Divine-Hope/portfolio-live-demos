@@ -61,6 +61,7 @@ jobs:
       id-token: write   # read-only role; see infra/live/ci.tf
     env:
       TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
+      TF_VAR_grafana_cloud: ${{ vars.TF_GRAFANA_CLOUD }}   # endpoints and user ids, not secret
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
       TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
     steps:
@@ -147,6 +148,8 @@ jobs:
             docker compose -f compose.yaml -f compose.prod.yaml config --quiet
       - name: Lint the host scripts
         run: shellcheck deploy/host/*.sh deploy/ci/*.sh
+      - name: Validate the Alloy config
+        run: docker run --rm -v "$PWD/deploy/alloy:/c:ro" grafana/alloy:v1.20.1 validate /c/config.alloy
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:

@@ -35,6 +35,10 @@ resource "aws_ssm_parameter" "settings" {
     "api-snapshot-bucket" = module.snapshots.id
     "archive-url"         = "https://${module.archive.id}.s3.${var.region}.amazonaws.com/wikipedia/edits"
     "aws-default-region"  = var.region
+    "grafana-prom-url"    = var.grafana_cloud.prom_url
+    "grafana-prom-user"   = var.grafana_cloud.prom_user
+    "grafana-loki-url"    = var.grafana_cloud.loki_url
+    "grafana-loki-user"   = var.grafana_cloud.loki_user
   }
   name  = "${local.ssm_prefix}/${each.key}"
   type  = "String"
@@ -46,6 +50,19 @@ resource "aws_ssm_parameter" "image_tag" {
   name  = "${local.ssm_prefix}/image-tag"
   type  = "String"
   value = "none"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# Alloy's Grafana Cloud access policy token (metrics:write, logs:write). Created in Grafana
+# Cloud, so it can't be generated here: Terraform makes the parameter, and the token goes
+# in by hand (docs/runbook.md, "Grafana Cloud"). Terraform never reads or resets it.
+resource "aws_ssm_parameter" "grafana_cloud_token" {
+  name  = "${local.ssm_prefix}/grafana-cloud-token"
+  type  = "SecureString"
+  value = "unset"
 
   lifecycle {
     ignore_changes = [value]

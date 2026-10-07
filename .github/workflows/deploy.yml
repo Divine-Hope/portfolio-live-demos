@@ -93,6 +93,7 @@ jobs:
       digest: ${{ steps.plan.outputs.digest }}
     env:
       TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
+      TF_VAR_grafana_cloud: ${{ vars.TF_GRAFANA_CLOUD }}   # endpoints and user ids, not secret
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
       TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
     steps:
@@ -128,6 +129,7 @@ jobs:
       id-token: write
     env:
       TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
+      TF_VAR_grafana_cloud: ${{ vars.TF_GRAFANA_CLOUD }}   # endpoints and user ids, not secret
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
       TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
       APPROVED: ${{ needs.infra-plan.outputs.digest }}
