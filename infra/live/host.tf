@@ -76,6 +76,14 @@ data "aws_iam_policy_document" "host" {
     }
   }
 
+  # Is the Elastic IP already on a live host? Then a new one waits for fresh data instead
+  # of taking it early (user data). No resource-level permissions for Describe*.
+  statement {
+    sid       = "SeeWhoHasTheElasticIp"
+    actions   = ["ec2:DescribeAddresses"]
+    resources = ["*"]
+  }
+
   # Say when a new host is live (or can't be), for the group's launch hook.
   statement {
     sid       = "CompleteItsLaunch"

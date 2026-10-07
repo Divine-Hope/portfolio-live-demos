@@ -101,9 +101,8 @@ resource "aws_iam_role_policy" "deploy" {
 # in the host's .env.
 resource "aws_ssm_parameter" "deploy" {
   for_each = {
-    "host-name"   = local.host_group
-    "instance-id" = aws_instance.host.id # legacy-host.tf; goes with it
-    "api-domain"  = aws_cloudfront_distribution.api.domain_name
+    "host-name"  = local.host_group
+    "api-domain" = aws_cloudfront_distribution.api.domain_name
   }
   name  = "/${var.project}-deploy/${each.key}"
   type  = "String"
