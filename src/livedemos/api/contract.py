@@ -127,6 +127,7 @@ FreshnessReport = TypedDict(
         "met": bool | None,
         "budget_minutes": int,
         "budget_used": int,
+        "full_window": bool,  # False while measuring started less than window_days ago
     },
 )
 
@@ -135,7 +136,8 @@ GapReport = TypedDict("GapReport", {"from": str, "to": str, "duration_s": int, "
 
 class Gaps(TypedDict):
     window_days: int
-    recent: list[GapReport]
+    total: int
+    recent: list[GapReport]  # the newest, at most 20
 
 
 class CostReport(TypedDict):

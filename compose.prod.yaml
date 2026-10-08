@@ -58,6 +58,8 @@ services:
       ARCHIVE_NOSIGN: "false"
       ARCHIVE_ONLY_ON_IP: ${HOST_PUBLIC_IP:-}                  # only the live host archives
       ARCHIVE_COST_TAG: project=livedemos                      # month-to-date cost, daily
+      ARCHIVE_COST_CLAIMS: ${ARCHIVE_COST_CLAIMS:-}            # one caller a day (ops/cost.py)
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}              # for the claims bucket
     depends_on: !override
       clickhouse:
         condition: service_healthy

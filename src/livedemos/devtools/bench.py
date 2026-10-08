@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from livedemos.api import queries
+from livedemos.api import ops, queries
 from livedemos.api.snapshot import MINUTES, TOP_N, WINDOW_S, Snapshotter
 from livedemos.clickhouse import ClickHouse, QueryResult
 from livedemos.config import ClickHouseSettings
@@ -117,6 +117,18 @@ async def fill(ch: ClickHouse, *, days: int, rate: int, now: datetime) -> int:
     return total
 
 
+# 30 days of per-minute freshness samples, the Ops tab's full SLO window. A few stale ones.
+_FILL_SAMPLES = """
+INSERT INTO freshness_samples (minute, sampled_at, age_s)
+SELECT m, m + toIntervalMillisecond(5), if(number % 500 = 0, 90.0, 2.5)
+FROM
+(
+    SELECT number, toStartOfMinute(now()) - toIntervalMinute(number + 1) AS m
+    FROM numbers({minutes:UInt32})
+)
+"""
+
+
 class WithReaderLimits:
     """Every query through it carries the `api` profile's limits as query settings."""
 
@@ -170,6 +182,17 @@ def cases(newest_ms: int, last_seq: int) -> list[Case]:
             "query it: 7 days, raw rows (what it replaces)",
             queries.WINDOW_TOTALS,
             {**window, "window_s": 7 * 86_400},
+        ),
+        Case("ops: ingest lag, last hour", ops.LAG, {"window_s": ops.LAG_WINDOW_S}),
+        Case("ops: bookmark", ops.BOOKMARK, {}),
+        Case(
+            "ops: freshness, 30 days",
+            ops.FRESHNESS,
+            {
+                "threshold_s": 60.0,
+                "start_s": newest_ms // 60_000 * 60 - 30 * 86_400,
+                "end_s": newest_ms // 60_000 * 60,
+            },
         ),
         Case("resume: max ingest_seq", "SELECT max(ingest_seq) AS seq FROM wiki_edits", {}),
         Case(
@@ -273,6 +296,7 @@ async def run(settings: ClickHouseSettings, *, days: int, rate: int, runs: int) 
         await migrate(ch)
         started = time.perf_counter()
         total = await fill(ch, days=days, rate=rate, now=datetime.now(UTC))
+        await ch.execute(_FILL_SAMPLES, params={"minutes": 30 * 1_440})
         took = time.perf_counter() - started
         print(f"filled {total:,} rows ({days} days at {rate}/s) in {took:.0f} s")
 

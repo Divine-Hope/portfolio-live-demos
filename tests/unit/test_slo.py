@@ -17,14 +17,23 @@ def test_the_window_is_30_days_of_whole_minutes_ending_before_the_current_one() 
     win = slo.window(now_s=NOW, first_sample_s=MINUTE_NOW - 90 * DAY, days=30)
     assert win == slo.Window(start_s=MINUTE_NOW - 30 * DAY, end_s=MINUTE_NOW)
     assert win.minutes == 30 * 1_440
+    assert win.is_full(30)
 
 
-def test_the_window_starts_at_the_first_sample_not_before() -> None:
-    # Measured for two hours: the 30 days before that don't count either way.
+def test_the_window_starts_at_the_first_whole_minute_measured() -> None:
+    # The first sample came 17 s into a minute: that minute wasn't measured from its start,
+    # so counting begins with the next. The 30 days before don't count either way.
     win = slo.window(now_s=NOW, first_sample_s=MINUTE_NOW - 7_200 + 17, days=30)
     assert win is not None
-    assert win.start_s == MINUTE_NOW - 7_200
-    assert win.minutes == 120
+    assert win.start_s == MINUTE_NOW - 7_200 + 60
+    assert win.minutes == 119
+    assert not win.is_full(30)
+
+
+def test_a_sample_on_the_minute_counts_that_minute() -> None:
+    win = slo.window(now_s=NOW, first_sample_s=float(MINUTE_NOW - 600), days=30)
+    assert win is not None
+    assert win.minutes == 10
 
 
 def test_a_first_sample_in_the_current_minute_gives_an_empty_window() -> None:

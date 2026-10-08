@@ -1,7 +1,8 @@
 """Entry point: `python -m livedemos.archive`.
 
 The service also fetches the month's AWS cost once a day (ops/cost.py), when
-ARCHIVE_COST_TAG is set: it's the one process that runs only on the live host.
+ARCHIVE_COST_TAG and ARCHIVE_COST_CLAIMS are set: it's the one process that runs only on
+the live host.
 
 python -m livedemos.archive                        # the service: archive due hours, repeat
 python -m livedemos.archive --once                 # one pass, then exit
@@ -99,14 +100,17 @@ async def main(args: argparse.Namespace) -> int:
             return 0 if all(r.result == "written" for r in results) else 1
         start_http_server(settings.metrics_port)
         cost = None
-        if settings.cost_tag:
+        if settings.cost_tag and settings.cost_claims:
             import boto3  # only in production; credentials come from the instance role
 
             cost = CostFetcher(
                 ch,
                 tag=settings.cost_tag,
+                claims=settings.cost_claims,
                 # Cost Explorer has one endpoint, in us-east-1.
-                client_factory=lambda: boto3.client("ce", region_name="us-east-1"),
+                ce_factory=lambda: boto3.client("ce", region_name="us-east-1"),
+                s3_factory=lambda: boto3.client("s3"),
+                host=settings.only_on_ip,
             )
         await _serve(archiver, cost, settings.interval_s, settings.only_on_ip)
         return 0

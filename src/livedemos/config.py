@@ -170,8 +170,10 @@ class ArchiveSettings(BaseSettings):
     # Empty (local): always archive.
     only_on_ip: str = ""
     # Production: fetch the month's AWS cost for resources with this tag, once a day
-    # (ops/cost.py). Empty (local): don't; there's no AWS account to ask.
+    # (ops/cost.py), claiming each day under `cost_claims` (s3://bucket/prefix) first so
+    # only one caller ever asks. Either empty (local): don't; there's no AWS account.
     cost_tag: str = ""
+    cost_claims: str = ""
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:

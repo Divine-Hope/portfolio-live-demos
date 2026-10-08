@@ -193,21 +193,44 @@ async def test_start_reads_no_state_while_an_earlier_insert_runs() -> None:
     assert "running" not in db.log[first_read:]  # no state read until it had finished
 
 
-async def test_reconnects_are_recorded_and_kept_until_clickhouse_takes_them() -> None:
-    db = StubDatabase(fail_inserts=1)  # ClickHouse is why we reconnected
+async def test_reconnects_are_retried_unchanged_so_a_lost_reply_cant_double_them() -> None:
+    db = StubDatabase(fail_inserts=1)  # landed or not, the reply never came
     consumer = Consumer(SETTINGS, db)
     consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "clickhouse"})
     await consumer._record_reconnects()  # fails, and doesn't raise
-    assert len(consumer._reconnects) == 1
+    # Another reconnect meanwhile waits for the next batch instead of joining this one.
+    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "idle"})
+    await consumer._record_reconnects()
+    await consumer._record_reconnects()
+    assert [(t, n) for t, _, _, n in db.inserts] == [
+        ("ingest_reconnects", 1),
+        ("ingest_reconnects", 1),  # the retry: same row, same token
+        ("ingest_reconnects", 1),  # then the new one, under its own token
+    ]
+    assert db.inserts[0][1] == db.inserts[1][1] != db.inserts[2][1]
+    assert not consumer._reconnects
+    assert consumer._reconnects_sealed is None
 
-    # The next committed batch catches up.
+
+async def test_a_slow_reconnect_write_gives_up_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SlowDatabase(StubDatabase):
+        async def insert(self, *args: Any, **kwargs: Any) -> None:
+            await asyncio.sleep(60)
+
+    monkeypatch.setattr("livedemos.ingest.consumer._RECORD_RECONNECTS_TIMEOUT_S", 0.01)
+    consumer = Consumer(SETTINGS, SlowDatabase())
+    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "network"})
+    await asyncio.wait_for(consumer._record_reconnects(), timeout=1)
+    assert consumer._reconnects_sealed is not None  # kept for the next try
+
+
+async def test_committing_a_batch_never_waits_for_reconnects() -> None:
+    db = StubDatabase()
+    consumer = Consumer(SETTINGS, db)
+    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "eof"})
     batch = Batch(max_rows=10, interval_s=1.0)
     edit = consumer._parse(valid_event(1), "sse-1")
     assert edit is not None
     batch.add(edit, sse_id="sse-1", ingest_seq=1)
     await consumer._flush(batch)
-    assert not consumer._reconnects
-    tables = [table for table, *_ in db.inserts]
-    assert tables == ["ingest_reconnects", "wiki_edits", "ingest_reconnects"]
-    # The retry carried the same rows under the same token, so it can land only once.
-    assert db.inserts[0][1] == db.inserts[2][1]
+    assert [table for table, *_ in db.inserts] == ["wiki_edits"]

@@ -27,6 +27,16 @@ def test_the_bookmark_is_shortened_to_each_streams_position() -> None:
     }
 
 
+def test_implausible_positions_are_left_out_not_crashed_on() -> None:
+    sse_id = (
+        '[{"topic":"eqiad.x","timestamp":true},{"topic":"codfw.x","timestamp":99999999999999999999},'
+        '{"topic":"other.x","offset":false}]'
+    )
+    bookmark = ops.shorten_bookmark(sse_id)
+    assert bookmark is not None
+    assert [(p["at"], p["offset"]) for p in bookmark["positions"]] == [(None, None)] * 3
+
+
 @pytest.mark.parametrize("sse_id", ["not json", "{}", "[1]", '[{"partition":0}]'])
 def test_an_unexpected_bookmark_is_left_out_rather_than_guessed(sse_id: str) -> None:
     assert ops.shorten_bookmark(sse_id) is None
@@ -65,11 +75,11 @@ def test_assemble_reports_every_number_it_was_given() -> None:
         sse_id=REAL_ID,
         reconnects=[{"reason": "idle", "n": 3}, {"reason": "eof", "n": 1}],
         freshness=slo.summarise(win=win, sampled=58, fresh=57, target=0.99, days=30),
-        gaps=[{"from_ms": 1_000_000, "to_ms": 1_090_500, "reason": "retention"}],
+        gaps=[{"from_ms": 1_000_000, "to_ms": 1_090_500, "reason": "retention", "total": 21}],
         cost={
             "fetched_ms": 1_791_498_000_000,
-            "period_start": "2026-10-01",
-            "period_end": "2026-10-09",
+            "start_day": "2026-10-01",
+            "end_day": "2026-10-09",
             "amount": "0.1977203052",
             "currency": "USD",
             "estimated": 1,
@@ -87,6 +97,8 @@ def test_assemble_reports_every_number_it_was_given() -> None:
     assert (fresh["minutes"], fresh["fresh"], fresh["stale"], fresh["unmeasured"]) == (60, 57, 1, 2)
     assert fresh["ratio"] == 0.95
     assert payload["gaps"]["recent"][0]["duration_s"] == 90
+    assert payload["gaps"]["total"] == 21  # more than the list holds: the page can say so
+    assert fresh["full_window"] is False
     assert payload["cost"]["amount"] == "0.1977203052"
     assert payload["cost"]["currency"] == "USD"
     assert payload["cost"]["fetched_at"] == "2026-10-08T22:20:00.000Z"
@@ -105,7 +117,7 @@ class StubDatabase:
             raise ClickHouseError("down")
         rows: list[dict[str, Any]] = []
         if sql is ops.FIRST_SAMPLE:
-            rows = [{"first_s": 0, "n": 0}]
+            rows = [{"first_ms": 0, "n": 0}]
         elif sql is ops.LAG:
             rows = [{"events": 0, "p50_ms": 0, "p95_ms": 0}]
         return QueryResult(rows, QueryStats(0.0, 0, 0))
@@ -120,10 +132,13 @@ def service(db: StubDatabase, *, ttl_s: float = 60, cooldown_s: float = 60) -> o
 async def test_one_build_serves_every_request_until_it_expires() -> None:
     db = StubDatabase()
     svc = service(db)
-    first = await svc.get()
+    first, age = await svc.get()
+    assert age == 0
     assert json.loads(first)["freshness"]["minutes"] == 0
     built = db.queries
-    assert await svc.get() == first
+    again, age = await svc.get()
+    assert again == first
+    assert 0 <= age < 60  # tells the route how much of the minute is left for the CDN
     assert db.queries == built
 
 

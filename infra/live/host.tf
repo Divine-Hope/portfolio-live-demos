@@ -107,6 +107,13 @@ data "aws_iam_policy_document" "host" {
     resources = ["*"]
   }
 
+  # Each day's claim on that call, and its answer, so only one host ever asks.
+  statement {
+    sid       = "ClaimTheDailyCostCall"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["${module.archive.arn}/ops/cost/*"]
+  }
+
   statement {
     sid       = "ListArchive"
     actions   = ["s3:ListBucket"]

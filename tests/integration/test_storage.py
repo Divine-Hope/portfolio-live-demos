@@ -449,6 +449,22 @@ async def test_reconcile_finds_and_rebuilds_a_rollup_that_drifted(ch: ClickHouse
         ),
         ("ingest", "CLICKHOUSE_INGEST_PASSWORD", "ALTER TABLE demos.wiki_edits DROP COLUMN title"),
         ("ingest", "CLICKHOUSE_INGEST_PASSWORD", "DROP TABLE demos.wiki_edits"),
+        # The Ops tab's numbers come from tables ingest can't write.
+        (
+            "ingest",
+            "CLICKHOUSE_INGEST_PASSWORD",
+            "INSERT INTO demos.aws_cost (amount) VALUES ('0')",
+        ),
+        (
+            "ingest",
+            "CLICKHOUSE_INGEST_PASSWORD",
+            "INSERT INTO demos.freshness_samples (age_s) VALUES (1)",
+        ),
+        (
+            "archiver",
+            "CLICKHOUSE_ARCHIVER_PASSWORD",
+            "INSERT INTO demos.freshness_samples (age_s) VALUES (1)",
+        ),
     ],
 )
 async def test_application_users_cant_exceed_their_role(

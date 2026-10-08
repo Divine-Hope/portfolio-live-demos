@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import random
@@ -22,6 +21,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import httpx
 from httpx_sse import EventSource, aconnect_sse
@@ -41,8 +41,12 @@ from livedemos.ingest.resume import (
 log = logging.getLogger(__name__)
 
 _MAX_EXPONENT = 32  # 2**32 seconds is already far past any cap; keeps the float finite
-# Reconnects not yet written to ClickHouse (it may be the reason for them). Oldest dropped.
+# Reconnects for the Ops tab: written by their own task, off the ingest path, every few
+# seconds and with a short timeout, so a slow write can never hold up a batch. Kept in
+# memory while ClickHouse is down (often why we reconnected); the oldest go past this many.
 _MAX_UNRECORDED_RECONNECTS = 1_000
+_RECORD_RECONNECTS_EVERY_S = 5.0
+_RECORD_RECONNECTS_TIMEOUT_S = 2.0
 
 
 class Backoff:
@@ -77,22 +81,27 @@ class Consumer:
         self._pending: PendingInsert | None = None  # sent, outcome unknown
         self._backoff = Backoff(settings.backoff_initial_s, settings.backoff_max_s)
         self._reconnects: deque[dict[str, str]] = deque(maxlen=_MAX_UNRECORDED_RECONNECTS)
+        self._reconnects_sealed: tuple[list[dict[str, str]], str] | None = None
 
     async def run(self, stop: asyncio.Event) -> None:
         metrics.HEARTBEAT.set_to_current_time()
-        await self._load_state(stop)
-        while not stop.is_set():
-            reason = await self._stream_once(stop)
-            if stop.is_set():
-                break
-            metrics.RECONNECTS.labels(reason=reason).inc()
-            self._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": reason})
-            if self._pending is not None:
-                await self._commit_pending(stop)
-            await self._record_reconnects()
-            delay = self._backoff.next_delay()
-            log.warning("reconnecting", extra={"reason": reason, "delay_s": round(delay, 2)})
-            await _sleep_or_stop(delay, stop)
+        recorder = asyncio.create_task(self._record_reconnects_until(stop))
+        try:
+            await self._load_state(stop)
+            while not stop.is_set():
+                reason = await self._stream_once(stop)
+                if stop.is_set():
+                    break
+                metrics.RECONNECTS.labels(reason=reason).inc()
+                self._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": reason})
+                if self._pending is not None:
+                    await self._commit_pending(stop)
+                delay = self._backoff.next_delay()
+                log.warning("reconnecting", extra={"reason": reason, "delay_s": round(delay, 2)})
+                await _sleep_or_stop(delay, stop)
+        finally:
+            recorder.cancel()
+            await asyncio.gather(recorder, return_exceptions=True)
 
     async def _load_state(self, stop: asyncio.Event) -> None:
         backoff = Backoff(self._s.backoff_initial_s, self._s.backoff_max_s)
@@ -263,24 +272,34 @@ class Consumer:
         self._pending = pending  # if this raises, the outcome is unknown: keep it
         await self._insert(pending)
         self._committed(pending)
-        if self._reconnects:  # ClickHouse is answering again: catch up
+
+    async def _record_reconnects_until(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            await _sleep_or_stop(_RECORD_RECONNECTS_EVERY_S, stop)
             await self._record_reconnects()
 
     async def _record_reconnects(self) -> None:
         """Write the reconnects not yet recorded, for the Ops tab. Never raises.
 
-        Best effort: if ClickHouse is down (often why we reconnected), they wait in memory
-        for the next successful batch. The token makes a retried insert land once.
+        Like a batch of edits: the rows are sealed with a token first and retried unchanged
+        until ClickHouse confirms them, so an insert that landed but timed out isn't counted
+        twice. Reconnects that happen meanwhile wait for the next batch.
         """
-        rows = list(self._reconnects)
-        token = hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:32]
+        if self._reconnects_sealed is None:
+            if not self._reconnects:
+                return
+            self._reconnects_sealed = (list(self._reconnects), f"reconnects-{uuid4().hex}")
+            self._reconnects.clear()
+        rows, token = self._reconnects_sealed
         try:
-            await self._ch.insert("ingest_reconnects", rows, dedup_token=f"reconnects-{token}")
-        except ClickHouseError as exc:
-            log.warning("recording reconnects failed", extra={"error": str(exc)})
+            await asyncio.wait_for(
+                self._ch.insert("ingest_reconnects", rows, dedup_token=token),
+                timeout=_RECORD_RECONNECTS_TIMEOUT_S,
+            )
+        except (ClickHouseError, TimeoutError) as exc:
+            log.warning("recording reconnects failed", extra={"error": repr(exc)})
             return
-        for _ in rows:
-            self._reconnects.popleft()
+        self._reconnects_sealed = None
 
     async def _insert(self, pending: PendingInsert) -> None:
         started = time.perf_counter()

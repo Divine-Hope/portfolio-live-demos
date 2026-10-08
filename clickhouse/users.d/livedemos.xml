@@ -2,7 +2,7 @@
   Four application users, least privilege:
     migrator  changes the schema; only the one-shot `migrate` job runs as it. Also
               rewrites the rollup (reconcile repairs, rebuilds from the archive)
-    ingest    reads and inserts rows; can't change the schema
+    ingest    reads what resume needs; writes edits, gaps and reconnects; nothing else
     api       read-only, with tight per-query limits (it faces the public internet)
     archiver  reads raw rows and writes them to S3 as Parquet; records the daily AWS cost
   Passwords come from environment variables, never from this file.
@@ -76,7 +76,12 @@
             <quota>default</quota>
             <networks><ip>::/0</ip></networks>
             <grants>
-                <query>GRANT SELECT, INSERT ON demos.*</query>
+                <!-- Edits, and the per-minute tables their views fill from the same insert. -->
+                <query>GRANT SELECT, INSERT ON demos.wiki_edits</query>
+                <query>GRANT SELECT, INSERT ON demos.wiki_edits_per_minute</query>
+                <query>GRANT INSERT ON demos.wiki_pages_per_minute</query>
+                <query>GRANT INSERT ON demos.ingest_gaps</query>
+                <query>GRANT INSERT ON demos.ingest_reconnects</query>
                 <!-- On start, ingest waits for its database's inserts still running
                      (see resume.py). Two columns, nothing else in the process list. -->
                 <query>GRANT SELECT(query_id, current_database) ON system.processes</query>

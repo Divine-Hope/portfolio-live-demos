@@ -1,5 +1,11 @@
-"""The daily Cost Explorer fetch (ops/cost.py), against stubs: no AWS, no ClickHouse."""
+"""The daily Cost Explorer fetch (ops/cost.py), against stubs: no AWS, no ClickHouse.
 
+The rule under test: Cost Explorer is asked at most once per UTC day, whatever happens to
+the process, the host, or a second host running at the same time.
+"""
+
+import io
+import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -19,26 +25,51 @@ RESPONSE = {
         }
     ],
 }
+NOW = datetime(2026, 10, 8, 22, 30, tzinfo=UTC)
 
 
 class StubDatabase:
-    def __init__(self, *, attempted_today: int = 0, fail_query: bool = False) -> None:
-        self.attempted_today = attempted_today
-        self.fail_query = fail_query
-        self.fail_inserts = 0
-        self.rows: list[Mapping[str, Any]] = []
+    """One host's ClickHouse: `aws_cost` rows, and whether it's answering."""
 
-    async def query(self, sql: str, **_: Any) -> QueryResult:
+    def __init__(self) -> None:
+        self.rows: list[Mapping[str, Any]] = []
+        self.fail_query = False
+        self.fail_inserts = 0
+
+    async def query(self, sql: str, *, params: Mapping[str, Any], **_: Any) -> QueryResult:
         if self.fail_query:
             raise ClickHouseError("down")
-        return QueryResult([{"n": self.attempted_today}], QueryStats(0.0, 0, 0))
+        day = params["day"]
+        n = sum(1 for r in self.rows if str(r["fetched_at"]).startswith(day))
+        return QueryResult([{"n": n}], QueryStats(0.0, 0, 0))
 
     async def insert(self, table: str, rows: Sequence[Mapping[str, Any]], **_: Any) -> None:
+        assert table == "aws_cost"
         if self.fail_inserts:
             self.fail_inserts -= 1
             raise ClickHouseError("insert failed")
-        assert table == "aws_cost"
         self.rows.extend(rows)
+
+
+class PreconditionFailed(Exception):
+    def __init__(self) -> None:
+        super().__init__("PreconditionFailed")
+        self.response = {"Error": {"Code": "PreconditionFailed"}}
+
+
+class StubS3:
+    """The archive bucket, shared by every host: conditional puts like S3's."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, **kwargs: Any) -> None:
+        if kwargs.get("IfNoneMatch") == "*" and Key in self.objects:
+            raise PreconditionFailed()
+        self.objects[Key] = Body
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        return {"Body": io.BytesIO(self.objects[Key])}
 
 
 class StubCostExplorer:
@@ -53,11 +84,14 @@ class StubCostExplorer:
         return RESPONSE
 
 
-NOW = datetime(2026, 10, 8, 22, 30, tzinfo=UTC)
-
-
-def fetcher(db: StubDatabase, ce: StubCostExplorer) -> cost.CostFetcher:
-    return cost.CostFetcher(db, tag="project=livedemos", client_factory=lambda: ce)  # type: ignore[arg-type]
+def fetcher(db: StubDatabase, s3: StubS3, ce: StubCostExplorer) -> cost.CostFetcher:
+    return cost.CostFetcher(
+        db,  # type: ignore[arg-type]
+        tag="project=livedemos",
+        claims="s3://archive-bucket/ops/cost",
+        ce_factory=lambda: ce,
+        s3_factory=lambda: s3,
+    )
 
 
 @pytest.mark.parametrize(
@@ -87,50 +121,98 @@ def test_parse_keeps_the_amount_and_currency_exactly_as_aws_sent_them() -> None:
         cost.parse({"ResultsByTime": []})
 
 
-async def test_asks_once_a_day_and_records_the_answer() -> None:
-    db, ce = StubDatabase(), StubCostExplorer()
-    f = fetcher(db, ce)
+async def test_asks_once_a_day_and_records_the_answer_in_both_places() -> None:
+    db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
+    f = fetcher(db, s3, ce)
     assert await f.refresh_if_due(NOW) is True
     assert await f.refresh_if_due(NOW + timedelta(hours=1)) is False
     assert len(ce.calls) == 1
-    assert db.rows[0]["ok"] is True
     assert (db.rows[0]["amount"], db.rows[0]["currency"]) == ("0.1977203052", "USD")
+    claim = json.loads(s3.objects["ops/cost/2026-10-08.json"])
+    assert claim["result"]["amount"] == "0.1977203052"
     # A new UTC day asks again.
     assert await f.refresh_if_due(NOW + timedelta(hours=2)) is True
     assert len(ce.calls) == 2
 
 
-async def test_an_attempt_already_in_the_table_counts_after_a_restart() -> None:
-    db, ce = StubDatabase(attempted_today=1), StubCostExplorer()
-    assert await fetcher(db, ce).refresh_if_due(NOW) is False
+async def test_a_second_host_the_same_day_copies_the_answer_instead_of_asking() -> None:
+    s3, ce = StubS3(), StubCostExplorer()
+    first, replacement = StubDatabase(), StubDatabase()  # each host has its own ClickHouse
+    assert await fetcher(first, s3, ce).refresh_if_due(NOW) is True
+    assert await fetcher(replacement, s3, ce).refresh_if_due(NOW + timedelta(minutes=30)) is False
+    assert len(ce.calls) == 1
+    assert replacement.rows[0]["amount"] == "0.1977203052"
+
+
+async def test_a_claim_without_an_answer_means_no_second_request() -> None:
+    # The winner died between claiming and answering: no number today, never a second call.
+    s3, ce = StubS3(), StubCostExplorer()
+    s3.objects["ops/cost/2026-10-08.json"] = json.dumps({"claimed_at": "x"}).encode()
+    db = StubDatabase()
+    f = fetcher(db, s3, ce)
+    assert await f.refresh_if_due(NOW) is False
+    assert await f.refresh_if_due(NOW + timedelta(minutes=5)) is False
     assert ce.calls == []
+    assert db.rows == []
 
 
 async def test_a_failed_request_is_recorded_and_not_retried_the_same_day() -> None:
-    db, ce = StubDatabase(), StubCostExplorer(fail=True)
-    f = fetcher(db, ce)
+    db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer(fail=True)
+    f = fetcher(db, s3, ce)
     assert await f.refresh_if_due(NOW) is True
     assert await f.refresh_if_due(NOW + timedelta(minutes=5)) is False
+    assert await fetcher(StubDatabase(), s3, ce).refresh_if_due(NOW) is False  # after a restart
     assert len(ce.calls) == 1
     assert db.rows[0]["ok"] is False
     assert "AccessDenied" in db.rows[0]["error"]
 
 
-async def test_a_lost_insert_doesnt_cause_a_second_request() -> None:
-    db, ce = StubDatabase(), StubCostExplorer()
+async def test_a_lost_insert_is_filled_from_the_claim_not_a_second_request() -> None:
+    db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
     db.fail_inserts = 1
-    f = fetcher(db, ce)
+    f = fetcher(db, s3, ce)
     assert await f.refresh_if_due(NOW) is True
+    assert db.rows == []
     assert await f.refresh_if_due(NOW + timedelta(minutes=5)) is False
     assert len(ce.calls) == 1
+    assert db.rows[0]["amount"] == "0.1977203052"
 
 
 async def test_no_request_while_clickhouse_cant_say_whether_today_was_done() -> None:
-    db, ce = StubDatabase(fail_query=True), StubCostExplorer()
-    assert await fetcher(db, ce).refresh_if_due(NOW) is False
+    db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
+    db.fail_query = True
+    assert await fetcher(db, s3, ce).refresh_if_due(NOW) is False
+    assert ce.calls == []
+    assert s3.objects == {}
+
+
+async def test_no_request_when_the_claim_cant_be_written() -> None:
+    class BrokenS3(StubS3):
+        def put_object(self, **kwargs: Any) -> None:
+            raise RuntimeError("AccessDenied")
+
+    ce = StubCostExplorer()
+    f = cost.CostFetcher(
+        StubDatabase(),  # type: ignore[arg-type]
+        tag="project=livedemos",
+        claims="s3://archive-bucket/ops/cost",
+        ce_factory=lambda: ce,
+        s3_factory=BrokenS3,
+    )
+    assert await f.refresh_if_due(NOW) is False
     assert ce.calls == []
 
 
-def test_the_tag_must_be_key_equals_value() -> None:
-    with pytest.raises(ValueError, match="key=value"):
-        cost.CostFetcher(StubDatabase(), tag="livedemos", client_factory=object)  # type: ignore[arg-type]
+@pytest.mark.parametrize(
+    ("tag", "claims"),
+    [("livedemos", "s3://b/ops/cost"), ("project=livedemos", "b/ops"), ("project=x", "s3://b")],
+)
+def test_settings_are_checked(tag: str, claims: str) -> None:
+    with pytest.raises(ValueError, match=r"tag|claims"):
+        cost.CostFetcher(
+            StubDatabase(),  # type: ignore[arg-type]
+            tag=tag,
+            claims=claims,
+            ce_factory=object,
+            s3_factory=object,
+        )

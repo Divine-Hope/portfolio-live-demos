@@ -16,14 +16,26 @@ ORDER BY minute
 TTL minute + INTERVAL 90 DAY;
 
 -- Plain max() and count() are answered from part metadata: a few rows read a minute.
+-- ClickHouse runs it once at creation, then at the start of every minute, and doesn't
+-- catch up on minutes it missed while down. It runs as the migrator, which can read
+-- wiki_edits and write the samples, and nothing else here.
 CREATE MATERIALIZED VIEW IF NOT EXISTS {database}.freshness_samples_mv
 REFRESH EVERY 1 MINUTE APPEND
 TO {database}.freshness_samples
+DEFINER = CURRENT_USER SQL SECURITY DEFINER
 AS SELECT
     toStartOfMinute(now64(3)) AS minute,
     now64(3) AS sampled_at,
     if(count() = 0, NULL, dateDiff('millisecond', max(event_time), now64(3)) / 1000) AS age_s
 FROM {database}.wiki_edits;
+
+-- The Ops tab's ingest lag covers rows by when they were stored, late or replayed ones
+-- included. wiki_edits is sorted by event time; this lets a range on ingested_at skip the
+-- granules outside it. Parts are written in ingest order, so it skips nearly all of them.
+ALTER TABLE {database}.wiki_edits
+    ADD INDEX IF NOT EXISTS ingested_at_minmax ingested_at TYPE minmax GRANULARITY 1;
+
+ALTER TABLE {database}.wiki_edits MATERIALIZE INDEX ingested_at_minmax SETTINGS mutations_sync = 1;
 
 -- Each time ingest's stream connection ended and it reconnected, and why. Written by
 -- ingest; reasons are the ones in ingest/consumer.py (idle, eof, network, http_status,

@@ -190,7 +190,7 @@ def create_app(
     @app.get("/v1/ops.json")
     async def ops(request: Request) -> Response:
         try:
-            body = await request.app.state.ops.get()
+            body, age = await request.app.state.ops.get()
         except OpsUnavailable as exc:
             log.warning("ops unavailable", exc_info=exc.__cause__)
             return JSONResponse(
@@ -201,7 +201,10 @@ def create_app(
         return Response(
             content=body,
             media_type="application/json",
-            headers={"Cache-Control": f"public, max-age={settings.ops_cache_ttl_s}"},
+            # What's left of the build's minute, so a CDN copy is never older than that.
+            headers={
+                "Cache-Control": f"public, max-age={max(0, int(settings.ops_cache_ttl_s - age))}"
+            },
         )
 
     @app.get("/healthz")

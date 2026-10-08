@@ -9,8 +9,8 @@ Every number on the tab comes from here, and every number here from ClickHouse:
 - gaps recorded in the last 30 days,
 - month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py).
 
-The answer is built at most once a minute and shared by every viewer; CloudFront caches it
-for the same minute in front.
+The answer is built at most once a minute and shared by every viewer. CloudFront caches it
+for what's left of that minute, so no copy is more than a minute old.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, TypeGuard
 
 from livedemos.api.contract import (
     Bookmark,
@@ -38,17 +38,16 @@ RECONNECT_WINDOW_S = 86_400
 GAP_WINDOW_DAYS = 30
 MAX_GAPS = 20
 
-# What ingest committed in the last hour, late or replayed events included: their lag is
-# real. The event-time bound only lets ClickHouse skip old partitions; a replay of events
-# more than a day old is left out.
+# Everything ingest stored in the last hour, late and replayed events included: their lag
+# is real, and a catch-up after an outage is when it matters most. The minmax index on
+# ingested_at (migration 0005) skips the granules outside the hour.
 LAG = """
 SELECT
     count() AS events,
     quantileExact(0.5)(dateDiff('millisecond', event_time, ingested_at)) AS p50_ms,
     quantileExact(0.95)(dateDiff('millisecond', event_time, ingested_at)) AS p95_ms
 FROM wiki_edits
-WHERE event_time > now() - INTERVAL 1 DAY
-  AND ingested_at > now() - toIntervalSecond({window_s:UInt32})
+WHERE ingested_at > now() - toIntervalSecond({window_s:UInt32})
 """
 
 # The newest committed row's bookmark: max(ingest_seq) from the seq_max projection, then a
@@ -69,7 +68,10 @@ GROUP BY reason
 ORDER BY n DESC, reason
 """
 
-FIRST_SAMPLE = "SELECT toUnixTimestamp(min(minute)) AS first_s, count() AS n FROM freshness_samples"
+FIRST_SAMPLE = (
+    "SELECT toUnixTimestamp64Milli(min(sampled_at)) AS first_ms, count() AS n "
+    "FROM freshness_samples"
+)
 
 # A minute with two samples (a refresh retried) is fresh only if both were.
 FRESHNESS = """
@@ -88,7 +90,8 @@ GAPS = """
 SELECT
     toUnixTimestamp64Milli(gap_from) AS from_ms,
     toUnixTimestamp64Milli(gap_to) AS to_ms,
-    reason
+    reason,
+    count() OVER () AS total
 FROM ingest_gaps
 WHERE gap_to > now() - toIntervalDay({days:UInt16})
 ORDER BY gap_from DESC
@@ -98,11 +101,11 @@ LIMIT {limit:UInt16}
 COST = """
 SELECT
     toUnixTimestamp64Milli(fetched_at) AS fetched_ms,
-    toString(period_start) AS period_start,
-    toString(period_end) AS period_end,
+    toString(period_start) AS start_day,
+    toString(period_end) AS end_day,
     amount, currency, estimated
 FROM aws_cost
-WHERE ok
+WHERE ok AND period_start = toStartOfMonth(toDate(now(), 'UTC'))  -- this month's, only
 ORDER BY fetched_at DESC
 LIMIT 1
 """
@@ -125,16 +128,26 @@ def shorten_bookmark(sse_id: str) -> Bookmark | None:
     for part in parts:
         if not isinstance(part, dict) or "topic" not in part:
             return None
-        stream = str(part["topic"]).split(".", 1)[0]
-        ts = part.get("timestamp")
+        ts, offset = part.get("timestamp"), part.get("offset")
         positions.append(
             {
-                "stream": stream,
-                "at": iso(int(ts) / 1000) if isinstance(ts, int) else None,
-                "offset": part.get("offset") if isinstance(part.get("offset"), int) else None,
+                "stream": str(part["topic"]).split(".", 1)[0],
+                "at": iso(ts / 1000) if _plausible_ms(ts) else None,
+                "offset": offset if _is_int(offset) else None,
             }
         )
     return {"positions": positions, "bytes": len(sse_id.encode())}
+
+
+def _is_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _plausible_ms(value: object) -> TypeGuard[int]:
+    """A Unix time in ms between 2000 and 2100: anything else isn't a position to show."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return False
+    return 946_684_800_000 <= value < 4_102_444_800_000
 
 
 def assemble(
@@ -168,6 +181,7 @@ def assemble(
         "met": None,
         "budget_minutes": round(days * 1_440 * (1 - target)),
         "budget_used": 0,
+        "full_window": False,
     }
     if freshness is not None:
         fresh_report.update(
@@ -182,6 +196,7 @@ def assemble(
                 "met": freshness.met,
                 "budget_minutes": freshness.budget_minutes,
                 "budget_used": freshness.budget_used,
+                "full_window": freshness.window.is_full(days),
             }
         )
 
@@ -201,8 +216,8 @@ def assemble(
             "amount": str(cost["amount"]),
             "currency": str(cost["currency"]),
             "estimated": bool(cost["estimated"]),
-            "period_start": str(cost["period_start"]),
-            "period_end": str(cost["period_end"]),
+            "period_start": str(cost["start_day"]),
+            "period_end": str(cost["end_day"]),
             "fetched_at": iso(int(cost["fetched_ms"]) / 1000),
             "source": "AWS Cost Explorer, UnblendedCost, tag project=livedemos",
         }
@@ -224,7 +239,11 @@ def assemble(
             },
         },
         "freshness": fresh_report,
-        "gaps": {"window_days": GAP_WINDOW_DAYS, "recent": gap_reports},
+        "gaps": {
+            "window_days": GAP_WINDOW_DAYS,
+            "total": int(gaps[0]["total"]) if gaps else 0,  # `recent` holds the newest 20
+            "recent": gap_reports,
+        },
         "cost": cost_report,
     }
 
@@ -256,11 +275,12 @@ class OpsService:
         self._cached: tuple[float, bytes] | None = None
         self._failed_at: float | None = None
 
-    async def get(self) -> bytes:
+    async def get(self) -> tuple[bytes, float]:
+        """The payload, and how many seconds ago it was built."""
         async with self._lock:
             now = time.monotonic()
             if self._cached and now - self._cached[0] < self._ttl_s:
-                return self._cached[1]
+                return self._cached[1], now - self._cached[0]
             if self._failed_at is not None and now - self._failed_at < self._error_cooldown_s:
                 raise OpsUnavailable("ops data unavailable")
             try:
@@ -270,7 +290,7 @@ class OpsService:
                 raise OpsUnavailable("ops data unavailable") from exc
             body = json.dumps(payload, separators=(",", ":")).encode()
             self._cached, self._failed_at = (time.monotonic(), body), None
-            return body
+            return body, 0.0
 
     async def build(self) -> OpsPayload:
         now = time.time()
@@ -282,8 +302,12 @@ class OpsService:
             self._db.query(GAPS, params={"days": GAP_WINDOW_DAYS, "limit": MAX_GAPS}),
             self._db.query(COST),
         )
-        first_s = int(first.rows[0]["first_s"]) if first.rows and int(first.rows[0]["n"]) else None
-        win = slo.window(now_s=now, first_sample_s=first_s, days=self._days)
+        first_ms = (
+            int(first.rows[0]["first_ms"]) if first.rows and int(first.rows[0]["n"]) else None
+        )
+        win = slo.window(
+            now_s=now, first_sample_s=None if first_ms is None else first_ms / 1000, days=self._days
+        )
         freshness = None
         if win is not None:
             counts = await self._db.query(

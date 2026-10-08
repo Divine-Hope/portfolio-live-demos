@@ -8,13 +8,15 @@ of whole minutes, each minute is one of:
 - unmeasured: no sample. ClickHouse was down, or the host was being replaced. We can't
   show it was fresh, so it counts against the SLO like a stale one.
 
-The window is the last `days` days of completed minutes, but never starts before the first
-sample: minutes before we measured anything aren't counted either way. The current minute
-is left out because its sample may not have landed yet.
+The window is the last `days` days of completed minutes, but never starts before
+measuring did: it starts at the first whole minute after the first sample, so a minute
+measured for only its last second isn't counted. The current minute is left out because
+its sample may not have landed yet.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 MINUTE_S = 60
@@ -29,6 +31,10 @@ class Window:
     def minutes(self) -> int:
         return (self.end_s - self.start_s) // MINUTE_S
 
+    def is_full(self, days: int) -> bool:
+        """Whether measuring started before the window did: the whole `days` count."""
+        return self.minutes >= days * 1_440
+
 
 @dataclass(frozen=True, slots=True)
 class Freshness:
@@ -42,12 +48,13 @@ class Freshness:
     budget_used: int
 
 
-def window(*, now_s: float, first_sample_s: int | None, days: int) -> Window | None:
+def window(*, now_s: float, first_sample_s: float | None, days: int) -> Window | None:
     """The minutes to count, or None before the first sample."""
     if first_sample_s is None:
         return None
     end = int(now_s) // MINUTE_S * MINUTE_S
-    start = max(end - days * 86_400, first_sample_s // MINUTE_S * MINUTE_S)
+    first_whole = math.ceil(first_sample_s / MINUTE_S) * MINUTE_S
+    start = max(end - days * 86_400, first_whole)
     return Window(start_s=min(start, end), end_s=end)
 
 

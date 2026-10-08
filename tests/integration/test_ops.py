@@ -45,7 +45,17 @@ async def test_clickhouse_samples_freshness_by_itself(ch: ClickHouse) -> None:
     assert 0 <= result.rows[0]["age_s"] < 60
 
 
+async def test_lag_counts_a_replay_of_old_events_stored_just_now(ch: ClickHouse) -> None:
+    # After a two-day outage, ingest replays two-day-old events: their lag is the point.
+    await ch.insert("wiki_edits", rows(10, start=datetime.now(UTC) - timedelta(days=2)))
+    result = await ch.query(ops.LAG, params={"window_s": ops.LAG_WINDOW_S})
+    assert result.rows[0]["events"] == 10
+    assert result.rows[0]["p50_ms"] > 86_400_000
+
+
 async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None:
+    month = datetime.now(UTC).date().replace(day=1)
+    last_month = (month - timedelta(days=1)).replace(day=1)
     await ch.insert("wiki_edits", rows(30))
     await ch.insert(
         "ingest_reconnects",
@@ -59,9 +69,19 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
         "aws_cost",
         [
             {
+                "fetched_at": (datetime.now(UTC) - timedelta(days=40)).isoformat(),
+                "ok": True,
+                "period_start": last_month.isoformat(),
+                "period_end": month.isoformat(),
+                "amount": "9.99",
+                "currency": "USD",
+                "estimated": False,
+                "error": "",
+            },
+            {
                 "fetched_at": datetime.now(UTC).isoformat(),
                 "ok": True,
-                "period_start": "2026-10-01",
+                "period_start": month.isoformat(),
                 "period_end": "2026-10-09",
                 "amount": "0.1977203052",
                 "currency": "USD",
@@ -71,7 +91,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
             {
                 "fetched_at": (datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
                 "ok": False,
-                "period_start": "2026-10-01",
+                "period_start": month.isoformat(),
                 "period_end": "2026-10-09",
                 "amount": "",
                 "currency": "",
@@ -87,6 +107,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
     assert payload["ingest"]["lag_ms"]["p95"] is not None
     assert payload["ingest"]["reconnects"]["by_reason"] == {"idle": 2}
     assert payload["ingest"]["bookmark"] is None  # the test rows' ids aren't real positions
-    # The newest successful fetch, not the failed attempt after it.
+    # This month's newest successful fetch: not the failed attempt after it, and never
+    # last month's total passed off as this month's.
     assert payload["cost"] is not None
     assert payload["cost"]["amount"] == "0.1977203052"
