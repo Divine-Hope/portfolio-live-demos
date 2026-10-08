@@ -1,8 +1,9 @@
 """Keep `wiki_pages_per_minute` (migration 0004) complete for its 14 days.
 
 The table holds, per minute and language, the exact set of pages edited. Its materialized
-view fills it from every raw insert. Hours without raw rows here (a rebuilt host restores
-two days of them; a rollup rebuild works from Parquet) get their sets from the archive.
+view fills it from every raw insert. Every hour is then completed once it's final: by the
+archive service from raw rows when it writes the hour (archive/job.py), or from the hour's
+Parquet file here (a rebuilt host's older days, a rollup rebuild).
 
 Sets only add: inserting a page into a minute twice changes nothing. So filling an hour
 again is always safe, and an hour counts as filled only once its insert has finished
@@ -24,10 +25,6 @@ log = logging.getLogger(__name__)
 RETENTION = timedelta(days=14)  # the sets' TTL (migration 0004)
 _SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, namespace Int32, title String"
 
-_RAW_HOURS = (
-    "SELECT DISTINCT toUnixTimestamp(toStartOfHour(event_time)) AS h FROM wiki_edits "
-    "WHERE event_time >= fromUnixTimestamp({from_s:Int64})"
-)
 _FILLED_HOURS = (
     "SELECT DISTINCT toUnixTimestamp(hour) AS h FROM wiki_pages_filled "
     "WHERE hour >= fromUnixTimestamp({from_s:Int64})"
@@ -39,8 +36,9 @@ def _day_start(day: date) -> int:
 
 
 async def fill_missing(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) -> list[int]:
-    """Fill every archived hour of the last 14 days that has neither raw rows here (the
-    view covered those) nor a finished fill. Returns the hours filled."""
+    """Fill every archived hour of the last 14 days without a finished fill. Returns the
+    hours filled. The archive service records each hour it writes (job.py); this catches
+    the rest: a rebuilt host's older days, and a host from before the table."""
     first_day = (now - RETENTION).date()
     from_s = _day_start(first_day)
     days = (now.date() - first_day).days + 1
@@ -49,9 +47,8 @@ async def fill_missing(ch: ClickHouse, settings: ArchiveSettings, *, now: dateti
     )
     if not archived:
         return []
-    raw = {int(r["h"]) for r in (await ch.query(_RAW_HOURS, params={"from_s": from_s})).rows}
     filled = {int(r["h"]) for r in (await ch.query(_FILLED_HOURS, params={"from_s": from_s})).rows}
-    missing = sorted(archived - raw - filled)
+    missing = sorted(archived - filled)
     if missing:
         await add_from_archive(ch, settings, missing)
         log.info("page sets filled from the archive", extra={"hours": len(missing)})

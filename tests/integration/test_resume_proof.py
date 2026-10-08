@@ -110,6 +110,7 @@ async def test_kill_mid_insert_loses_nothing_and_duplicates_nothing(
         await asyncio.sleep(6)  # catch up, then a couple of normal drop-and-reconnect cycles
         expected = await _pause_and_get_truth(fake_stream)
         await _wait_for_count(ch, len(expected))
+        await _wait_for_no_inserts(ch)
         await _assert_exactly(ch, expected)
         assert orphaned, "the killed process's insert had already finished; nothing raced"
     finally:
@@ -157,6 +158,7 @@ async def test_an_insert_that_commits_but_reports_failure_is_not_written_twice(
         await asyncio.sleep(8)
         expected = await _pause_and_get_truth(fake_stream)
         await _wait_for_count(ch, len(expected))
+        await _wait_for_no_inserts(ch)
         await asyncio.sleep(2)  # anything extra would have landed by now
     finally:
         stop.set()
@@ -217,6 +219,7 @@ async def test_an_insert_that_lands_after_its_retry_is_not_written_twice(
         await asyncio.sleep(8)
         expected = await _pause_and_get_truth(fake_stream)
         await _wait_for_count(ch, len(expected))
+        await _wait_for_no_inserts(ch)
         assert flaky.late is not None, "the failure was never injected"
         await flaky.late  # the late copy has landed (and been dropped as a duplicate)
         await asyncio.sleep(1)
@@ -265,6 +268,21 @@ async def _wait_for_count(ch: ClickHouse, n: int, timeout_s: float = 30) -> None
         await asyncio.sleep(0.5)
 
 
+async def _wait_for_no_inserts(ch: ClickHouse, timeout_s: float = 30) -> None:
+    """Raw rows can be visible while the insert's views are still writing: wait until no
+    ingest insert runs, so the rollup and page sets are settled too."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        running = await _scalar(
+            ch,
+            "SELECT count() FROM system.processes "
+            "WHERE startsWith(query_id, 'ingest-') AND current_database = currentDatabase()",
+        )
+        if not running:
+            return
+        await asyncio.sleep(0.2)
+
+
 async def _assert_exactly(ch: ClickHouse, expected: set[str]) -> None:
     stored = await ch.query("SELECT toString(event_id) AS id FROM wiki_edits")
     stored_ids = [r["id"] for r in stored.rows]
@@ -275,6 +293,17 @@ async def _assert_exactly(ch: ClickHouse, expected: set[str]) -> None:
     assert not unexpected, f"{len(unexpected)} rows that the source never sent"
     rolled = await _scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute")
     assert rolled == len(expected), "rollup total disagrees with raw"
+    sets = await _scalar(
+        ch,
+        "SELECT sum(n) FROM (SELECT uniqExactMerge(pages) AS n FROM wiki_pages_per_minute "
+        "GROUP BY minute, lang)",
+    )
+    raw_pages = await _scalar(
+        ch,
+        "SELECT sum(n) FROM (SELECT uniqExact(namespace, title) AS n FROM wiki_edits "
+        "GROUP BY toStartOfMinute(event_time), lang)",
+    )
+    assert sets == raw_pages, "page sets disagree with raw"
     # Per minute and language, not only in total: drift can cancel out in a sum.
     now = datetime.now(UTC) + timedelta(minutes=1)
     assert await find_mismatches(ch, now=now, settle=timedelta(0)) == []
