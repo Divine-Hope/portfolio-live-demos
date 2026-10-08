@@ -25,7 +25,7 @@ from livedemos.api.contract import ActivityPayload, iso
 from livedemos.clickhouse import ClickHouseError, Queryable
 
 WINDOWS = {"5m": 300, "1h": 3_600, "24h": 86_400, "3d": 259_200, "7d": 604_800}
-# Longer windows read the per-minute rollup instead of raw rows (queries.py).
+# Longer windows read per-minute tables instead of raw rows (queries.py).
 ROLLUP_WINDOWS = frozenset({"3d", "7d"})
 
 
@@ -177,7 +177,7 @@ class ActivityService:
             "window": req.window,
             "generated_at": generated_at,
             "edits": edits,
-            "pages_edited": None if from_rollup else sum(int(r["pages"]) for r in result.rows),
+            "pages_edited": sum(int(r["pages"]) for r in result.rows),
             "bot_share": round(bots / edits, 4) if edits else None,
             "as_of": iso(newest),
             "last_event_age_s": round(max(0.0, now - newest), 3),

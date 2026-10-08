@@ -42,9 +42,11 @@ async def test_migrations_run_once_and_are_recorded(ch: ClickHouse) -> None:
         "wiki_edits_per_minute",
         "wiki_edits_per_minute_mv",
         "wiki_edits_per_minute_staging",
+        "wiki_pages_per_minute",
+        "wiki_pages_per_minute_mv",
     ]
     applied = await ch.query("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r["version"] for r in applied.rows] == [1, 2, 3]
+    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4]
 
 
 async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
@@ -53,7 +55,7 @@ async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
     assert await migrate(ch, upto=1) == [1]
     await ch.insert("wiki_edits", rows(50), dedup_token="before-upgrade")
 
-    assert await migrate(ch) == [2, 3]
+    assert await migrate(ch) == [2, 3, 4]
     projections = await ch.query(
         "SELECT DISTINCT name FROM system.projection_parts "
         "WHERE database = {db:String} AND table = 'wiki_edits' AND active ORDER BY name",
@@ -73,7 +75,7 @@ async def test_a_database_from_before_versioned_migrations_is_adopted(ch: ClickH
         await ch.execute(sql, settings={"database": db})
     await ch.insert("wiki_edits", rows(40), dedup_token="legacy")
 
-    assert await migrate(ch) == [1, 2, 3]  # 1 is a no-op that records the baseline
+    assert await migrate(ch) == [1, 2, 3, 4]  # 1 is a no-op that records the baseline
     assert await scalar(ch, "SELECT count() FROM wiki_edits") == 40
     assert await scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute") == 40
 
@@ -311,11 +313,29 @@ async def test_query_it_reports_clickhouse_timing(ch: ClickHouse) -> None:
     assert payload["query"]["rows_read"] >= 200
     assert payload["query"]["elapsed_ms"] > 0
 
-    # A week comes from the rollup: same edits, no distinct-page count, few rows read.
+    # A week comes from per-minute tables: the same edits and the same exact page count as
+    # raw rows give, reading fewer rows.
     week = await service.get(parse_request("en", "7d", allowed=["en", "pt", "de"]))
     assert week["edits"] == 200
-    assert week["pages_edited"] is None
+    assert week["pages_edited"] == payload["pages_edited"]
     assert week["query"]["rows_read"] < 200
+
+
+async def test_long_windows_count_the_same_pages_as_raw_rows(ch: ClickHouse) -> None:
+    """Pages edited in several minutes, several inserts and two languages count once each,
+    and the per-minute sets agree exactly with counting raw rows."""
+    now = datetime.now(UTC)
+    for i, lang in enumerate(("en", "de", "en", "de", "en")):  # the same titles, again
+        start = now - timedelta(minutes=40 - i * 7)
+        await ch.insert("wiki_edits", rows(90, lang=lang, start=start), dedup_token=f"p{i}")
+    service = ActivityService(ch, ttl_s=10)
+    langs = ["en", "pt", "de"]
+    raw = await service.get(parse_request("en,de", "24h", allowed=langs))
+    for window in ("3d", "7d"):
+        sets = await service.get(parse_request("en,de", window, allowed=langs))
+        assert (sets["edits"], sets["pages_edited"]) == (raw["edits"], raw["pages_edited"])
+    assert raw["pages_edited"] == 6  # three titles a language (rows() cycles three)
+    assert raw["edits"] == 450
 
 
 async def test_a_retry_cant_run_alongside_the_insert_it_retries(ch: ClickHouse) -> None:

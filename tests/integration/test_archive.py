@@ -231,9 +231,12 @@ async def test_a_host_rebuilt_from_scratch_comes_back_from_the_archive(
     old_hour = await raw_ids(edits, older)
     assert await restore(edits, settings, now=NOW) == Restored()  # raw rows: nothing lost
 
-    for table in ("wiki_edits", "wiki_edits_per_minute", "archive_hours"):
+    pages_before = await pages_by_hour(edits, written)
+    for table in ("wiki_edits", "wiki_edits_per_minute", "wiki_pages_per_minute", "archive_hours"):
         await edits.execute(f"TRUNCATE TABLE {table}")
     done = await restore(edits, settings, now=NOW)
+    assert await pages_by_hour(edits, written) == pages_before  # raw restore + archive top-up
+    assert set(done.pages_hours) == older  # the days not restored to raw came from Parquet
 
     assert set(done.rollup_hours) == older  # older days: straight into the rollup
     assert set(done.raw_hours) == written - older  # the last two days: back in raw
@@ -276,6 +279,15 @@ async def all_minutes(ch: ClickHouse) -> list[tuple[str, str, int, int]]:
         "FROM wiki_edits_per_minute GROUP BY minute, lang ORDER BY minute, lang"
     )
     return [(r["m"], r["lang"], int(r["e"]), int(r["b"])) for r in result.rows]
+
+
+async def pages_by_hour(ch: ClickHouse, hours: set[int]) -> dict[tuple[int, str], int]:
+    result = await ch.query(
+        "SELECT toUnixTimestamp(toStartOfHour(minute)) AS h, lang, uniqExactMerge(pages) AS n "
+        "FROM wiki_pages_per_minute WHERE h IN {hours:Array(UInt32)} GROUP BY h, lang",
+        params={"hours": sorted(hours)},
+    )
+    return {(int(r["h"]), str(r["lang"])): int(r["n"]) for r in result.rows}
 
 
 async def raw_ids(ch: ClickHouse, hours: set[int]) -> set[str]:
