@@ -281,6 +281,7 @@ async def _wait_for_no_inserts(ch: ClickHouse, timeout_s: float = 30) -> None:
         if not running:
             return
         await asyncio.sleep(0.2)
+    raise AssertionError(f"an ingest insert was still running after {timeout_s} s")
 
 
 async def _assert_exactly(ch: ClickHouse, expected: set[str]) -> None:
@@ -293,17 +294,15 @@ async def _assert_exactly(ch: ClickHouse, expected: set[str]) -> None:
     assert not unexpected, f"{len(unexpected)} rows that the source never sent"
     rolled = await _scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute")
     assert rolled == len(expected), "rollup total disagrees with raw"
-    sets = await _scalar(
-        ch,
-        "SELECT sum(n) FROM (SELECT uniqExactMerge(pages) AS n FROM wiki_pages_per_minute "
-        "GROUP BY minute, lang)",
+    sets = await ch.query(
+        "SELECT toUnixTimestamp(minute) AS m, lang, uniqExactMerge(pages) AS n "
+        "FROM wiki_pages_per_minute GROUP BY m, lang ORDER BY m, lang"
     )
-    raw_pages = await _scalar(
-        ch,
-        "SELECT sum(n) FROM (SELECT uniqExact(namespace, title) AS n FROM wiki_edits "
-        "GROUP BY toStartOfMinute(event_time), lang)",
+    raw_pages = await ch.query(
+        "SELECT toUnixTimestamp(toStartOfMinute(event_time)) AS m, lang, "
+        "uniqExact(namespace, title) AS n FROM wiki_edits GROUP BY m, lang ORDER BY m, lang"
     )
-    assert sets == raw_pages, "page sets disagree with raw"
+    assert sets.rows == raw_pages.rows, "page sets disagree with raw, minute by minute"
     # Per minute and language, not only in total: drift can cancel out in a sum.
     now = datetime.now(UTC) + timedelta(minutes=1)
     assert await find_mismatches(ch, now=now, settle=timedelta(0)) == []

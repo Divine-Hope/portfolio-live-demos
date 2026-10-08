@@ -301,6 +301,26 @@ async def raw_ids(ch: ClickHouse, hours: set[int]) -> set[str]:
     return {str(r["id"]) for r in result.rows}
 
 
+async def test_the_archive_loop_completes_an_hour_whose_page_sets_failed(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """The file was written but completing its page sets didn't finish: the next run
+    finds the hour unrecorded and completes it."""
+    archiver = Archiver(settings, edits)
+    written = {r.hour_s for r in await archiver.run_once(NOW)}
+    before = await pages_by_hour(edits, written)
+    await edits.execute("TRUNCATE TABLE wiki_pages_filled")
+    await edits.execute(
+        "ALTER TABLE wiki_pages_per_minute DELETE WHERE toStartOfHour(minute) = "
+        "fromUnixTimestamp({h:Int64}) SETTINGS mutations_sync = 1",
+        params={"h": H1},
+    )
+    assert await archiver.run_once(NOW) == []  # nothing to write
+    assert await pages_by_hour(edits, written) == before
+    filled = await edits.query("SELECT DISTINCT toUnixTimestamp(hour) AS h FROM wiki_pages_filled")
+    assert {int(r["h"]) for r in filled.rows} >= written
+
+
 async def test_an_interrupted_page_fill_is_done_again(
     edits: ClickHouse, settings: ArchiveSettings
 ) -> None:
