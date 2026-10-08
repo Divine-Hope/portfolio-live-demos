@@ -1,4 +1,5 @@
-# One image for both services (ingest and api); compose picks the command.
+# One image for every Python service (ingest, api, archive, migrate, the fake stream);
+# compose picks the command.
 # Multi-stage: build the virtualenv with uv, ship only the venv on a slim base.
 
 FROM python:3.12-slim AS build

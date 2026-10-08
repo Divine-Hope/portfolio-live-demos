@@ -60,6 +60,14 @@ logs: ## Follow ingest and api logs
 ps: ## Show service status
 	docker compose --profile offline ps
 
+.PHONY: wait-live
+wait-live: ## Wait up to 2 minutes for the running stack to serve live data
+	@for _ in $$(seq 1 60); do \
+		status=$$(curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' 2>/dev/null || true); \
+		[ "$$status" = "live" ] && echo "live" && exit 0; \
+		sleep 2; \
+	done; echo "no live data after 120 s"; exit 1
+
 .PHONY: smoke
 smoke: ## Check the running stack answers
 	@curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; d=json.load(sys.stdin); print("status:", d["status"], "| last event age:", d["last_event_age_s"], "s | edits 5m:", d.get("langs",{}).get("all",{}).get("edits_5m"))'
@@ -104,7 +112,7 @@ e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWS
 	uv run --group e2e pytest -m e2e -v
 
 # AWS -----------------------------------------------------------------------------------
-# Credentials come from your SSO profile: run `aws sso login --sso-session bplabs` first.
+# Credentials come from your SSO profile: run `aws sso login` for your SSO session first.
 TF_PROFILE ?= livedemos
 TF := AWS_PROFILE=$(TF_PROFILE) terraform
 

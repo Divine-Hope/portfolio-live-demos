@@ -6,15 +6,21 @@ Small data products I run in public. Each one takes a public event stream, store
 
 First up: what's being edited on English, Portuguese and German Wikipedia, right now.
 
-> Status: running in AWS. The API is live at [`/v1/wikipedia/live.json`](https://d1ij81u3v32tos.cloudfront.net/v1/wikipedia/live.json); a [Postman collection](docs/postman/livedemos.postman_collection.json) covers every public endpoint. The page that shows it comes with the site.
+![The Wikipedia widget: edits, pages edited and bot share over the last 5 minutes, edits per minute for the last hour, and the most-edited articles](docs/img/widget-2026-10-08.jpg)
+
+*The widget on production data, 8 October 2026, 22:40 UTC.*
+
+- **See it live:** [divinehope.dev/live-demos](https://divinehope.dev/live-demos/), the widget inside a demo host app, with "Query it" (ask the database a question) and the Ops tab (lag, freshness SLO, cost).
+- **Or call the API:** [`/v1/wikipedia/live.json`](https://d1ij81u3v32tos.cloudfront.net/v1/wikipedia/live.json). A [Postman collection](docs/postman/livedemos.postman_collection.json) covers every public endpoint.
+- **Running in AWS since 5 October 2026**, from one small host that replaces itself if it's lost.
 
 ## What's interesting in here
 
-- **Ingest doesn't lose or double an edit, and the limits are written down.** The resume bookmark is stored on the rows it describes, so data and cursor can't drift apart. A failed insert is retried unchanged, with the same deduplication token, so a copy that lands late is dropped. The proof test SIGKILLs ingest while an insert is running on the server, restarts it at once, and checks every event, minute and language against the source's ground truth. The per-minute rollup isn't written in the same transaction as the raw rows, so `make reconcile` checks it against them and can rebuild it. What that covers, and what it doesn't, is in [ADR 0006](docs/adr/0006-bookmark-stored-with-rows.md).
-- **Measured at full size.** The snapshot, "Query it" and resume queries run against 7 days of data at twice the live rate, with the API user's limits ([benchmarks](docs/benchmarks.md)).
-- **Cost doesn't grow with viewers.** The API computes one snapshot a second. A one-second edge cache hands the same bytes to everyone ([ADR 0002](docs/adr/0002-poll-a-cached-snapshot.md)).
-- **It's honest when it's stale.** Windows are anchored to the newest event. If the stream stops, the widget says "Paused" and the numbers freeze. Missing minutes show as gaps, not zeros.
-- **It's small on purpose.** One host, no broker, no semantic layer, no lakehouse table format. Each "no" has a written reason and a trigger for revisiting it ([decisions](docs/adr/README.md)).
+- **Kill ingest mid-insert and nothing is lost or counted twice.** [`make proof`](tests/integration/test_resume_proof.py) SIGKILLs it while an insert is running, restarts it, and checks every event against the source. How, and the limits: [ADR 0006](docs/adr/0006-bookmark-stored-with-rows.md).
+- **Query costs measured at full size.** Every API query runs against 7 days of synthetic data at twice the live rate, under the API user's limits, on a laptop ([benchmarks](docs/benchmarks.md)).
+- **Database work doesn't grow with viewers.** One snapshot a second, cached for a second at the edge. Measured: 1,000 simulated viewers on CloudFront sent the API one request a second ([architecture](docs/architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out)).
+- **It's honest when it's stale.** If the stream stops, the widget says "Paused" and the numbers freeze. Missing minutes show as gaps, not zeros ([tests](tests/e2e/test_widget.py)).
+- **One host, but it heals itself.** No broker, no semantic layer, no lakehouse format, each with a written reason ([decisions](docs/adr/README.md)). A lost host is replaced and restores itself from the Parquet archive with no manual steps: 7 min 50 s in a drill ([ADR 0010](docs/adr/0010-spot-host-in-an-auto-scaling-group.md)).
 
 ## Architecture
 
@@ -31,13 +37,14 @@ Details, failure modes and cost: [docs/architecture.md](docs/architecture.md). R
 
 ## Run it locally
 
-You need Docker and `make`. [uv](https://docs.astral.sh/uv/) too if you want to run the tests.
+You need Docker and `make`. [uv](https://docs.astral.sh/uv/) too for the tests, `make bench` and `make e2e`.
 
 ```bash
 cp .env.example .env     # then set INGEST_CONTACT to your email or repo URL
 make up                  # real Wikimedia stream
-open http://localhost:8080
 ```
+
+Then open http://localhost:8080.
 
 No internet, or don't want to hit Wikimedia? `make up-offline` runs the same stack against a fake stream that speaks the same protocol.
 
@@ -61,14 +68,15 @@ No internet, or don't want to hit Wikimedia? `make up-offline` runs the same sta
 | Route | What it returns |
 |---|---|
 | `/v1/wikipedia/live.json` | Everything the widget shows. Rebuilt every second. |
-| `/v1/wikipedia/activity?lang=en,pt&window=1h` | An ad hoc query with ClickHouse's own timing. `window` is `5m`, `1h` or `24h`. |
+| `/v1/wikipedia/activity?lang=en,pt&window=1h` | An ad hoc query with ClickHouse's own timing. `window` is `5m`, `1h`, `24h`, `3d` or `7d`. |
 | `/embed/wikipedia/?lang=all&theme=dark` | The embeddable widget |
-| `/readyz`, `/metrics` | Readiness and Prometheus metrics |
+| `/healthz`, `/readyz`, `/metrics` | Liveness, readiness and Prometheus metrics (`/metrics` isn't public in production) |
 
 ## Query the archive
 
 Every hour of edits lands in S3 as Parquet, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`.
-Any engine reads it. With DuckDB and your AWS credentials:
+Production's bucket is private; this is how I read it, and the same query works on your own
+copy. With DuckDB and AWS credentials that can read the bucket:
 
 ```sql
 INSTALL httpfs; LOAD httpfs;
@@ -92,18 +100,30 @@ src/livedemos/
   api/            snapshot loop, Query it, health
   devtools/       fake EventStreams server, and the benchmark
   migrations/     versioned ClickHouse schema, applied once each by `migrate`
-  archive/        hourly Parquet archive on S3, and rebuilding the rollup from it
+  archive/        hourly Parquet archive on S3, rebuilding the rollup, restoring a new host
   reconcile.py    rollup-versus-raw check and repair
 clickhouse/       low-memory server config, least-privilege users
 web/              embeddable widget and a local demo host page
+infra/            Terraform: network, host group, CloudFront, buckets, CI and deploy roles
+deploy/host/      what runs on the host: render secrets, start, deploy, harden
+deploy/alloy/     metrics and logs to Grafana Cloud
+deploy/grafana/   the dashboard and alert rules, as code
+deploy/ci/        plan summaries for pull requests
 deploy/nginx/     local stand-in for the CDN
-tests/            unit and integration tests, including the resume proof
-docs/             architecture, requirements, decisions, benchmarks, runbook
+tests/            unit, integration (including the resume proof) and browser tests
+docs/             architecture, requirements, decisions, benchmarks, runbook, postmortems
 ```
 
 ## Stack
 
 Python 3.12, asyncio, httpx, FastAPI. ClickHouse 26.8 LTS. Plain HTML, CSS and JavaScript for the widget. Docker Compose locally. AWS (EC2, S3, CloudFront, SSM) and Terraform for production, Grafana Cloud for monitoring.
+
+## What I'd do next
+
+- **A second dataset**, Bitcoin from mempool.space, on the same platform. It tests whether the platform is general or just shaped around Wikipedia.
+- **Keep the Ops history across a host rebuild.** The freshness samples and reconnects live on the host's disk; archiving them like the edits would make the 30-day SLO survive a replacement.
+- **TLS from CloudFront to the host.** Today that hop is plain HTTP, guarded by a secret header and CloudFront-only firewall rules ([why](docs/architecture.md#security)).
+- **Signed embeds.** The language filter isn't tenant isolation. A real product would sign each customer's context and enforce it in the API.
 
 ## License
 

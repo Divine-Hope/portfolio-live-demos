@@ -15,7 +15,9 @@ Region `eu-west-1`. Every resource is tagged `project=livedemos`.
 |---|---|
 | `budget.tf` | Monthly budget, emails at 80% actual and 100% forecast |
 | `network.tf` | VPC, one public subnet, no NAT gateway. Port 80 open to CloudFront's address ranges only |
-| `host.tf`, `user-data.sh.tftpl` | One t4g.small (arm64, Amazon Linux 2023), IMDSv2 only, encrypted disk, no SSH key, an Elastic IP |
+| `host.tf`, `user-data.sh.tftpl` | An Auto Scaling Group of one host (t4g.small, c6g.medium or c7g.medium: arm64, 2 GB, Amazon Linux 2023), IMDSv2 only, encrypted 16 GB disk, no SSH key. A launch hook keeps a new host out of service until it has restored itself and is live; then it takes the Elastic IP ([ADR 0010](../docs/adr/0010-spot-host-in-an-auto-scaling-group.md)) |
+| `alarms.tf` | Email for every launch and termination in the host group |
+| `ci.tf` | GitHub OIDC roles for Terraform: a read-only plan role for pull requests, and an apply role that only the protected `infra` environment can use |
 | `secrets.tf` | Generated passwords and settings in SSM Parameter Store |
 | `storage.tf` | Private buckets for the fallback snapshot and the archive |
 | `cdn.tf` | CloudFront: 1 s cache on `live.json`, S3 failover, a secret header the api checks |
@@ -27,9 +29,9 @@ Operating it (shell, deploys, rotating secrets, resizing): [`docs/runbook.md`](.
 
 | Item | Monthly |
 |---|---|
-| t4g.small | Free trial until 31 Dec 2026, then about $12 (us-east-1 list price; Ireland is slightly higher) |
-| 25 GB gp3 disk | About $2 |
-| Elastic IP (public IPv4) | About $3.60 |
+| t4g.small, on demand | Free trial until 31 Dec 2026, then $13.43 on demand, or $6.06 to $11.17 on Spot by type |
+| 16 GB gp3 disk | $1.41 |
+| Elastic IP (public IPv4) | $3.65 |
 | CloudFront, SSM parameters, Session Manager | Free tier |
 | S3 | Cents |
 
@@ -51,7 +53,7 @@ Organizations, Identity Center and member accounts cost nothing.
 ## Running it
 
 ```
-aws sso login --sso-session bplabs     # once per session
+aws sso login --sso-session <name>     # once per session
 make tf-bootstrap                      # once: creates the state bucket, writes live/backend.hcl
 cp infra/live/terraform.tfvars.example infra/live/terraform.tfvars   # then edit it
 make tf-init

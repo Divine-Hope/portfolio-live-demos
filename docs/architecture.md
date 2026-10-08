@@ -1,6 +1,6 @@
 # Architecture
 
-Status: v1, running in AWS since 2026-10-05 (EC2, S3, CloudFront; M3). Observability is next (see the build order at the end).
+Status: v1, running in AWS since 2026-10-05, with Grafana Cloud monitoring and alerts. What's next is in the build order at the end.
 
 ## What this is
 
@@ -12,8 +12,17 @@ Goals, in order:
 
 1. **Reliable.** It runs unattended in public. Crashes, restarts and network drops must not lose or double data.
 2. **Simple.** One host, few moving parts, nothing provisioned "for later".
-3. **Cheap.** About $6 a month in 2026 (see [Cost](#cost)).
+3. **Cheap.** About $5 a month in 2026 (see [Cost](#cost)).
 4. **Readable.** Someone reviewing the repo should be able to follow the data path end to end in one sitting.
+
+## Words used here
+
+- **Bookmark:** the stream position ingest resumes from. Wikimedia sends one with every event; we store it on the row ([ADR 0006](adr/0006-bookmark-stored-with-rows.md)).
+- **Seam:** where a resumed stream overlaps what was already stored. Events there are matched by id, so none is lost or counted twice.
+- **Rollup:** edits per minute per language (`wiki_edits_per_minute`), kept 90 days, written by a materialized view as raw rows arrive.
+- **Page sets:** the exact set of pages edited in each minute (`wiki_pages_per_minute`), so "pages edited" over days doesn't need millions of raw rows.
+- **Query it:** the page's panel that runs a real, allowlisted query and shows ClickHouse's own timing.
+- **Drill:** breaking something on purpose in production to prove an alert or a recovery works.
 
 ## The core idea: compute once, let the CDN fan out
 
@@ -67,7 +76,7 @@ flowchart TB
     CF -- "poll every 2 s" --> PAGE
 ```
 
-What runs in AWS today: the same containers under Docker Compose on one EC2 host (an Auto Scaling Group of one, so a lost host replaces itself), behind CloudFront, with the S3 snapshot as the fallback origin (M3) and the hourly Parquet archive (M4). Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. Cloudflare Pages comes later.
+What runs in AWS today: the same containers under Docker Compose on one EC2 host (an Auto Scaling Group of one, so a lost host replaces itself), behind CloudFront, with the S3 snapshot as the fallback origin and the hourly Parquet archive. Locally, nginx stands in for CloudFront and serves the widget, and SeaweedFS stands in for S3. In production the page and widget are on Cloudflare Pages, from the site's own repo.
 
 ## Components
 
@@ -102,9 +111,14 @@ The per-minute rollup is fed by a materialized view in the same INSERT, but not 
 | Route | What it does |
 |---|---|
 | `GET /v1/wikipedia/live.json` | The widget's data. Rebuilt every second from a handful of small queries, served from memory. `Cache-Control: max-age=1`. 503 when there's no snapshot yet or it's more than 10 s old, which also triggers CDN failover. |
-| `GET /v1/wikipedia/activity?lang=&window=` | "Query it". Windows `5m`, `1h` and `24h` count raw rows; `3d` and `7d` read per-minute tables instead: edits from the rollup, and distinct pages by merging each minute's exact set of pages edited (`wiki_pages_per_minute`, migration 0004). That's about 10,000 rows a language a week instead of millions, and complete after a host rebuild, which restores only 2 days of raw rows. An ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. Concurrent misses for one key share one query; at most 2 queries run and 4 are admitted at once; nobody waits more than 5 s; a failure is remembered for 5 s. Over any of those: 503 with `Retry-After`. |
+| `GET /v1/wikipedia/activity?lang=&window=` | "Query it": an ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. See "Query it" below. |
 | `GET /healthz`, `/readyz` | Liveness, and readiness (fresh snapshot and ClickHouse reachable). |
 | `GET /metrics` | Prometheus. |
+
+#### Query it
+
+- **Windows.** `5m`, `1h` and `24h` count raw rows. `3d` and `7d` read per-minute tables instead: edits from the rollup, and distinct pages by merging each minute's exact set of pages edited (`wiki_pages_per_minute`, migration 0004). That's about 10,000 rows a language a week instead of millions, and it's complete after a host rebuild, which restores only 2 days of raw rows.
+- **Load shedding.** Concurrent misses for one key share one query. At most 2 queries run and 4 are admitted at once. Nobody waits more than 5 s, and a failure is remembered for 5 s. Past any of those, the answer is a 503 with `Retry-After`.
 
 Every window is anchored to the newest event, not the wall clock, and bounded above by it; the chart takes completed minutes from the rollup and the current minute from raw rows, so it's bounded too. If ingest stalls, numbers freeze at the last thing we saw and the widget says "Paused". Nothing decays to a fake zero. The snapshot's queries run concurrently, so a late event inserted between them can show in one and not another; the next snapshot agrees again.
 
@@ -179,7 +193,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | Rollup drifts from raw | `make reconcile` finds it per minute and language; `REPAIR=1` stops ingest and rebuilds | reconcile exit code |
 | An older build deployed over a newer schema | `migrate` refuses; ingest and the API don't start on it | deploy fails |
 | Bookmark older than retention (at start or before a reconnect) | Start fresh, record a gap; chart shows it | `ingest_gaps_recorded_total` |
-| api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check (M4) |
+| api down or warming up | CloudFront serves the last S3 snapshot, marked `status: "fallback"`; widget shows "Paused" with the real age. Drilled 2026-10-05: S3 within 1 s of `docker compose stop api`, back on the API within 8 s of start | synthetic check on `live.json` |
 | Whole host lost (a Spot reclaim, a failed health check, hardware) | The Auto Scaling Group launches a replacement; `migrate` restores raw rows and the rollup from Parquet, ingest replays the outage from the stream, and the new host takes the Elastic IP once it's live. No manual steps | launch and termination emails, no-data alert |
 
 ## Security
@@ -187,6 +201,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 - ClickHouse is never exposed publicly. Locally it binds to 127.0.0.1.
 - The public API is read-only, uses a read-only database user whose limits are enforced by ClickHouse settings constraints (a client can tighten them, never raise them), and only accepts allowlisted parameters. Queries are bound server-side; nothing is string-formatted into SQL from user input.
 - In production the origin only accepts traffic from CloudFront's managed prefix list plus a secret header. No SSH: shell access goes through SSM.
+- The hop from CloudFront to the host is plain HTTP, so the secret header isn't encrypted on the way. The host has no domain of its own to get a certificate for, and the data is public and read-only; the firewall and the header stop anyone else's traffic reaching the API. TLS to the origin is on the list of next steps.
 - The language selector is a filter, not tenant isolation. Real multi-tenant embedding would need a signed security context enforced by the backend. That's a later milestone.
 
 ## Local and production, side by side
@@ -230,13 +245,13 @@ About 7 cents a month after a year, growing under a cent a month after that. Rew
 
 ## Build order
 
-The full plan, with acceptance criteria, lives in Linear (project "Live demos: real-time data platform").
+The plan, with acceptance criteria, lives in a private tracker. Milestones, in order:
 
-- **M0** Foundations and docs: done
-- **M1** Local pipeline: done; ingesting the real stream in production since 2026-10-05
-- **M2** Local widget: built; edge cache measured on a Mac; browser tests (keyboard, screen reader, axe) in CI
-- **M3** AWS foundation: done 2026-10-05. Terraform with an approved apply on merge, keyless deploys, CloudFront with S3 failover; acceptance checks recorded in Linear (BPL-57 to BPL-62)
-- **M4** Observability and hardening
-- **M5** Measured week on the real instance, and sizing decision. Query costs at full retained volume are already measured on a laptop ([benchmarks](benchmarks.md))
-- **M6** Launch on the site
-- **M7** Second dataset: Bitcoin
+1. Foundations and docs: done.
+2. Local pipeline: done; ingesting the real stream in production since 2026-10-05.
+3. Local widget: done; edge cache measured; browser tests (keyboard, screen reader, axe) in CI.
+4. AWS foundation: done 2026-10-05. Terraform with an approved apply on merge, keyless deploys, CloudFront with S3 failover.
+5. Observability and hardening: done. Grafana Cloud metrics, logs and alerts, fire drills, the Parquet archive, a host that replaces and restores itself.
+6. A measured week on the real instance: memory, freshness and the real bill. The sizing decision came early ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)); query costs at full volume are measured on a laptop ([benchmarks](benchmarks.md)).
+7. Launch on the site, with the Ops tab.
+8. Second dataset: Bitcoin.
