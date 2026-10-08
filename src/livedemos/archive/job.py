@@ -56,6 +56,7 @@ _COLUMNS = """
 # What the rollup rebuild reads back. Naming the schema skips inferring it from every file.
 READ_SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, is_bot Bool"
 _TIME_SCHEMA = "event_time DateTime64(3, 'UTC')"
+_PAGES_SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, namespace Int32, title String"
 _HOUR_RANGE = (
     "event_time >= fromUnixTimestamp({from_s:Int64}) "
     "AND event_time < fromUnixTimestamp({to_s:Int64})"
@@ -289,8 +290,14 @@ class Archiver:
         filled = {int(r["h"]) for r in result.rows}
         failed = []
         for hour_s in (h for h in candidates if h not in filled):
+            bounds = {"from_s": hour_s, "to_s": hour_s + HOUR_S}
             try:
-                await self._complete_pages({"from_s": hour_s, "to_s": hour_s + HOUR_S})
+                # A file this host adopted can hold rows its raw table never had: then the
+                # file is the fuller source.
+                if await self._raw_count(bounds) < archived[hour_s]:
+                    await self._complete_pages_from_file(hour_s)
+                else:
+                    await self._complete_pages(bounds)
             except Exception:
                 failed.append(hour_s)
                 log.exception("completing an hour's page sets failed", extra={"hour_s": hour_s})
@@ -311,6 +318,20 @@ class Archiver:
             "INSERT INTO wiki_pages_filled (hour, filled_at) "
             "SELECT fromUnixTimestamp({from_s:Int64}), now64(6)",
             params=bounds,
+        )
+
+    async def _complete_pages_from_file(self, hour_s: int) -> None:
+        await self._ch.execute(
+            "INSERT INTO wiki_pages_per_minute (minute, lang, pages) "
+            "SELECT toStartOfMinute(event_time) AS minute, lang, uniqExactState(namespace, title) "
+            f"FROM {s3_function(self._settings, 'Parquet', _PAGES_SCHEMA)} GROUP BY minute, lang",
+            params={"url": hour_url(self._settings.url, hour_s)},
+            settings=S3_SETTINGS,
+        )
+        await self._ch.execute(
+            "INSERT INTO wiki_pages_filled (hour, filled_at) "
+            "SELECT fromUnixTimestamp({hour_s:Int64}), now64(6)",
+            params={"hour_s": hour_s},
         )
 
     async def _record(self, hour_s: int, rows: int) -> None:

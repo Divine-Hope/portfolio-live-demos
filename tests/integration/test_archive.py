@@ -321,6 +321,25 @@ async def test_the_archive_loop_completes_an_hour_whose_page_sets_failed(
     assert {int(r["h"]) for r in filled.rows} >= written
 
 
+async def test_an_adopted_file_with_more_rows_completes_page_sets_from_the_file(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """Another host's file holds rows this one never had: its pages come from the file."""
+    archiver = Archiver(settings, edits)
+    written = {r.hour_s for r in await archiver.run_once(NOW)}
+    before = await pages_by_hour(edits, written)
+    # This host lost part of H1 (raw and sets) and never recorded the files.
+    await edits.execute(
+        "ALTER TABLE wiki_edits DELETE WHERE event_time >= fromUnixTimestamp({h:Int64}) + 600 "
+        "AND event_time < fromUnixTimestamp({h:Int64}) + 3600 SETTINGS mutations_sync = 1",
+        params={"h": H1},
+    )
+    for table in ("wiki_pages_per_minute", "wiki_pages_filled", "archive_hours"):
+        await edits.execute(f"TRUNCATE TABLE {table}")
+    await archiver.run_once(NOW)  # adopts the files, then completes their page sets
+    assert await pages_by_hour(edits, written) == before
+
+
 async def test_an_interrupted_page_fill_is_done_again(
     edits: ClickHouse, settings: ArchiveSettings
 ) -> None:
