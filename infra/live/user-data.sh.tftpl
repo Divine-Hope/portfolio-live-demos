@@ -52,10 +52,13 @@ systemctl enable --now livedemos.service
 
 # Take the Elastic IP, and with it CloudFront's traffic, once this host's data is live:
 # restored from the archive and caught up with the stream (newest event under a minute
-# old). Meanwhile the old host, if it's still running, keeps serving. The stack must
-# answer within 10 minutes or the launch is abandoned; data that's still behind after 15
-# more is taken anyway (the page says how old it is), so an outage at Wikimedia can't
-# make every new host fail. The hook allows 2 hours for all of this (host.tf).
+# old). The stack must answer within 10 minutes or the launch is abandoned. Catching up
+# replays an hour or more of the stream, which Wikimedia serves at about 4 times real time,
+# so it can take 20 minutes. While another host holds the Elastic IP (a planned
+# replacement, or a Spot warning), keep waiting for fresh data, up to 70 minutes: that
+# host is serving. If nobody holds it (the old host is gone), take it after 15 minutes
+# anyway, data behind or not (the page says how old it is), so an outage at Wikimedia
+# can't keep the site on its fallback. The hook allows 2 hours for all of this (host.tf).
 # "Answers": the API built a snapshot in the last 10 seconds, so it and ClickHouse are up.
 # (/metrics, not /readyz: that one wants CloudFront's secret header.)
 metric() { curl -fsS localhost/metrics 2>/dev/null | awk -v m="$1" '$1 == m {print $2}' || true; }
@@ -69,9 +72,14 @@ for _ in $(seq 1 60); do
   sleep 10
 done
 [ "$ready" = 1 ]
-for _ in $(seq 1 90); do
+holder() {
+  aws ec2 describe-addresses --region "${region}" --allocation-ids "${eip_allocation}" \
+    --query 'Addresses[0].InstanceId' --output text 2>/dev/null || echo unknown
+}
+for i in $(seq 1 420); do   # 10 s each: 70 minutes at most
   age=$(metric api_last_event_age_seconds)   # NaN while there's no data at all
   if [ -n "$age" ] && [ "$age" != NaN ] && awk -v a="$age" 'BEGIN{exit !(a < 60)}'; then break; fi
+  if [ "$i" -ge 90 ] && [ "$(holder)" = None ]; then break; fi   # 15 minutes, nobody serving
   sleep 10
 done
 for attempt in $(seq 1 12); do   # IAM can take a minute to reach a brand-new host

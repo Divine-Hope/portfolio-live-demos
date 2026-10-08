@@ -90,6 +90,16 @@ abandons the hook and the group tries again. Every launch and termination is ema
 `make host-id` is whichever host holds the Elastic IP. A new host's progress is in
 `/var/log/cloud-init-output.log`.
 
+**Moved, 2026-10-07 to 08 (UTC).** The group's first host launched at 23:26, restored 409,510
+raw rows and 13 rollup hours from the archive in 5 seconds, and replayed the stream from
+22:30. Replay runs at about 4 times real time, so it hadn't caught up by its 15-minute
+cap, and it took the Elastic IP stale at 23:43 while the old host was still live; it was
+live itself at 23:47. Since then a new host keeps waiting (up to 70 minutes) while another
+host holds the Elastic IP. The chart stayed continuous: 23:00 to 23:25 held 2,888 edits on
+the new host against 2,919 ingested by the old one (Grafana), within the edge effects of
+event time against ingest time. The old host, which had no public IP of its own, lost
+its internet access with the Elastic IP, so it stopped serving and archiving at once.
+
 ### Moving to the Auto Scaling Group (once)
 
 1. Apply with `infra/live/legacy-host.tf` in place: it adds the group and keeps the old
