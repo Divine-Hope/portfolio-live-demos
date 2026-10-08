@@ -73,7 +73,7 @@ class ActivityPayload(TypedDict):
     window: str
     generated_at: str
     edits: int
-    pages_edited: int | None  # None for 3d and 7d: only counted from raw rows (24h at most)
+    pages_edited: int | None  # None only when a 3d/7d window starts past the 14 days kept
     bot_share: float | None
     as_of: str | None
     last_event_age_s: float | None

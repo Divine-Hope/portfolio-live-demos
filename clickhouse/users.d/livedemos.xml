@@ -99,6 +99,9 @@
             <grants>
                 <query>GRANT SELECT ON demos.wiki_edits</query>
                 <query>GRANT SELECT, INSERT ON demos.archive_hours</query>
+                <!-- Completes each archived hour's page sets (archive/job.py). -->
+                <query>GRANT INSERT ON demos.wiki_pages_per_minute</query>
+                <query>GRANT SELECT, INSERT ON demos.wiki_pages_filled</query>
                 <!-- s3() reaches only the archive bucket (production) or the local stand-in;
                      any other URL is refused. A table function needs a temporary table. -->
                 <query>GRANT READ, WRITE ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>

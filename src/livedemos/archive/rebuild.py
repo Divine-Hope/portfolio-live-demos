@@ -26,8 +26,10 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from datetime import UTC, date, datetime, timedelta
 
+from livedemos.archive import pages
 from livedemos.archive.job import (
     HOUR_S,
     READ_SCHEMA,
@@ -187,6 +189,10 @@ async def _rebuild(
         f"SELECT count() AS n FROM wiki_edits_per_minute WHERE {_RANGE}", params=bounds
     )
     rows = int(result.rows[0]["n"])
+    # The page sets for the same hours, where they're still kept (sets only add).
+    recent = [h for h in sorted(archived) if h >= time.time() - pages.RETENTION.total_seconds()]
+    if recent:
+        await pages.add_from_archive(ch, settings, recent)
     if rows != int(expected.rows[0]["n"]):
         raise ArchiveIncomplete(
             f"the rollup has {rows} rows in the range after the swap, "

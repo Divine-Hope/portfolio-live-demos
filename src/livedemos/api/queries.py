@@ -35,17 +35,31 @@ WHERE event_time > fromUnixTimestamp64Milli({to_ms:Int64}) - toIntervalSecond({w
 GROUP BY lang
 """
 
-# 3 and 7 days: from the per-minute rollup. Raw rows only last 7 days (and a rebuilt host
-# restores 2), and a week of them is millions of rows; the rollup is about 10,000 rows per
-# language a week. It can't count distinct pages, so those windows don't.
+# 3 and 7 days: from per-minute tables instead of raw rows. Raw rows only last 7 days (a
+# rebuilt host restores 2), and a week of them is millions of rows. Edits come from the
+# rollup; distinct pages from merging each minute's exact set of pages (migration 0004).
+# Same minutes for both, so the numbers describe one window. About 10,000 rows a language
+# a week, from each.
 WINDOW_TOTALS_FROM_ROLLUP = """
-SELECT lang, sum(edits) AS edits, sum(bot_edits) AS bot_edits
-FROM wiki_edits_per_minute
-WHERE minute > toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64}))
-              - toIntervalSecond({window_s:UInt32})
-  AND minute <= fromUnixTimestamp64Milli({to_ms:Int64})
-  AND lang IN {langs:Array(String)}
-GROUP BY lang
+WITH
+    toStartOfMinute(fromUnixTimestamp64Milli({to_ms:Int64})) - toIntervalSecond({window_s:UInt32})
+        AS window_start,
+    fromUnixTimestamp64Milli({to_ms:Int64}) AS window_end
+SELECT e.lang AS lang, e.edits AS edits, e.bot_edits AS bot_edits, p.pages AS pages
+FROM
+(
+    SELECT lang, sum(edits) AS edits, sum(bot_edits) AS bot_edits
+    FROM wiki_edits_per_minute
+    WHERE minute > window_start AND minute <= window_end AND lang IN {langs:Array(String)}
+    GROUP BY lang
+) AS e
+LEFT JOIN
+(
+    SELECT lang, uniqExactMerge(pages) AS pages
+    FROM wiki_pages_per_minute
+    WHERE minute > window_start AND minute <= window_end AND lang IN {langs:Array(String)}
+    GROUP BY lang
+) AS p USING (lang)
 """
 
 TOP_ARTICLES = """

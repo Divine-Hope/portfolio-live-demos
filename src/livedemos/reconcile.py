@@ -27,6 +27,7 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from livedemos.archive import pages
 from livedemos.clickhouse import ClickHouse
 from livedemos.config import clickhouse_settings
 from livedemos.logs import setup_logging
@@ -129,6 +130,9 @@ async def repair(
             params={"minutes": minutes},
             settings=REBUILD_INSERT_SETTINGS,
         )
+        # The page sets for those minutes too, in case the view missed a block. Sets only
+        # add, so this can't overcount.
+        await pages.add_from_raw(ch, minutes)
         await require_ingest_still_stopped(ch, mark)
     return len(minutes)
 

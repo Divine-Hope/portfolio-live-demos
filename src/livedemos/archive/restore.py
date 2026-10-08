@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
+from livedemos.archive import pages
 from livedemos.archive.job import HOUR_S, S3_SETTINGS, Archiver, days_glob, s3_function
 from livedemos.archive.rebuild import rebuild
 from livedemos.clickhouse import ClickHouse
@@ -59,6 +60,7 @@ class Restored:
     rollup_hours: list[int] = field(default_factory=list)  # rebuilt into the rollup
     raw_hours: list[int] = field(default_factory=list)  # back in the raw table
     raw_rows: int = 0
+    pages_hours: list[int] = field(default_factory=list)  # page sets added from the archive
 
 
 def _day_start(day: date) -> int:
@@ -80,7 +82,14 @@ def _months(first: date, end: date) -> list[tuple[date, date]]:
 
 
 async def restore(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) -> Restored:
-    """Restore archived hours the rollup doesn't have, if raw rows are gone."""
+    """Restore archived hours the rollup doesn't have, if raw rows are gone. Then top up
+    the per-minute page sets from the archive, whatever happened before."""
+    done = await _restore(ch, settings, now=now)
+    pages_hours = await pages.fill_missing(ch, settings, now=now)
+    return Restored(done.rollup_hours, done.raw_hours, done.raw_rows, pages_hours)
+
+
+async def _restore(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) -> Restored:
     if int((await ch.query(_RAW_ROWS)).rows[0]["n"]):
         if (await ch.query(_INGESTED)).rows:
             return Restored()  # ingest resumes from its bookmark; nothing was lost

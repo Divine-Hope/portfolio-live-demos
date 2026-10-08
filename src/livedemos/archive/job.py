@@ -56,6 +56,7 @@ _COLUMNS = """
 # What the rollup rebuild reads back. Naming the schema skips inferring it from every file.
 READ_SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, is_bot Bool"
 _TIME_SCHEMA = "event_time DateTime64(3, 'UTC')"
+_PAGES_SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, namespace Int32, title String"
 _HOUR_RANGE = (
     "event_time >= fromUnixTimestamp({from_s:Int64}) "
     "AND event_time < fromUnixTimestamp({to_s:Int64})"
@@ -211,6 +212,7 @@ class Archiver:
         in_file = await self._file_count(url)
         # Always the truth, so a later run compares against what the file really holds.
         await self._record(hour_s, in_file)
+        await self._complete_pages(bounds)
         if in_file < floor and not manual:
             # Rows vanished between the count and the write (deleted by hand: the hours
             # considered are inside retention). The previous version is in the bucket.
@@ -242,7 +244,10 @@ class Archiver:
                     log.error("archived hour doesn't match raw rows", extra={"hour": hour})
             results.append(outcome)
             metrics.HOURS.labels(result=outcome.result).inc()
-        behind = sorted([r.hour_s for r in results if r.result != "written"] + plan.unreadable)
+        unfilled = await self._complete_unfilled(archived, plan.due)
+        behind = sorted(
+            [r.hour_s for r in results if r.result != "written"] + plan.unreadable + unfilled
+        )
         metrics.BEHIND.set(len(behind))
         metrics.OLDEST_BEHIND.set(behind[0] if behind else 0)
         if archived:
@@ -269,6 +274,65 @@ class Archiver:
             adopted[hour_s] = rows
             log.info("found an unrecorded file", extra={"hour": hour, "rows": rows})
         return adopted, unreadable
+
+    async def _complete_unfilled(self, archived: dict[int, int], done: list[int]) -> list[int]:
+        """Complete the page sets of archived hours not recorded as complete: one whose
+        completion failed after its file was written, or a file this host adopted. Returns
+        the hours it couldn't complete; they're tried again next run."""
+        candidates = sorted(h for h in archived if h not in done)
+        if not candidates:
+            return []
+        result = await self._ch.query(
+            "SELECT DISTINCT toUnixTimestamp(hour) AS h FROM wiki_pages_filled "
+            "WHERE toUnixTimestamp(hour) IN {hours:Array(UInt32)}",
+            params={"hours": candidates},
+        )
+        filled = {int(r["h"]) for r in result.rows}
+        failed = []
+        for hour_s in (h for h in candidates if h not in filled):
+            bounds = {"from_s": hour_s, "to_s": hour_s + HOUR_S}
+            try:
+                # A file this host adopted can hold rows its raw table never had: then the
+                # file is the fuller source.
+                if await self._raw_count(bounds) < archived[hour_s]:
+                    await self._complete_pages_from_file(hour_s)
+                else:
+                    await self._complete_pages(bounds)
+            except Exception:
+                failed.append(hour_s)
+                log.exception("completing an hour's page sets failed", extra={"hour_s": hour_s})
+        return failed
+
+    async def _complete_pages(self, bounds: dict[str, int]) -> None:
+        """Complete the hour's page sets (migration 0004) from the rows just archived, and
+        record the hour as filled. Their view fills them on every insert, but a view's
+        block can be lost on its own (a crash between tables); this checks every hour
+        once it's final. Sets only add, so it can't overcount."""
+        await self._ch.execute(
+            "INSERT INTO wiki_pages_per_minute (minute, lang, pages) "
+            "SELECT toStartOfMinute(event_time) AS minute, lang, uniqExactState(namespace, title) "
+            f"FROM wiki_edits WHERE {_HOUR_RANGE} GROUP BY minute, lang",
+            params=bounds,
+        )
+        await self._ch.execute(
+            "INSERT INTO wiki_pages_filled (hour, filled_at) "
+            "SELECT fromUnixTimestamp({from_s:Int64}), now64(6)",
+            params=bounds,
+        )
+
+    async def _complete_pages_from_file(self, hour_s: int) -> None:
+        await self._ch.execute(
+            "INSERT INTO wiki_pages_per_minute (minute, lang, pages) "
+            "SELECT toStartOfMinute(event_time) AS minute, lang, uniqExactState(namespace, title) "
+            f"FROM {s3_function(self._settings, 'Parquet', _PAGES_SCHEMA)} GROUP BY minute, lang",
+            params={"url": hour_url(self._settings.url, hour_s)},
+            settings=S3_SETTINGS,
+        )
+        await self._ch.execute(
+            "INSERT INTO wiki_pages_filled (hour, filled_at) "
+            "SELECT fromUnixTimestamp({hour_s:Int64}), now64(6)",
+            params={"hour_s": hour_s},
+        )
 
     async def _record(self, hour_s: int, rows: int) -> None:
         await self._ch.execute(

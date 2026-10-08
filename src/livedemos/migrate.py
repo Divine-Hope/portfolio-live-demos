@@ -222,13 +222,14 @@ async def _restore(ch: ClickHouse) -> None:
         log.warning("restoring from the archive is off (ARCHIVE_RESTORE=false)")
         return
     done = await restore(ch, settings, now=datetime.now(UTC))
-    if done.rollup_hours or done.raw_hours:
+    if done.rollup_hours or done.raw_hours or done.pages_hours:
         log.info(
             "restored from the archive",
             extra={
                 "rollup_hours": len(done.rollup_hours),
                 "raw_hours": len(done.raw_hours),
                 "raw_rows": done.raw_rows,
+                "pages_hours": len(done.pages_hours),
             },
         )
 

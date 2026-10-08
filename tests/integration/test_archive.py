@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 
+from livedemos.archive import pages
 from livedemos.archive.job import (
     HOUR_S,
     Archiver,
@@ -231,9 +232,13 @@ async def test_a_host_rebuilt_from_scratch_comes_back_from_the_archive(
     old_hour = await raw_ids(edits, older)
     assert await restore(edits, settings, now=NOW) == Restored()  # raw rows: nothing lost
 
-    for table in ("wiki_edits", "wiki_edits_per_minute", "archive_hours"):
+    pages_before = await pages_by_hour(edits, written)
+    for table in ("wiki_edits", "wiki_edits_per_minute", "wiki_pages_per_minute", "archive_hours"):
         await edits.execute(f"TRUNCATE TABLE {table}")
     done = await restore(edits, settings, now=NOW)
+    assert await pages_by_hour(edits, written) == pages_before  # raw restore + archive top-up
+    # The days not restored to raw got their page sets from Parquet, with the rollup.
+    assert done.pages_hours == []  # so the top-up after it found nothing left to fill
 
     assert set(done.rollup_hours) == older  # older days: straight into the rollup
     assert set(done.raw_hours) == written - older  # the last two days: back in raw
@@ -278,6 +283,15 @@ async def all_minutes(ch: ClickHouse) -> list[tuple[str, str, int, int]]:
     return [(r["m"], r["lang"], int(r["e"]), int(r["b"])) for r in result.rows]
 
 
+async def pages_by_hour(ch: ClickHouse, hours: set[int]) -> dict[tuple[int, str], int]:
+    result = await ch.query(
+        "SELECT toUnixTimestamp(toStartOfHour(minute)) AS h, lang, uniqExactMerge(pages) AS n "
+        "FROM wiki_pages_per_minute WHERE h IN {hours:Array(UInt32)} GROUP BY h, lang",
+        params={"hours": sorted(hours)},
+    )
+    return {(int(r["h"]), str(r["lang"])): int(r["n"]) for r in result.rows}
+
+
 async def raw_ids(ch: ClickHouse, hours: set[int]) -> set[str]:
     result = await ch.query(
         "SELECT toString(event_id) AS id FROM wiki_edits "
@@ -285,6 +299,65 @@ async def raw_ids(ch: ClickHouse, hours: set[int]) -> set[str]:
         params={"hours": sorted(hours)},
     )
     return {str(r["id"]) for r in result.rows}
+
+
+async def test_the_archive_loop_completes_an_hour_whose_page_sets_failed(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """The file was written but completing its page sets didn't finish: the next run
+    finds the hour unrecorded and completes it."""
+    archiver = Archiver(settings, edits)
+    written = {r.hour_s for r in await archiver.run_once(NOW)}
+    before = await pages_by_hour(edits, written)
+    await edits.execute("TRUNCATE TABLE wiki_pages_filled")
+    await edits.execute(
+        "ALTER TABLE wiki_pages_per_minute DELETE WHERE toStartOfHour(minute) = "
+        "fromUnixTimestamp({h:Int64}) SETTINGS mutations_sync = 1",
+        params={"h": H1},
+    )
+    assert await archiver.run_once(NOW) == []  # nothing to write
+    assert await pages_by_hour(edits, written) == before
+    filled = await edits.query("SELECT DISTINCT toUnixTimestamp(hour) AS h FROM wiki_pages_filled")
+    assert {int(r["h"]) for r in filled.rows} >= written
+
+
+async def test_an_adopted_file_with_more_rows_completes_page_sets_from_the_file(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """Another host's file holds rows this one never had: its pages come from the file."""
+    archiver = Archiver(settings, edits)
+    written = {r.hour_s for r in await archiver.run_once(NOW)}
+    before = await pages_by_hour(edits, written)
+    # This host lost part of H1 (raw and sets) and never recorded the files.
+    await edits.execute(
+        "ALTER TABLE wiki_edits DELETE WHERE event_time >= fromUnixTimestamp({h:Int64}) + 600 "
+        "AND event_time < fromUnixTimestamp({h:Int64}) + 3600 SETTINGS mutations_sync = 1",
+        params={"h": H1},
+    )
+    for table in ("wiki_pages_per_minute", "wiki_pages_filled", "archive_hours"):
+        await edits.execute(f"TRUNCATE TABLE {table}")
+    await archiver.run_once(NOW)  # adopts the files, then completes their page sets
+    assert await pages_by_hour(edits, written) == before
+
+
+async def test_an_interrupted_page_fill_is_done_again(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """A fill that stopped after one minute's sets doesn't make the hour look done."""
+    written = {r.hour_s for r in await Archiver(settings, edits).run_once(NOW)}
+    before = await pages_by_hour(edits, written)
+    for table in ("wiki_edits", "wiki_pages_per_minute", "wiki_pages_filled"):
+        await edits.execute(f"TRUNCATE TABLE {table}")
+    # What a fill interrupted after its first minute leaves: one set, no record.
+    await edits.execute(
+        "INSERT INTO wiki_pages_per_minute (minute, lang, pages) "
+        "SELECT toStartOfMinute(fromUnixTimestamp({h:Int64})), 'en', "
+        "uniqExactState(toInt32(0), 'Article 0')",
+        params={"h": H0},
+    )
+    assert set(await pages.fill_missing(edits, settings, now=NOW)) == written
+    assert await pages_by_hour(edits, written) == before
+    assert await pages.fill_missing(edits, settings, now=NOW) == []  # recorded as done
 
 
 async def test_rebuild_refuses_hours_without_a_file_even_after_the_rollup_is_gone(
