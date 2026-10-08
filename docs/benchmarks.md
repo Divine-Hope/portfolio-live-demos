@@ -45,6 +45,24 @@ leaves the stack's data alone.
 - The p95 column is noisy: the queries run while ClickHouse is still merging the freshly
   loaded data. An earlier run put the 24 h p95 at 776 ms. Both are inside the 3 s limit.
 
+### 3 and 7 days, 2026-10-08
+
+The same benchmark (7 days at 11 edits/s, twice the live rate: 6,652,800 raw rows), on
+ClickHouse 26.8, after migration 0004 added the per-minute page sets. 20 runs each, with
+the `api` user's limits.
+
+| Query | p50 ms | p95 ms | Rows read | Peak memory |
+|---|---:|---:|---:|---:|
+| query it: 24 h, all langs (raw rows) | 148.4 | 214.4 | 975,963 | 52.7 MB |
+| query it: 3 days, all langs (page sets) | 127.4 | 162.8 | 44,003 | 76.0 MB |
+| query it: 7 days, all langs (page sets) | 284.0 | 422.4 | 60,515 | 141.5 MB |
+| query it: 7 days, raw rows (what the page sets replace) | 1,109.3 | 1,332.7 | 6,652,800 | 132.0 MB |
+
+The page sets give the same count as raw rows (integration tests) from 1% of the rows, 4
+times faster. Their memory grows with distinct pages: at twice the live rate a week peaks
+at 142 MB of the `api` user's 200 MB. The sets take 107 MB on disk for that week, so
+about 100 MB at the live rate for their 14 days.
+
 ### What it says
 
 - The per-second snapshot costs the same at 7 days as at 7 minutes: every query reads only
@@ -54,8 +72,8 @@ leaves the stack's data alone.
 - "Query it" over 24 hours is the one expensive query: a million rows, because counting
   distinct pages needs raw rows. It stays inside the API user's limits. Caching, request
   coalescing and the admission cap mean it runs at most once per language set every 10 s,
-  and never more than 2 at once. If it becomes a problem, the fix is a per-hour
-  `uniqState` rollup, not a bigger host.
+  and never more than 2 at once. 3 and 7 days read per-minute page sets instead
+  (migration 0004), measured above.
 
 ## The running stack, under live ingest
 

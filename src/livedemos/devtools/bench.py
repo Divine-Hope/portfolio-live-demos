@@ -156,6 +156,21 @@ def cases(newest_ms: int, last_seq: int) -> list[Case]:
         ),
         Case("query it: 1 h, all langs", queries.WINDOW_TOTALS, {**window, "window_s": 3_600}),
         Case("query it: 24 h, all langs", queries.WINDOW_TOTALS, {**window, "window_s": 86_400}),
+        Case(
+            "query it: 3 days, all langs",
+            queries.WINDOW_TOTALS_FROM_ROLLUP,
+            {**window, "window_s": 3 * 86_400},
+        ),
+        Case(
+            "query it: 7 days, all langs",
+            queries.WINDOW_TOTALS_FROM_ROLLUP,
+            {**window, "window_s": 7 * 86_400},
+        ),
+        Case(
+            "query it: 7 days, raw rows (what it replaces)",
+            queries.WINDOW_TOTALS,
+            {**window, "window_s": 7 * 86_400},
+        ),
         Case("resume: max ingest_seq", "SELECT max(ingest_seq) AS seq FROM wiki_edits", {}),
         Case(
             "resume: last 20k by ingest order",

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 
+from livedemos.archive import pages
 from livedemos.archive.job import (
     HOUR_S,
     Archiver,
@@ -236,7 +237,8 @@ async def test_a_host_rebuilt_from_scratch_comes_back_from_the_archive(
         await edits.execute(f"TRUNCATE TABLE {table}")
     done = await restore(edits, settings, now=NOW)
     assert await pages_by_hour(edits, written) == pages_before  # raw restore + archive top-up
-    assert set(done.pages_hours) == older  # the days not restored to raw came from Parquet
+    # The days not restored to raw got their page sets from Parquet, with the rollup.
+    assert done.pages_hours == []  # so the top-up after it found nothing left to fill
 
     assert set(done.rollup_hours) == older  # older days: straight into the rollup
     assert set(done.raw_hours) == written - older  # the last two days: back in raw
@@ -297,6 +299,26 @@ async def raw_ids(ch: ClickHouse, hours: set[int]) -> set[str]:
         params={"hours": sorted(hours)},
     )
     return {str(r["id"]) for r in result.rows}
+
+
+async def test_an_interrupted_page_fill_is_done_again(
+    edits: ClickHouse, settings: ArchiveSettings
+) -> None:
+    """A fill that stopped after one minute's sets doesn't make the hour look done."""
+    written = {r.hour_s for r in await Archiver(settings, edits).run_once(NOW)}
+    before = await pages_by_hour(edits, written)
+    for table in ("wiki_edits", "wiki_pages_per_minute", "wiki_pages_filled"):
+        await edits.execute(f"TRUNCATE TABLE {table}")
+    # What a fill interrupted after its first minute leaves: one set, no record.
+    await edits.execute(
+        "INSERT INTO wiki_pages_per_minute (minute, lang, pages) "
+        "SELECT toStartOfMinute(fromUnixTimestamp({h:Int64})), 'en', "
+        "uniqExactState(toInt32(0), 'Article 0')",
+        params={"h": H0},
+    )
+    assert set(await pages.fill_missing(edits, settings, now=NOW)) == written
+    assert await pages_by_hour(edits, written) == before
+    assert await pages.fill_missing(edits, settings, now=NOW) == []  # recorded as done
 
 
 async def test_rebuild_refuses_hours_without_a_file_even_after_the_rollup_is_gone(

@@ -145,3 +145,13 @@ async def test_a_malformed_response_counts_as_a_failure() -> None:
         await service.get(req)
     with pytest.raises(Unavailable, match="recently"):
         await service.get(req)
+
+
+async def test_a_long_window_older_than_the_kept_page_sets_has_no_page_count() -> None:
+    """The stub's newest event is in 2025: far past the 14 days of page sets."""
+    service = ActivityService(StubClickHouse(), ttl_s=10)
+    week = await service.get(parse_request("en", "7d", allowed=LANGS))
+    assert week["pages_edited"] is None
+    assert week["edits"] == 10  # edits come from the 90-day rollup, still there
+    day = await service.get(parse_request("en", "24h", allowed=LANGS))
+    assert day["pages_edited"] == 8

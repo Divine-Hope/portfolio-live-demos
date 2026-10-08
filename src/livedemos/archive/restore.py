@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
+from livedemos.archive import pages
 from livedemos.archive.job import HOUR_S, S3_SETTINGS, Archiver, days_glob, s3_function
 from livedemos.archive.rebuild import rebuild
 from livedemos.clickhouse import ClickHouse
@@ -38,7 +39,6 @@ from livedemos.maintenance import (
 log = logging.getLogger(__name__)
 
 ROLLUP_RETENTION = timedelta(days=90)  # the rollup's TTL (migration 0001)
-PAGES_RETENTION = timedelta(days=8)  # the page sets' TTL (migration 0004)
 RAW_RETENTION = timedelta(days=7)  # the raw table's TTL
 RAW_DAYS = 2  # the newest archived day and the one before go back into the raw table
 
@@ -46,11 +46,6 @@ RAW_DAYS = 2  # the newest archived day and the one before go back into the raw 
 _RAW_ROWS = "SELECT count() AS n FROM wiki_edits"
 _ROLLUP_END = (
     "SELECT toUnixTimestamp(max(minute)) AS newest_s, count() AS n FROM wiki_edits_per_minute"
-)
-# Hours with at least one page set, in the sets' retention: about 200 rows to return.
-_PAGES_HOURS = (
-    "SELECT DISTINCT toUnixTimestamp(toStartOfHour(minute)) AS h FROM wiki_pages_per_minute "
-    "WHERE minute >= fromUnixTimestamp({from_s:Int64})"
 )
 # Any row ingest wrote itself (restored rows have no bookmark). Stops at the first.
 _INGESTED = "SELECT 1 FROM wiki_edits WHERE sse_id != '' LIMIT 1"
@@ -90,39 +85,8 @@ async def restore(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) -
     """Restore archived hours the rollup doesn't have, if raw rows are gone. Then top up
     the per-minute page sets from the archive, whatever happened before."""
     done = await _restore(ch, settings, now=now)
-    pages_hours = await fill_pages(ch, settings, now=now)
+    pages_hours = await pages.fill_missing(ch, settings, now=now)
     return Restored(done.rollup_hours, done.raw_hours, done.raw_rows, pages_hours)
-
-
-async def fill_pages(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) -> list[int]:
-    """Add archived hours that wiki_pages_per_minute doesn't cover. Returns those hours.
-
-    The page sets only add (migration 0004), so this can't count a page twice, whatever's
-    there already. A rebuilt host restores 2 days of raw rows; the sets for the other 5
-    come from here. So does a host that predates the table.
-    """
-    first_day = (now - PAGES_RETENTION).date()
-    archived = await _archived(ch, settings, first_day, now)
-    if not archived:
-        return []
-    have = await ch.query(_PAGES_HOURS, params={"from_s": _day_start(first_day)})
-    covered = {int(r["h"]) for r in have.rows}
-    missing = sorted(archived - covered)
-    if not missing:
-        return []
-    await ch.execute(
-        f"""
-        INSERT INTO wiki_pages_per_minute (minute, lang, pages)
-        SELECT toStartOfMinute(event_time) AS minute, lang, uniqExactState(namespace, title)
-        FROM {s3_function(settings, "Parquet", _RESTORE_SCHEMA)}
-        WHERE toUnixTimestamp(toStartOfHour(event_time)) IN {{hours:Array(UInt32)}}
-        GROUP BY minute, lang
-        """,
-        params={"url": days_glob(settings.url, missing), "hours": missing},
-        settings={**REBUILD_INSERT_SETTINGS, **S3_SETTINGS},
-    )
-    log.info("page sets topped up from the archive", extra={"hours": len(missing)})
-    return missing
 
 
 async def _restore(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) -> Restored:

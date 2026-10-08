@@ -25,8 +25,12 @@ from livedemos.api.contract import ActivityPayload, iso
 from livedemos.clickhouse import ClickHouseError, Queryable
 
 WINDOWS = {"5m": 300, "1h": 3_600, "24h": 86_400, "3d": 259_200, "7d": 604_800}
-# Longer windows read per-minute tables instead of raw rows (queries.py).
+# Longer windows read per-minute tables instead of raw rows (queries.py), so they cover
+# whole minutes: from the minute the window starts in, to the newest event.
 ROLLUP_WINDOWS = frozenset({"3d", "7d"})
+# The page sets are kept 14 days (migration 0004). A window starting before what's surely
+# still there (ingest stalled for a week) can't count pages, rather than undercount them.
+PAGES_KEPT_S = 13 * 86_400
 
 
 class BadRequest(ValueError):
@@ -177,7 +181,9 @@ class ActivityService:
             "window": req.window,
             "generated_at": generated_at,
             "edits": edits,
-            "pages_edited": sum(int(r["pages"]) for r in result.rows),
+            "pages_edited": None
+            if from_rollup and newest - WINDOWS[req.window] < now - PAGES_KEPT_S
+            else sum(int(r["pages"]) for r in result.rows),
             "bot_share": round(bots / edits, 4) if edits else None,
             "as_of": iso(newest),
             "last_event_age_s": round(max(0.0, now - newest), 3),
