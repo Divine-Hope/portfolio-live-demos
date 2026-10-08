@@ -1,5 +1,8 @@
 """Entry point: `python -m livedemos.archive`.
 
+The service also fetches the month's AWS cost once a day (ops/cost.py), when
+ARCHIVE_COST_TAG is set: it's the one process that runs only on the live host.
+
 python -m livedemos.archive                        # the service: archive due hours, repeat
 python -m livedemos.archive --once                 # one pass, then exit
 python -m livedemos.archive --hour 2026-10-06T09   # rewrite that hour's file, even if it exists
@@ -24,6 +27,7 @@ from livedemos.archive.job import HOUR_S, Archiver, NothingToArchive
 from livedemos.clickhouse import ClickHouse, ClickHouseError
 from livedemos.config import archive_settings, clickhouse_settings
 from livedemos.logs import setup_logging
+from livedemos.ops.cost import CostFetcher
 
 log = logging.getLogger("livedemos.archive")
 
@@ -51,7 +55,9 @@ async def public_ip() -> str | None:
         return None
 
 
-async def _serve(archiver: Archiver, interval_s: float, only_on_ip: str) -> None:
+async def _serve(
+    archiver: Archiver, cost: CostFetcher | None, interval_s: float, only_on_ip: str
+) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -67,6 +73,8 @@ async def _serve(archiver: Archiver, interval_s: float, only_on_ip: str) -> None
                 await archiver.run_once(datetime.now(UTC))
         except ClickHouseError:  # couldn't even plan; try again next time
             log.exception("archive run failed")
+        if live and cost is not None:
+            await cost.refresh_if_due(datetime.now(UTC))
         metrics.LAST_RUN.set(time.time())
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), timeout=interval_s)
@@ -90,7 +98,17 @@ async def main(args: argparse.Namespace) -> int:
             results = await archiver.run_once(datetime.now(UTC))
             return 0 if all(r.result == "written" for r in results) else 1
         start_http_server(settings.metrics_port)
-        await _serve(archiver, settings.interval_s, settings.only_on_ip)
+        cost = None
+        if settings.cost_tag:
+            import boto3  # only in production; credentials come from the instance role
+
+            cost = CostFetcher(
+                ch,
+                tag=settings.cost_tag,
+                # Cost Explorer has one endpoint, in us-east-1.
+                client_factory=lambda: boto3.client("ce", region_name="us-east-1"),
+            )
+        await _serve(archiver, cost, settings.interval_s, settings.only_on_ip)
         return 0
     finally:
         await ch.aclose()

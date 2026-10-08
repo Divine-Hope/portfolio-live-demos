@@ -108,6 +108,13 @@ class ApiSettings(BaseSettings):
     activity_max_pending: Annotated[int, Field(ge=1)] = 4
     activity_wait_s: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 5.0
     activity_error_cooldown_s: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 5.0
+    # The Ops tab (api/ops.py): rebuilt at most this often, shared by every viewer.
+    ops_cache_ttl_s: Annotated[int, Field(ge=1)] = 60
+    # The freshness SLO (requirements N2): this share of minutes over this many days with
+    # the newest event younger than the threshold.
+    slo_target: Annotated[float, Field(gt=0, lt=1)] = 0.99
+    slo_threshold_s: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60.0
+    slo_days: Annotated[int, Field(ge=1, le=89)] = 30
     # Set in production: CloudFront adds this value as X-Origin-Verify, and requests
     # without it are refused. Empty (local) turns the check off.
     origin_secret: str = ""
@@ -162,6 +169,9 @@ class ArchiveSettings(BaseSettings):
     # when the Auto Scaling Group overlaps two hosts only the live one writes (ADR 0010).
     # Empty (local): always archive.
     only_on_ip: str = ""
+    # Production: fetch the month's AWS cost for resources with this tag, once a day
+    # (ops/cost.py). Empty (local): don't; there's no AWS account to ask.
+    cost_tag: str = ""
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:

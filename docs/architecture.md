@@ -102,7 +102,7 @@ Consumes `recentchange` from Wikimedia EventStreams over Server-Sent Events.
 
 The serving store ([ADR 0003](adr/0003-clickhouse-serving-store.md)). Tuned for a 2 GB host: 900 MiB server memory cap, small caches, fewer background threads. Of the system log tables only `query_log` and `part_log` stay, for 3 days, and the application users log only slow queries (over 100 ms for `api`, 500 ms for `ingest`).
 
-Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Four users with least privilege: `migrator` (schema, and rollup repairs and rebuilds), `ingest` (select and insert), `api` (read-only, 3 s query limit, 200 MB memory limit) and `archiver` (reads raw rows, writes the archive). Passwords come from the environment.
+Versioned migrations, applied once each by a one-shot `migrate` job ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Four users with least privilege: `migrator` (schema, and rollup repairs and rebuilds), `ingest` (select and insert), `api` (read-only, 3 s query limit, 200 MB memory limit) and `archiver` (reads raw rows, writes the archive and the daily cost). Passwords come from the environment.
 
 The per-minute rollup is fed by a materialized view in the same INSERT, but not the same transaction. `make reconcile` checks it against raw rows per minute and language and rebuilds what differs.
 
@@ -112,6 +112,7 @@ The per-minute rollup is fed by a materialized view in the same INSERT, but not 
 |---|---|
 | `GET /v1/wikipedia/live.json` | The widget's data. Rebuilt every second from a handful of small queries, served from memory. `Cache-Control: max-age=1`. 503 when there's no snapshot yet or it's more than 10 s old, which also triggers CDN failover. |
 | `GET /v1/wikipedia/activity?lang=&window=` | "Query it": an ad hoc query with allowlisted parameters, returning ClickHouse's own `elapsed_ms` and `rows_read`. Cached 10 s in process and at the edge. See "Query it" below. |
+| `GET /v1/ops.json` | The Ops tab: ingest lag p50 and p95 over what was committed in the last hour, the bookmark ingest would resume from (each stream's position), reconnects in the last 24 hours by reason, the 30-day freshness SLO, gaps recorded in the last 30 days, and month-to-date AWS cost. Built at most once a minute and shared by every viewer; cached 60 s at the edge. See "Ops numbers" below. |
 | `GET /healthz`, `/readyz` | Liveness, and readiness (fresh snapshot and ClickHouse reachable). |
 | `GET /metrics` | Prometheus. |
 
@@ -123,6 +124,15 @@ The per-minute rollup is fed by a materialized view in the same INSERT, but not 
 Every window is anchored to the newest event, not the wall clock, and bounded above by it; the chart takes completed minutes from the rollup and the current minute from raw rows, so it's bounded too. If ingest stalls, numbers freeze at the last thing we saw and the widget says "Paused". Nothing decays to a fake zero. The snapshot's queries run concurrently, so a late event inserted between them can show in one and not another; the next snapshot agrees again.
 
 The payload carries `stale_after_s`, so the API and the widget can't disagree about when data is stale. Its shapes are typed in `api/contract.py`.
+
+#### Ops numbers
+
+Every number on the Ops tab comes from ClickHouse at request time, none from copy.
+
+- **Freshness SLO** (requirement N2). ClickHouse samples the newest event's age once a minute by itself, with a refreshable materialized view (`freshness_samples`, migration 0005), so a sample doesn't depend on ingest or the API. A minute is fresh if every sample in it was under 60 s, stale if not, and unmeasured if it has no sample (ClickHouse down, host being replaced). Unmeasured minutes count against the SLO. The window is the last 30 days of whole minutes, from the first sample at the earliest; the payload says where it starts. The maths is `ops/slo.py`, tested in `tests/unit/test_slo.py`.
+- **Reconnects.** Ingest writes a row to `ingest_reconnects` each time its stream connection ends. If ClickHouse is why, the rows wait in memory for the next committed batch.
+- **Cost.** The archive service, which runs only on the live host, calls Cost Explorer's `GetCostAndUsage` once per UTC day for the month so far, filtered by the `project=livedemos` tag, and stores the answer in `aws_cost`. A failed attempt is stored too, so it isn't retried until the next day. The host role allows that one Cost Explorer action and no other. The amount and currency are passed on exactly as AWS sent them, with the date fetched.
+- **Lost on a host rebuild.** These tables live on the host's disk and aren't archived, so a rebuilt host starts them again. The SLO window then starts at the new host's first sample.
 
 ### Widget (`web/embed/wikipedia/`)
 
@@ -162,6 +172,9 @@ Grafana Alloy ships metrics and logs to Grafana Cloud's free tier ([ADR 0008](ad
 | `wiki_edits` | MergeTree, partitioned by day, ordered by `(lang, event_time)` | one row per kept edit, with `sse_id` and `ingest_seq` | 7 days |
 | `wiki_edits_per_minute` | SummingMergeTree, fed by a materialized view | minute x language | 90 days |
 | `ingest_gaps` | MergeTree | one row per known gap | 90 days |
+| `freshness_samples` | MergeTree, fed by a refreshable view every minute | one row per minute: the newest event's age | 90 days |
+| `ingest_reconnects` | MergeTree | one row per stream reconnect, with its reason | 90 days |
+| `aws_cost` | MergeTree | one row per daily Cost Explorer attempt | 90 days |
 | `wiki_pages_per_minute` | AggregatingMergeTree, fed by a materialized view | minute x language: the exact set of pages edited (`uniqExact` state) | 14 days |
 | `wiki_pages_filled` | ReplacingMergeTree | archived hours whose page sets were completed | 14 days |
 
@@ -228,7 +241,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on
 demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on
 2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md).
-The real bill goes in the README once there is one.
+The real bill goes in the README once there is one. Month-to-date cost, as Cost Explorer reports it for the `project=livedemos` tag, is on the Ops tab (`/v1/ops.json`).
 
 **The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Its first 30 archive files held 270,562 edits in 13.3 MB: 49 bytes an edit with zstd. That's about 0.46 MB an hour, 11 MB a day, 0.33 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 

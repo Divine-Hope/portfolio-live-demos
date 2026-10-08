@@ -4,7 +4,7 @@
               rewrites the rollup (reconcile repairs, rebuilds from the archive)
     ingest    reads and inserts rows; can't change the schema
     api       read-only, with tight per-query limits (it faces the public internet)
-    archiver  reads raw rows and writes them to S3 as Parquet; nothing else
+    archiver  reads raw rows and writes them to S3 as Parquet; records the daily AWS cost
   Passwords come from environment variables, never from this file.
 -->
 <clickhouse>
@@ -102,6 +102,8 @@
                 <!-- Completes each archived hour's page sets (archive/job.py). -->
                 <query>GRANT INSERT ON demos.wiki_pages_per_minute</query>
                 <query>GRANT SELECT, INSERT ON demos.wiki_pages_filled</query>
+                <!-- The daily Cost Explorer answer, for the Ops tab (ops/cost.py). -->
+                <query>GRANT SELECT, INSERT ON demos.aws_cost</query>
                 <!-- s3() reaches only the archive bucket (production) or the local stand-in;
                      any other URL is refused. A table function needs a temporary table. -->
                 <query>GRANT READ, WRITE ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>

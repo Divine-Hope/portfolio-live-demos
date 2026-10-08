@@ -57,6 +57,7 @@ services:
       ARCHIVE_URL: ${ARCHIVE_URL:?ARCHIVE_URL is not set}   # the archive bucket, signed
       ARCHIVE_NOSIGN: "false"
       ARCHIVE_ONLY_ON_IP: ${HOST_PUBLIC_IP:-}                  # only the live host archives
+      ARCHIVE_COST_TAG: project=livedemos                      # month-to-date cost, daily
     depends_on: !override
       clickhouse:
         condition: service_healthy

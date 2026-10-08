@@ -99,6 +99,14 @@ data "aws_iam_policy_document" "host" {
     resources = ["${module.archive.arn}/wikipedia/*"]
   }
 
+  # Month-to-date cost for the Ops tab, once a day (ops/cost.py). The one Cost Explorer
+  # action it needs; Cost Explorer has no resource-level permissions, hence "*".
+  statement {
+    sid       = "ReadMonthToDateCost"
+    actions   = ["ce:GetCostAndUsage"]
+    resources = ["*"]
+  }
+
   statement {
     sid       = "ListArchive"
     actions   = ["s3:ListBucket"]

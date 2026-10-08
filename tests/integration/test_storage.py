@@ -36,7 +36,11 @@ async def test_migrations_run_once_and_are_recorded(ch: ClickHouse) -> None:
     )
     assert [r["name"] for r in tables.rows] == [
         "archive_hours",
+        "aws_cost",
+        "freshness_samples",
+        "freshness_samples_mv",
         "ingest_gaps",
+        "ingest_reconnects",
         "schema_migrations",
         "wiki_edits",
         "wiki_edits_per_minute",
@@ -47,7 +51,7 @@ async def test_migrations_run_once_and_are_recorded(ch: ClickHouse) -> None:
         "wiki_pages_per_minute_mv",
     ]
     applied = await ch.query("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4]
+    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4, 5]
 
 
 async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
@@ -56,7 +60,7 @@ async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
     assert await migrate(ch, upto=1) == [1]
     await ch.insert("wiki_edits", rows(50), dedup_token="before-upgrade")
 
-    assert await migrate(ch) == [2, 3, 4]
+    assert await migrate(ch) == [2, 3, 4, 5]
     projections = await ch.query(
         "SELECT DISTINCT name FROM system.projection_parts "
         "WHERE database = {db:String} AND table = 'wiki_edits' AND active ORDER BY name",
@@ -76,7 +80,7 @@ async def test_a_database_from_before_versioned_migrations_is_adopted(ch: ClickH
         await ch.execute(sql, settings={"database": db})
     await ch.insert("wiki_edits", rows(40), dedup_token="legacy")
 
-    assert await migrate(ch) == [1, 2, 3, 4]  # 1 is a no-op that records the baseline
+    assert await migrate(ch) == [1, 2, 3, 4, 5]  # 1 is a no-op that records the baseline
     assert await scalar(ch, "SELECT count() FROM wiki_edits") == 40
     assert await scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute") == 40
 

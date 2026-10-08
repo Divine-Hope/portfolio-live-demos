@@ -300,6 +300,50 @@
       ]
     },
     {
+      "name": "Ops",
+      "item": [
+        {
+          "name": "Ops numbers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/ops.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "ops.json"
+              ],
+              "query": []
+            },
+            "description": "What the Ops tab shows: ingest lag p50 and p95 over the last hour, the resume bookmark, reconnects in the last 24 hours by reason, the 30-day freshness SLO, recorded gaps, and month-to-date AWS cost from Cost Explorer. Rebuilt at most once a minute."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test(\"has every section\", () => pm.expect(d).to.include.all.keys(\"generated_at\", \"ingest\", \"freshness\", \"gaps\", \"cost\"));",
+                  "pm.test(\"SLO minutes add up\", () => { const f = d.freshness; pm.expect(f.fresh + f.stale + f.unmeasured).to.eql(f.minutes); });",
+                  "console.log(`SLO ${d.freshness.ratio} over ${d.freshness.minutes} min, lag p95 ${d.ingest.lag_ms.p95} ms, cost ${d.cost && d.cost.amount} ${d.cost && d.cost.currency}`);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "Health",
       "item": [
         {

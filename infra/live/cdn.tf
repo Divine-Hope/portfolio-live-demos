@@ -2,6 +2,7 @@
 #
 #   /v1/*/live.json  host first, the S3 snapshot if the host fails (1 s cache)
 #   /v1/*/activity   host only (10 s cache, keyed on lang and window)
+#   /v1/ops.json     host only (60 s cache)
 #   /readyz /healthz host only, never cached
 #   anything else    the private snapshot bucket, which answers 403
 #
@@ -69,6 +70,29 @@ resource "aws_cloudfront_cache_policy" "activity" {
       query_strings {
         items = ["lang", "window"]
       }
+    }
+  }
+}
+
+# The Ops tab: rebuilt once a minute by the api, so cached for that minute here.
+resource "aws_cloudfront_cache_policy" "ops" {
+  name        = "${var.project}-ops"
+  min_ttl     = 0
+  default_ttl = 60
+  max_ttl     = 60
+
+  parameters_in_cache_key_and_forwarded_to_origin {
+    enable_accept_encoding_gzip   = true
+    enable_accept_encoding_brotli = true
+
+    cookies_config {
+      cookie_behavior = "none"
+    }
+    headers_config {
+      header_behavior = "none"
+    }
+    query_strings_config {
+      query_string_behavior = "none"
     }
   }
 }
@@ -167,6 +191,17 @@ resource "aws_cloudfront_distribution" "api" {
     allowed_methods            = ["GET", "HEAD", "OPTIONS"]
     cached_methods             = ["GET", "HEAD"]
     cache_policy_id            = aws_cloudfront_cache_policy.activity.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.cors.id
+    compress                   = true
+  }
+
+  ordered_cache_behavior {
+    path_pattern               = "/v1/ops.json"
+    target_origin_id           = local.host_origin
+    viewer_protocol_policy     = "redirect-to-https"
+    allowed_methods            = ["GET", "HEAD", "OPTIONS"]
+    cached_methods             = ["GET", "HEAD"]
+    cache_policy_id            = aws_cloudfront_cache_policy.ops.id
     response_headers_policy_id = aws_cloudfront_response_headers_policy.cors.id
     compress                   = true
   }

@@ -191,3 +191,23 @@ async def test_start_reads_no_state_while_an_earlier_insert_runs() -> None:
     assert db.log.count("running") == 4
     first_read = db.log.index("read")
     assert "running" not in db.log[first_read:]  # no state read until it had finished
+
+
+async def test_reconnects_are_recorded_and_kept_until_clickhouse_takes_them() -> None:
+    db = StubDatabase(fail_inserts=1)  # ClickHouse is why we reconnected
+    consumer = Consumer(SETTINGS, db)
+    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "clickhouse"})
+    await consumer._record_reconnects()  # fails, and doesn't raise
+    assert len(consumer._reconnects) == 1
+
+    # The next committed batch catches up.
+    batch = Batch(max_rows=10, interval_s=1.0)
+    edit = consumer._parse(valid_event(1), "sse-1")
+    assert edit is not None
+    batch.add(edit, sse_id="sse-1", ingest_seq=1)
+    await consumer._flush(batch)
+    assert not consumer._reconnects
+    tables = [table for table, *_ in db.inserts]
+    assert tables == ["ingest_reconnects", "wiki_edits", "ingest_reconnects"]
+    # The retry carried the same rows under the same token, so it can land only once.
+    assert db.inserts[0][1] == db.inserts[2][1]
