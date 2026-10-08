@@ -21,7 +21,7 @@ leaves the stack's data alone.
   `system.query_log`.
 - **Machine:** an Apple Silicon laptop, ClickHouse 25.8 in Docker under the stack's 1.2 GB
   container limit and `clickhouse/config.d/low-memory.xml`. Not the production instance
-  (a t4g.small has 2 vCPUs); measuring there is the M5 measured week.
+  (a t4g.small has 2 vCPUs); measuring there is part of the measured week.
 
 ### Results, 2026-10-05
 
@@ -63,6 +63,10 @@ times faster. Their memory grows with distinct pages: at twice the live rate a w
 at 142 MB of the `api` user's 200 MB. The sets take 107 MB on disk for that week, so
 about 100 MB at the live rate for their 14 days.
 
+The 24 h query reads the same rows in both runs, but its p50 went from 71.8 ms (25.8) to
+148.4 ms (26.8) and its p95 from 1,659 ms to 214 ms. Two runs on a laptop, three days and a
+version apart, can't say which of the two changed it; the production numbers will.
+
 ### What it says
 
 - The per-second snapshot costs the same at 7 days as at 7 minutes: every query reads only
@@ -78,7 +82,8 @@ about 100 MB at the live rate for their 14 days.
 ## The running stack, under live ingest
 
 Measured on the same laptop on 2026-10-05, ingesting the real Wikimedia stream (about 5.5
-kept edits a second) for 27 minutes, from `system.part_log` and `docker stats`.
+kept edits a second during those 27 minutes; production's 24-hour average on 2026-10-06 was
+2.6 a second, 9,302 an hour) for 27 minutes, from `system.part_log` and `docker stats`.
 
 | What | Measured |
 |---|---|
@@ -89,4 +94,4 @@ kept edits a second) for 27 minutes, from `system.part_log` and `docker stats`.
 | Memory, ingest / api / nginx | 40 / 42 / 8 MiB |
 
 Merges keep pace with one insert a second, so parts don't pile up. Measuring the same on
-the production instance, over a week and through a TTL drop, is still M5.
+the production instance, over a week and through a TTL drop, is still to do.

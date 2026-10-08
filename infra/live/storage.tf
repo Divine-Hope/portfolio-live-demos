@@ -29,7 +29,7 @@ data "aws_iam_policy_document" "snapshots_cloudfront" {
   }
 }
 
-# Hourly Parquet files (M4). Older files move to cheaper storage classes on their own.
+# Hourly Parquet files. Older files move to cheaper storage classes on their own.
 module "archive" {
   source = "../modules/private-bucket"
   name   = "${var.project}-archive-${local.bucket_suffix}"

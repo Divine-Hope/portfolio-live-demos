@@ -5,7 +5,7 @@ Status: Accepted
 
 ## Context
 
-The plan (BPL-68) was a measured week on the t4g.small before deciding its size. The data
+The plan was a measured week on the t4g.small before deciding its size. The data
 from the first day already answers the size question, and the bigger question turned out to
 be cost.
 
@@ -40,7 +40,7 @@ On demand, the stack costs about $18.50 a month from 2027: nearly twice the budg
 Spot Instance Advisor puts eu-west-1 interruptions at 15 to 20% a month for t4g.small and
 under 5% for c6g.medium, c7g.medium and m6g.medium.
 
-A Spot host can be taken away. Losing the host used to mean a manual rebuild; since BPL-66
+A Spot host can be taken away. Losing the host used to mean a manual rebuild; since the self-restore work
 it doesn't. A new host restores itself from the Parquet archive and the stream with no
 manual steps, in 7 min 50 s in the drill, with the chart continuous afterwards.
 

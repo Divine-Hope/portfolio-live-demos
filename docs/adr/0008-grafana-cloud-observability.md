@@ -1,7 +1,7 @@
 # 0008. Grafana Cloud for observability, CloudWatch only for AWS-level alarms
 
 Date: 2026-10-04
-Status: Accepted (implementation in M4)
+Status: Accepted
 
 ## Context
 

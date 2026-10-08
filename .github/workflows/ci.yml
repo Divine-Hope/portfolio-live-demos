@@ -18,14 +18,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
       - run: uv sync --locked
       - name: Lint the workflows
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          # A pinned release, checked against its published checksum before it runs.
+          curl -fsSLo actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -37,8 +40,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "^1.11.0"
           terraform_wrapper: false
@@ -65,12 +68,12 @@ jobs:
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
       TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "~1.11"
           terraform_wrapper: false
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AWS_TF_PLAN_ROLE_ARN }}
           aws-region: eu-west-1
@@ -98,7 +101,7 @@ jobs:
       CLICKHOUSE_ARCHIVER_PASSWORD: ci-archiver
       ARCHIVE_TEST_URL: http://s3:8333/archive/test   # as ClickHouse sees it
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The archive tests need an S3 API that ClickHouse can reach by name, as in compose.
       - name: Start SeaweedFS (local S3) with an archive bucket
         run: |
@@ -124,7 +127,7 @@ jobs:
             -v "$PWD/clickhouse/users.d/livedemos.xml:/etc/clickhouse-server/users.d/livedemos.xml:ro" \
             clickhouse/clickhouse-server:26.8
           for _ in $(seq 1 60); do curl -fsS localhost:8123/ping && break; sleep 1; done
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
       - run: uv sync --locked
@@ -138,7 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Validate compose files (local, and production on top)
         run: |
           cp .env.example .env
@@ -150,8 +153,8 @@ jobs:
         run: shellcheck deploy/host/*.sh deploy/ci/*.sh
       - name: Validate the Alloy config
         run: docker run --rm -v "$PWD/deploy/alloy:/c:ro" grafana/alloy:v1.20.1 validate /c/config.alloy
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: false
@@ -164,19 +167,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Start the stack against the fake stream
         run: cp .env.example .env && make up-offline
       - name: Wait for live data
-        run: |
-          for _ in $(seq 1 60); do
-            status=$(curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' || true)
-            [ "$status" = "live" ] && exit 0
-            sleep 2
-          done
-          echo "no live data after 120 s"; exit 1
+        run: make wait-live
       - run: make smoke
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
       - name: Browser tests for the widget (keyboard, screen reader, axe, reduced motion)
@@ -199,21 +196,15 @@ jobs:
     env:
       LIVEDEMOS_E2E_BROWSER: ${{ matrix.browser }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Start the stack against the fake stream
         run: cp .env.example .env && make up-offline
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.12"
       - run: uv run --locked --group e2e playwright install --with-deps ${{ matrix.browser }}
       - name: Wait for live data
-        run: |
-          for _ in $(seq 1 60); do
-            status=$(curl -fsS localhost:8080/v1/wikipedia/live.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' || true)
-            [ "$status" = "live" ] && exit 0
-            sleep 2
-          done
-          echo "no live data after 120 s"; exit 1
+        run: make wait-live
       - run: uv run --locked --group e2e pytest -m e2e -v
       - name: Logs on failure
         if: failure()

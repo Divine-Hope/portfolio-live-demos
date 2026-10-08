@@ -1,7 +1,7 @@
 # Runbook
 
 Day-to-day operations for the production host. Everything here uses your SSO profile:
-`aws sso login --sso-session bplabs`, then `export AWS_PROFILE=livedemos`.
+`aws sso login --sso-session <your session>`, then `export AWS_PROFILE=livedemos`.
 
 ## Get a shell on the host
 
