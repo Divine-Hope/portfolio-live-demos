@@ -78,3 +78,81 @@ class ActivityPayload(TypedDict):
     as_of: str | None
     last_event_age_s: float | None
     query: QueryInfo
+
+
+class LagReport(TypedDict):
+    p50: int | None  # None when nothing was committed in the window
+    p95: int | None
+    events: int
+    window_s: int
+
+
+class BookmarkPosition(TypedDict):
+    stream: str  # the data centre's topic prefix: eqiad, codfw
+    at: str | None  # the position, as an event time
+    offset: int | None  # instead of `at` for a topic not seen yet
+
+
+class Bookmark(TypedDict):
+    positions: list[BookmarkPosition]
+    bytes: int  # the full id's size, as stored with every row
+
+
+class Reconnects(TypedDict):
+    window_s: int
+    total: int
+    by_reason: dict[str, int]
+
+
+class IngestReport(TypedDict):
+    lag_ms: LagReport
+    bookmark: Bookmark | None
+    reconnects: Reconnects
+
+
+# "from" is a keyword, so these two use the functional form.
+FreshnessReport = TypedDict(
+    "FreshnessReport",
+    {
+        "target": float,
+        "threshold_s": float,
+        "window_days": int,
+        "from": str | None,  # None before the first sample
+        "to": str | None,
+        "minutes": int,
+        "fresh": int,
+        "stale": int,
+        "unmeasured": int,  # no sample: counted against the SLO
+        "ratio": float | None,
+        "met": bool | None,
+        "budget_minutes": int,
+        "budget_used": int,
+        "full_window": bool,  # False while measuring started less than window_days ago
+    },
+)
+
+GapReport = TypedDict("GapReport", {"from": str, "to": str, "duration_s": int, "reason": str})
+
+
+class Gaps(TypedDict):
+    window_days: int
+    total: int
+    recent: list[GapReport]  # the newest, at most 20
+
+
+class CostReport(TypedDict):
+    amount: str  # exactly as AWS returned it
+    currency: str  # as AWS reports it
+    estimated: bool
+    period_start: str
+    period_end: str  # exclusive
+    fetched_at: str
+    source: str
+
+
+class OpsPayload(TypedDict):
+    generated_at: str
+    ingest: IngestReport
+    freshness: FreshnessReport
+    gaps: Gaps
+    cost: CostReport | None  # None until the first successful fetch

@@ -34,6 +34,7 @@ resource "aws_ssm_parameter" "settings" {
     "ingest-contact"      = var.repo_url
     "api-snapshot-bucket" = module.snapshots.id
     "archive-url"         = "https://${module.archive.id}.s3.${var.region}.amazonaws.com/wikipedia/edits"
+    "archive-cost-claims" = "s3://${module.archive.id}/ops/cost" # one Cost Explorer call a day
     "aws-default-region"  = var.region
     "host-public-ip"      = aws_eip.host.public_ip # the archive runs only on the host holding it
     "grafana-prom-url"    = var.grafana_cloud.prom_url

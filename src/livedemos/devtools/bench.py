@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from livedemos.api import queries
+from livedemos.api import ops, queries
 from livedemos.api.snapshot import MINUTES, TOP_N, WINDOW_S, Snapshotter
 from livedemos.clickhouse import ClickHouse, QueryResult
 from livedemos.config import ClickHouseSettings
@@ -117,6 +117,18 @@ async def fill(ch: ClickHouse, *, days: int, rate: int, now: datetime) -> int:
     return total
 
 
+# 30 days of per-minute freshness samples, the Ops tab's full SLO window. A few stale ones.
+_FILL_SAMPLES = """
+INSERT INTO freshness_samples (minute, sampled_at, age_s)
+SELECT m, m + toIntervalMillisecond(5), if(number % 500 = 0, 90.0, 2.5)
+FROM
+(
+    SELECT number, toStartOfMinute(now()) - toIntervalMinute(number + 1) AS m
+    FROM numbers({minutes:UInt32})
+)
+"""
+
+
 class WithReaderLimits:
     """Every query through it carries the `api` profile's limits as query settings."""
 
@@ -171,6 +183,17 @@ def cases(newest_ms: int, last_seq: int) -> list[Case]:
             queries.WINDOW_TOTALS,
             {**window, "window_s": 7 * 86_400},
         ),
+        Case("ops: ingest lag, last hour", ops.LAG, {"window_s": ops.LAG_WINDOW_S}),
+        Case("ops: bookmark", ops.BOOKMARK, {}),
+        Case(
+            "ops: freshness, 30 days",
+            ops.FRESHNESS,
+            {
+                "threshold_s": 60.0,
+                "start_s": newest_ms // 60_000 * 60 - 30 * 86_400,
+                "end_s": newest_ms // 60_000 * 60,
+            },
+        ),
         Case("resume: max ingest_seq", "SELECT max(ingest_seq) AS seq FROM wiki_edits", {}),
         Case(
             "resume: last 20k by ingest order",
@@ -208,6 +231,33 @@ async def measure(ch: ClickHouse, case: Case, *, runs: int) -> Result:
         rows_read=rows_read,
         peak_mb=int(peak.rows[0]["peak"]) / 1e6,
     )
+
+
+async def ops_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
+    """The whole Ops payload, its queries at once, as the API builds it."""
+    service = ops.OpsService(
+        WithReaderLimits(ch), ttl_s=60, threshold_s=60, target=0.99, days=30, error_cooldown_s=5
+    )
+    timings = []
+    for _ in range(runs):
+        started = time.perf_counter()
+        await service.build()
+        timings.append((time.perf_counter() - started) * 1000)
+    return statistics.median(timings), _p95(timings)
+
+
+async def index_on_full_table(ch: ClickHouse) -> float:
+    """Seconds for migration 0005's index on a table already holding the week, as on deploy."""
+    await ch.execute("ALTER TABLE wiki_edits DROP INDEX IF EXISTS ingested_at_minmax")
+    started = time.perf_counter()
+    await ch.execute(
+        "ALTER TABLE wiki_edits ADD INDEX ingested_at_minmax ingested_at TYPE minmax GRANULARITY 1"
+    )
+    await ch.execute(
+        "ALTER TABLE wiki_edits MATERIALIZE INDEX ingested_at_minmax SETTINGS mutations_sync = 1",
+        settings={"max_execution_time": "600"},
+    )
+    return time.perf_counter() - started
 
 
 async def snapshot_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
@@ -273,6 +323,7 @@ async def run(settings: ClickHouseSettings, *, days: int, rate: int, runs: int) 
         await migrate(ch)
         started = time.perf_counter()
         total = await fill(ch, days=days, rate=rate, now=datetime.now(UTC))
+        await ch.execute(_FILL_SAMPLES, params={"minutes": 30 * 1_440})
         took = time.perf_counter() - started
         print(f"filled {total:,} rows ({days} days at {rate}/s) in {took:.0f} s")
 
@@ -291,6 +342,10 @@ async def run(settings: ClickHouseSettings, *, days: int, rate: int, runs: int) 
 
         p50, p95 = await snapshot_build(ch, runs=runs)
         print(f"\nwhole snapshot build (5 queries at once): p50 {p50:.0f} ms, p95 {p95:.0f} ms")
+        p50, p95 = await ops_build(ch, runs=runs)
+        print(f"whole Ops build (6 queries at once, then 1): p50 {p50:.0f} ms, p95 {p95:.0f} ms")
+        took = await index_on_full_table(ch)
+        print(f"migration 0005's ingested_at index on the full table: {took:.1f} s")
         rows_per_s = await insert_throughput(ch, batch_rows=5_000, batches=40)
         print(f"insert throughput, 5,000-row JSON batches via the view: {rows_per_s:,.0f} rows/s")
 

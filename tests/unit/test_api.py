@@ -122,3 +122,9 @@ def test_importing_the_app_leaves_logging_alone() -> None:
     code = "import logging; import livedemos.api.app; print(len(logging.getLogger().handlers))"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "0"
+
+
+def test_ops_is_503_when_clickhouse_is_down(client: TestClient) -> None:
+    response = client.get("/v1/ops.json")
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"

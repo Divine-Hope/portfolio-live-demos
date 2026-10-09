@@ -3,6 +3,7 @@
 Routes
   GET /v1/wikipedia/live.json   widget payload, rebuilt every second, served from memory
   GET /v1/wikipedia/activity    "Query it": allowlisted ad hoc query with ClickHouse timing
+  GET /v1/ops.json              the Ops tab: lag, bookmark, reconnects, SLO, gaps, cost
   GET /healthz                  process is up
   GET /readyz                   snapshot is fresh and ClickHouse answers
   GET /metrics                  Prometheus
@@ -25,6 +26,7 @@ from livedemos import __version__
 from livedemos.api import metrics
 from livedemos.api.activity import ActivityService, BadRequest, Unavailable, parse_request
 from livedemos.api.fallback import FallbackWriter
+from livedemos.api.ops import OpsService, OpsUnavailable
 from livedemos.api.snapshot import Snapshotter
 from livedemos.clickhouse import ClickHouse
 from livedemos.config import ApiSettings, ClickHouseSettings, api_settings, clickhouse_settings
@@ -78,6 +80,14 @@ def create_app(
             error_cooldown_s=settings.activity_error_cooldown_s,
         )
         app.state.activity = activity
+        app.state.ops = OpsService(
+            ch,
+            ttl_s=settings.ops_cache_ttl_s,
+            threshold_s=settings.slo_threshold_s,
+            target=settings.slo_target,
+            days=settings.slo_days,
+            error_cooldown_s=settings.activity_error_cooldown_s,
+        )
         log.info("api started", extra={"version": __version__, "langs": langs})
         try:
             yield
@@ -175,6 +185,26 @@ def create_app(
         return JSONResponse(
             payload,
             headers={"Cache-Control": f"public, max-age={settings.activity_cache_ttl_s}"},
+        )
+
+    @app.get("/v1/ops.json")
+    async def ops(request: Request) -> Response:
+        try:
+            body, age = await request.app.state.ops.get()
+        except OpsUnavailable as exc:
+            log.warning("ops unavailable", exc_info=exc.__cause__)
+            return JSONResponse(
+                {"error": str(exc)},
+                status_code=503,
+                headers={"Cache-Control": "no-store", "Retry-After": "10"},
+            )
+        return Response(
+            content=body,
+            media_type="application/json",
+            # What's left of the build's minute, so a CDN copy is never older than that.
+            headers={
+                "Cache-Control": f"public, max-age={max(0, int(settings.ops_cache_ttl_s - age))}"
+            },
         )
 
     @app.get("/healthz")

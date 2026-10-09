@@ -79,6 +79,27 @@ version apart, can't say which of the two changed it; the production numbers wil
   and never more than 2 at once. 3 and 7 days read per-minute page sets instead
   (migration 0004), measured above.
 
+### The Ops tab's queries, 2026-10-08
+
+Same data and limits, ClickHouse 26.8, plus 30 days of per-minute freshness samples
+(43,200 rows). 20 runs each.
+
+| Query | p50 ms | p95 ms | Rows read | Peak memory |
+|---|---:|---:|---:|---:|
+| ops: ingest lag, last hour | 5.1 | 13.6 | 60,753 | 9.0 MB |
+| ops: bookmark | 5.7 | 34.4 | 4,945 | 8.3 MB |
+| ops: freshness, 30 days | 5.8 | 14.3 | 43,200 | 9.6 MB |
+
+The whole Ops payload, its six queries at once and then the freshness count, as the API
+builds it: p50 15 ms, p95 25 ms (rerun on 2026-10-09; the single queries came in a little
+faster that time). Migration 0005's `ingested_at` index, added and materialized on a table
+already holding the 6.65 million rows, as a deploy would: 1.1 s.
+
+The lag query filters on `ingested_at`, which isn't in the sort key; the minmax index from
+migration 0005 makes it read the last hour's rows, not the week's. The benchmark writes
+rows in time order, the best case for that index. A replay after an outage writes old
+events late, so in production it reads a little more, still a small part of the table.
+
 ## The running stack, under live ingest
 
 Measured on the same laptop on 2026-10-05, ingesting the real Wikimedia stream (about 5.5

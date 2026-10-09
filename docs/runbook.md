@@ -410,6 +410,19 @@ The live.json check fired 3 to 4 minutes after the page stopped being live. Losi
 Alloy takes about 10 minutes to alert: a series counts as gone 5 minutes after its last
 sample, then the rule waits 5 more.
 
+## The Ops tab's cost figure
+
+The archive service asks Cost Explorer once a UTC day (docs/architecture.md, "Ops numbers").
+
+- **Prerequisite:** `project` must be an active cost allocation tag in the management
+  account's Billing console, or the tag filter returns nothing. Checked active on
+  2026-10-08: the filter returned $0.20 for October.
+- **No figure today?** Look at the day's claim: `aws s3 cp s3://<archive bucket>/ops/cost/$(date -u +%F).json -`.
+  No object: the service hasn't tried yet (logs: `cost`). An object with no `result`: the
+  caller died mid-way, and there'll be no figure until tomorrow. A `result` with `ok: false`:
+  its `error` says why (often a permission).
+- It isn't asked again the same day, by design. Fix the cause; tomorrow's run picks it up.
+
 ## Other signals
 
 Worth a look on the dashboard or in Explore; not alerts.

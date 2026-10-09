@@ -47,7 +47,7 @@ What the live demos must do, and how well. Each requirement has an id so tests, 
 | F9 | `make up-offline`, which CI runs before the browser tests |
 | F10 | `tests/integration/test_archive.py`, `tests/unit/test_archive.py`; restoring a new host from it: ADR 0010's drill |
 | N1 | Measured, not tested: the page shows ingest lag and the newest event's age as it fetches it |
-| N2 | Not yet: the Ops tab |
+| N2 | `tests/unit/test_slo.py` (minutes with no sample count against it), `tests/integration/test_ops.py`, `/v1/ops.json` |
 | N3 | Snapshot loop design plus the 1 s edge cache; load checks locally and on CloudFront ([architecture](architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out)) |
 | N4 | `make bench` ([benchmarks](benchmarks.md)); on the host, "Query it" reports ClickHouse's own timing on every answer |
 | N5 | `restart: unless-stopped` and health checks in `compose.yaml`; `tests/unit/test_health.py`; the group's EC2 health check (`infra/live/host.tf`); alerts in `deploy/grafana/alerts.json` |

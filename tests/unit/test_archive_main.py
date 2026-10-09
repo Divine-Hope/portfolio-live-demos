@@ -35,7 +35,7 @@ async def test_only_the_live_host_archives(
 
     monkeypatch.setattr(service, "public_ip", fake_ip)
     archiver = CountingArchiver()
-    task = asyncio.create_task(service._serve(archiver, 3600, only_on_ip))  # type: ignore[arg-type]
+    task = asyncio.create_task(service._serve(archiver, None, 3600, only_on_ip))  # type: ignore[arg-type]
     await asyncio.sleep(0.05)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
