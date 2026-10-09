@@ -211,12 +211,22 @@ async def test_a_failure_is_remembered_for_the_cooldown() -> None:
 
 
 def test_the_figure_and_the_check_come_from_the_same_read() -> None:
-    attempts = [  # newest first, as the query returns them
-        {"fetched_ms": 1_791_499_900_000, "ok": 0, "start_day": "2026-10-01"},
-        {"fetched_ms": 1_791_400_000_000, "ok": 1, "start_day": "2026-10-01", "amount": "1.2"},
-        {"fetched_ms": 1_788_000_000_000, "ok": 1, "start_day": "2026-09-01", "amount": "9.9"},
-    ]
-    figure = ops.this_months_figure(NOW_S, attempts)
+    row = {
+        "attempts": 400,  # however many repeated rows: aggregates, so nothing is pushed out
+        "fetched_ms": 1_791_499_900_000,
+        "last_ok": 0,
+        "figures": 3,
+        "figure_ms": 1_791_400_000_000,
+        "fig_start": "2026-10-01",
+        "fig_end": "2026-10-08",
+        "fig_amount": "1.2",
+        "fig_currency": "USD",
+        "fig_estimated": 1,
+    }
+    figure, latest = ops.split_cost(row)
     assert figure is not None
     assert figure["amount"] == "1.2"  # this month's newest success, not the failure after it
-    assert ops.this_months_figure(NOW_S, attempts[2:]) is None  # never last month's
+    assert latest == {"fetched_ms": 1_791_499_900_000, "ok": 0}
+    assert ops.split_cost({**row, "figures": 0}) == (None, latest)  # no figure this month
+    assert ops.split_cost({**row, "attempts": 0}) == (None, None)
+    assert ops.month_start(NOW_S) == "2026-10-01"

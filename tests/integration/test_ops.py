@@ -53,6 +53,13 @@ async def test_lag_counts_a_replay_of_old_events_stored_just_now(ch: ClickHouse)
     assert result.rows[0]["p50_ms"] > 86_400_000
 
 
+def today_so_far(fraction: float) -> datetime:
+    """A time between today's UTC midnight and now: never tomorrow, whenever this runs."""
+    now = datetime.now(UTC)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight + (now - midnight) * fraction
+
+
 async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None:
     month = datetime.now(UTC).date().replace(day=1)
     last_month = (month - timedelta(days=1)).replace(day=1)
@@ -79,7 +86,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
                 "error": "",
             },
             {
-                "fetched_at": datetime.now(UTC).isoformat(),
+                "fetched_at": today_so_far(0.5).isoformat(),
                 "ok": True,
                 "period_start": month.isoformat(),
                 "period_end": "2026-10-09",
@@ -89,7 +96,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
                 "error": "",
             },
             {
-                "fetched_at": (datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+                "fetched_at": today_so_far(0.9).isoformat(),
                 "ok": False,
                 "period_start": month.isoformat(),
                 "period_end": "2026-10-09",
@@ -147,7 +154,7 @@ async def test_an_empty_database_reports_nothing_rather_than_zeros(ch: ClickHous
 
 async def test_a_first_check_that_failed_gives_no_figure(ch: ClickHouse) -> None:
     month = datetime.now(UTC).date().replace(day=1).isoformat()
-    await ch.insert("aws_cost", [cost_row(at=datetime.now(UTC), ok=False, start=month)])
+    await ch.insert("aws_cost", [cost_row(at=today_so_far(0.5), ok=False, start=month)])
     payload = await service(ch).build()
     assert payload["cost"] is None
     assert payload["cost_check"]["today"] == "failed"

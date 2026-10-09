@@ -114,28 +114,49 @@ SELECT
 FROM wiki_edits
 """
 
-# Every daily attempt on record (90 days at most, one a day), newest first, in one read so
-# the figure and the check's status can't disagree. Only `ok` and the time of an attempt go
-# out, never the error text: it can hold an account id, and the page is public.
+# The latest attempt (failed or not) and this month's latest figure, in one read so they
+# can't disagree, and by aggregate so no number of repeated rows can push either out. Only
+# `ok` and the time of an attempt go out, never the error text: it can hold an account id,
+# and the page is public.
 COST = """
 SELECT
-    toUnixTimestamp64Milli(fetched_at) AS fetched_ms,
-    ok,
-    toString(period_start) AS start_day,
-    toString(period_end) AS end_day,
-    amount, currency, estimated
+    count() AS attempts,
+    toUnixTimestamp64Milli(max(fetched_at)) AS fetched_ms,
+    argMax(ok, fetched_at) AS last_ok,
+    countIf(ok AND period_start = {month:Date}) AS figures,
+    toUnixTimestamp64Milli(maxIf(fetched_at, ok AND period_start = {month:Date})) AS figure_ms,
+    toString(argMaxIf(period_start, fetched_at, ok AND period_start = {month:Date})) AS fig_start,
+    toString(argMaxIf(period_end, fetched_at, ok AND period_start = {month:Date})) AS fig_end,
+    argMaxIf(amount, fetched_at, ok AND period_start = {month:Date}) AS fig_amount,
+    argMaxIf(currency, fetched_at, ok AND period_start = {month:Date}) AS fig_currency,
+    argMaxIf(estimated, fetched_at, ok AND period_start = {month:Date}) AS fig_estimated
 FROM aws_cost
-ORDER BY fetched_at DESC
-LIMIT 200
 """
 
 
-def this_months_figure(
-    now: float, attempts: Sequence[Mapping[str, Any]]
-) -> Mapping[str, Any] | None:
-    """The newest successful figure for the current UTC month; never last month's."""
-    month = datetime.fromtimestamp(now, UTC).date().replace(day=1).isoformat()
-    return next((a for a in attempts if bool(a["ok"]) and a["start_day"] == month), None)
+def month_start(now: float) -> str:
+    """The first day of the current UTC month: only its figures are this month's."""
+    return datetime.fromtimestamp(now, UTC).date().replace(day=1).isoformat()
+
+
+def split_cost(
+    row: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    """(this month's figure, the latest attempt) from the COST row; None for either missing."""
+    if not row or not int(row["attempts"]):
+        return None, None
+    latest = {"fetched_ms": row["fetched_ms"], "ok": row["last_ok"]}
+    if not int(row["figures"]):
+        return None, latest
+    figure = {
+        "fetched_ms": row["figure_ms"],
+        "start_day": row["fig_start"],
+        "end_day": row["fig_end"],
+        "amount": row["fig_amount"],
+        "currency": row["fig_currency"],
+        "estimated": row["fig_estimated"],
+    }
+    return figure, latest
 
 
 def shorten_bookmark(sse_id: str) -> Bookmark | None:
@@ -378,7 +399,7 @@ class OpsService:
             self._db.query(RECONNECTS, params={"window_s": RECONNECT_WINDOW_S}),
             self._db.query(FIRST_SAMPLE),
             self._db.query(GAPS, params={"days": GAP_WINDOW_DAYS, "limit": MAX_GAPS}),
-            self._db.query(COST),
+            self._db.query(COST, params={"month": month_start(now)}),
             self._db.query(HEAD),
         )
         first_ms = (
@@ -405,6 +426,7 @@ class OpsService:
                 target=self._target,
                 days=self._days,
             )
+        figure, latest = split_cost(cost.rows[0] if cost.rows else None)
         return assemble(
             now=now,
             lag=lag.rows[0] if lag.rows else None,
@@ -415,8 +437,8 @@ class OpsService:
             target=self._target,
             days=self._days,
             gaps=gaps.rows,
-            cost=this_months_figure(now, cost.rows),
+            cost=figure,
             head=head.rows[0] if head.rows else None,
-            cost_check=cost.rows[0] if cost.rows else None,
+            cost_check=latest,
             stale_after_s=self._stale_after_s,
         )
