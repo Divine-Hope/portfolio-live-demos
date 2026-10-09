@@ -237,7 +237,7 @@ async def measure(ch: ClickHouse, case: Case, *, runs: int) -> Result:
 async def ops_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
     """The whole Ops payload, its queries at once, as the API builds it."""
     service = ops.OpsService(
-        WithReaderLimits(ch), ttl_s=60, threshold_s=60, target=0.99, days=30, error_cooldown_s=5
+        WithReaderLimits(ch), ttl_s=60, threshold_s=60, target=0.999, days=30, error_cooldown_s=5
     )
     timings = []
     for _ in range(runs):

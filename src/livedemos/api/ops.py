@@ -114,26 +114,28 @@ SELECT
 FROM wiki_edits
 """
 
-# The latest daily attempt, failed or not. Only whether it worked goes out: the error text
-# can hold an account id, and the repo and page are public.
-COST_CHECK = """
-SELECT toUnixTimestamp64Milli(fetched_at) AS fetched_ms, ok
-FROM aws_cost
-ORDER BY fetched_at DESC
-LIMIT 1
-"""
-
+# Every daily attempt on record (90 days at most, one a day), newest first, in one read so
+# the figure and the check's status can't disagree. Only `ok` and the time of an attempt go
+# out, never the error text: it can hold an account id, and the page is public.
 COST = """
 SELECT
     toUnixTimestamp64Milli(fetched_at) AS fetched_ms,
+    ok,
     toString(period_start) AS start_day,
     toString(period_end) AS end_day,
     amount, currency, estimated
 FROM aws_cost
-WHERE ok AND period_start = toStartOfMonth(toDate(now(), 'UTC'))  -- this month's, only
 ORDER BY fetched_at DESC
-LIMIT 1
+LIMIT 200
 """
+
+
+def this_months_figure(
+    now: float, attempts: Sequence[Mapping[str, Any]]
+) -> Mapping[str, Any] | None:
+    """The newest successful figure for the current UTC month; never last month's."""
+    month = datetime.fromtimestamp(now, UTC).date().replace(day=1).isoformat()
+    return next((a for a in attempts if bool(a["ok"]) and a["start_day"] == month), None)
 
 
 def shorten_bookmark(sse_id: str) -> Bookmark | None:
@@ -370,7 +372,7 @@ class OpsService:
 
     async def build(self) -> OpsPayload:
         now = time.time()
-        lag, bookmark, reconnects, first, gaps, cost, head, check = await asyncio.gather(
+        lag, bookmark, reconnects, first, gaps, cost, head = await asyncio.gather(
             self._db.query(LAG, params={"window_s": LAG_WINDOW_S}),
             self._db.query(BOOKMARK),
             self._db.query(RECONNECTS, params={"window_s": RECONNECT_WINDOW_S}),
@@ -378,7 +380,6 @@ class OpsService:
             self._db.query(GAPS, params={"days": GAP_WINDOW_DAYS, "limit": MAX_GAPS}),
             self._db.query(COST),
             self._db.query(HEAD),
-            self._db.query(COST_CHECK),
         )
         first_ms = (
             int(first.rows[0]["first_ms"]) if first.rows and int(first.rows[0]["n"]) else None
@@ -414,8 +415,8 @@ class OpsService:
             target=self._target,
             days=self._days,
             gaps=gaps.rows,
-            cost=cost.rows[0] if cost.rows else None,
+            cost=this_months_figure(now, cost.rows),
             head=head.rows[0] if head.rows else None,
-            cost_check=check.rows[0] if check.rows else None,
+            cost_check=cost.rows[0] if cost.rows else None,
             stale_after_s=self._stale_after_s,
         )

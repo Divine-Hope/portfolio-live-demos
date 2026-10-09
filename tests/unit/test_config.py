@@ -46,3 +46,11 @@ def test_api_settings_refuse_nonsense(overrides: dict[str, object]) -> None:
 def test_defaults_are_valid() -> None:
     assert IngestSettings().flush_max_rows > 0
     assert ApiSettings().lang_list == ["en", "pt", "de"]
+
+
+def test_the_slo_target_cant_go_below_the_requirement() -> None:
+    # Requirement N2: 99.9% at minimum. A lower target would shrink what the page promises.
+    with pytest.raises(ValidationError):
+        ApiSettings(slo_target=0.99)
+    assert ApiSettings().slo_target == 0.999
+    assert ApiSettings(slo_target=0.9999).slo_target == 0.9999

@@ -111,7 +111,7 @@ class IngestReport(TypedDict):
     state: IngestState  # judged by the API (api/ops.py); the page shows it, doesn't redo it
     newest_event_at: str | None  # the newest event's own time; None with no rows
     last_stored_at: str | None  # when ingest last stored a row (restored rows keep theirs)
-    stale_after_s: float  # newest event older than this: the page says "Paused"
+    stale_after_s: float  # the age limit `state` is judged with
     lag_ms: LagReport
     bookmark: Bookmark | None
     reconnects: Reconnects

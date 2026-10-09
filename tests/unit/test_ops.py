@@ -208,3 +208,15 @@ async def test_a_failure_is_remembered_for_the_cooldown() -> None:
     with pytest.raises(ops.OpsUnavailable):
         await svc.get()
     assert db.queries == tried
+
+
+def test_the_figure_and_the_check_come_from_the_same_read() -> None:
+    attempts = [  # newest first, as the query returns them
+        {"fetched_ms": 1_791_499_900_000, "ok": 0, "start_day": "2026-10-01"},
+        {"fetched_ms": 1_791_400_000_000, "ok": 1, "start_day": "2026-10-01", "amount": "1.2"},
+        {"fetched_ms": 1_788_000_000_000, "ok": 1, "start_day": "2026-09-01", "amount": "9.9"},
+    ]
+    figure = ops.this_months_figure(NOW_S, attempts)
+    assert figure is not None
+    assert figure["amount"] == "1.2"  # this month's newest success, not the failure after it
+    assert ops.this_months_figure(NOW_S, attempts[2:]) is None  # never last month's
