@@ -159,8 +159,8 @@
     bars.setAttribute(
       "aria-label",
       lastFull
-        ? `Edits per minute over the last hour. Last full minute: ${fmt.format(lastFull.edits)} edits.`
-        : "Edits per minute over the last hour. Not enough data yet.",
+        ? `Edits per minute during the previous hour. Most recent complete minute: ${fmt.format(lastFull.edits)} edits.`
+        : "Insufficient data is available to display the chart.",
     );
   }
 
@@ -176,7 +176,7 @@
       if (list.children.length !== 1 || !list.firstElementChild.classList.contains("empty")) {
         const empty = document.createElement("li");
         empty.className = "empty";
-        empty.textContent = "No article edits in this window.";
+        empty.textContent = "No article edits were recorded during this period.";
         list.replaceChildren(empty);
       }
       keepFocus(list, hadFocus, focusedKey);
@@ -272,19 +272,19 @@
     $("metrics").classList.toggle("held", kind === "paused");
     if (kind === "unreachable") {
       dot.className = "dot down";
-      text.textContent = "Can't reach the data API yet. Retrying.";
+      text.textContent = "Unable to reach the data API. Retrying automatically.";
       announce("unreachable", text.textContent);
     } else if (kind === "waiting") {
       dot.className = "dot";
-      text.textContent = "Waiting for the first events.";
+      text.textContent = "Waiting for the first events…";
       announce("waiting", text.textContent);
     } else if (kind === "paused") {
       dot.className = "dot paused";
-      text.textContent = `Paused · last event ${describeAge(age)} ago. Nothing here is invented to fill the gap.`;
-      announce("paused", `Paused. Last event ${describeAge(age)} ago.`);
+      text.textContent = `Paused · latest event ${describeAge(age)} ago. Displaying only the most recent verified data.`;
+      announce("paused", `Paused. Latest event ${describeAge(age)} ago.`);
     } else if (kind === "live") {
       dot.className = "dot live";
-      text.textContent = `Live · last event ${Math.max(0, Math.round(age))}s ago`;
+      text.textContent = `Live · latest event ${Math.max(0, Math.round(age))}s ago`;
       announce("live", "Live.");
     }
   }

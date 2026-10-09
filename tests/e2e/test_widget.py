@@ -28,7 +28,7 @@ HOST_URL = WIDGET_URL.removesuffix("embed/wikipedia/")  # the demo host page aro
 LIVE_JSON = re.compile(r"/v1/wikipedia/live\.json")
 BROWSER = os.environ.get("LIVEDEMOS_E2E_BROWSER", "chromium")  # chromium, firefox or webkit
 ARTICLE_URL = re.compile(r"^https://(en|pt|de)\.wikipedia\.org/wiki/\S+$")
-LIVE = re.compile(r"^Live · last event \d+s ago$")
+LIVE = re.compile(r"^Live · latest event \d+s ago$")
 POLL_S = 2
 FONTS = re.compile(r"^https://fonts\.(googleapis|gstatic)\.com/")
 # 44 px, less half a pixel: Firefox lays out on sub-pixels (43.99997 is 44 on screen).
@@ -60,8 +60,11 @@ def chart_label_for(payload: dict[str, Any]) -> str:
     series = payload["langs"]["all"]["per_minute"]
     full = [m for m in series if not m.get("partial") and m.get("edits") is not None]
     if not full:  # a fresh stack has no complete minute yet
-        return "Edits per minute over the last hour. Not enough data yet."
-    return f"Edits per minute over the last hour. Last full minute: {full[-1]['edits']:,} edits."
+        return "Insufficient data is available to display the chart."
+    return (
+        "Edits per minute during the previous hour. "
+        f"Most recent complete minute: {full[-1]['edits']:,} edits."
+    )
 
 
 def assert_chart_label_matches_data(page: Page) -> None:
@@ -242,9 +245,9 @@ def test_old_data_says_paused(widget: Widget) -> None:
     page.goto(f"{WIDGET_URL}?lang=all&theme=light")
 
     expect(page.locator("#status-text")).to_have_text(
-        re.compile(r"^Paused · last event 5 min ago\."), timeout=10_000
+        re.compile(r"^Paused · latest event 5 min ago\."), timeout=10_000
     )
-    expect(page.locator("#status-live")).to_have_text("Paused. Last event 5 min ago.")
+    expect(page.locator("#status-live")).to_have_text("Paused. Latest event 5 min ago.")
     assert page.locator("#dot").get_attribute("class") == "dot paused"
     expect(page.locator("#metrics")).to_have_class(re.compile(r"\bheld\b"))  # last numbers, marked
 
@@ -264,7 +267,7 @@ def test_the_s3_fallback_copy_says_paused_at_once(widget: Widget) -> None:
     page.goto(f"{WIDGET_URL}?lang=all&theme=light")
 
     expect(page.locator("#status-text")).to_have_text(
-        re.compile(r"^Paused · last event 2\ds ago\."), timeout=10_000
+        re.compile(r"^Paused · latest event 2\ds ago\."), timeout=10_000
     )
     assert page.locator("#dot").get_attribute("class") == "dot paused"
 
@@ -348,7 +351,7 @@ def test_an_api_that_never_answers_says_so(widget: Widget) -> None:
     page.goto(f"{WIDGET_URL}?lang=all&theme=light")
 
     expect(page.locator("#status-text")).to_have_text(
-        "Can't reach the data API yet. Retrying.", timeout=10_000
+        "Unable to reach the data API. Retrying automatically.", timeout=10_000
     )
     assert page.locator("#dot").get_attribute("class") == "dot down"
     expect(page.locator("#m-edits")).to_have_text("n/a")
