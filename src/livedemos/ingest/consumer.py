@@ -102,6 +102,7 @@ class Consumer:
         finally:
             recorder.cancel()
             await asyncio.gather(recorder, return_exceptions=True)
+            await self._record_reconnects()  # one last, bounded try before exiting
 
     async def _load_state(self, stop: asyncio.Event) -> None:
         backoff = Backoff(self._s.backoff_initial_s, self._s.backoff_max_s)
@@ -292,8 +293,10 @@ class Consumer:
             self._reconnects.clear()
         rows, token = self._reconnects_sealed
         try:
+            # Giving up on the reply doesn't stop the insert on the server. The same query id
+            # makes a retry wait its turn instead of running alongside it.
             await asyncio.wait_for(
-                self._ch.insert("ingest_reconnects", rows, dedup_token=token),
+                self._ch.insert("ingest_reconnects", rows, dedup_token=token, query_id=token),
                 timeout=_RECORD_RECONNECTS_TIMEOUT_S,
             )
         except (ClickHouseError, TimeoutError) as exc:

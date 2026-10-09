@@ -3,7 +3,7 @@
     migrator  changes the schema; only the one-shot `migrate` job runs as it. Also
               rewrites the rollup (reconcile repairs, rebuilds from the archive)
     ingest    reads what resume needs; writes edits, gaps and reconnects; nothing else
-    api       read-only, with tight per-query limits (it faces the public internet)
+    api       reads only the tables it serves, with tight per-query limits (it's public)
     archiver  reads raw rows and writes them to S3 as Parquet; records the daily AWS cost
   Passwords come from environment variables, never from this file.
 -->
@@ -76,10 +76,10 @@
             <quota>default</quota>
             <networks><ip>::/0</ip></networks>
             <grants>
-                <!-- Edits, and the per-minute tables their views fill from the same insert. -->
+                <!-- Edits. The per-minute tables fill through their views; ingest can't
+                     write them directly, so it can't invent a count without raw rows. -->
                 <query>GRANT SELECT, INSERT ON demos.wiki_edits</query>
-                <query>GRANT SELECT, INSERT ON demos.wiki_edits_per_minute</query>
-                <query>GRANT INSERT ON demos.wiki_pages_per_minute</query>
+                <query>GRANT SELECT ON demos.wiki_edits_per_minute</query>
                 <query>GRANT INSERT ON demos.ingest_gaps</query>
                 <query>GRANT INSERT ON demos.ingest_reconnects</query>
                 <!-- On start, ingest waits for its database's inserts still running
@@ -93,7 +93,14 @@
             <quota>default</quota>
             <networks><ip>::/0</ip></networks>
             <grants>
-                <query>GRANT SELECT ON demos.*</query>
+                <!-- What the API serves, and nothing else (no ledger, no archive bookkeeping). -->
+                <query>GRANT SELECT ON demos.wiki_edits</query>
+                <query>GRANT SELECT ON demos.wiki_edits_per_minute</query>
+                <query>GRANT SELECT ON demos.wiki_pages_per_minute</query>
+                <query>GRANT SELECT ON demos.ingest_gaps</query>
+                <query>GRANT SELECT ON demos.ingest_reconnects</query>
+                <query>GRANT SELECT ON demos.freshness_samples</query>
+                <query>GRANT SELECT ON demos.aws_cost</query>
             </grants>
         </api>
         <archiver>

@@ -26,6 +26,12 @@ RESPONSE = {
     ],
 }
 NOW = datetime(2026, 10, 8, 22, 30, tzinfo=UTC)
+CLOCK = {"now": NOW}  # what the fetcher's clock says: the time each test asks at
+
+
+def at(when: datetime) -> datetime:
+    CLOCK["now"] = when
+    return when
 
 
 class StubDatabase:
@@ -91,6 +97,7 @@ def fetcher(db: StubDatabase, s3: StubS3, ce: StubCostExplorer) -> cost.CostFetc
         claims="s3://archive-bucket/ops/cost",
         ce_factory=lambda: ce,
         s3_factory=lambda: s3,
+        clock=lambda: CLOCK["now"],
     )
 
 
@@ -124,22 +131,24 @@ def test_parse_keeps_the_amount_and_currency_exactly_as_aws_sent_them() -> None:
 async def test_asks_once_a_day_and_records_the_answer_in_both_places() -> None:
     db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
     f = fetcher(db, s3, ce)
-    assert await f.refresh_if_due(NOW) is True
-    assert await f.refresh_if_due(NOW + timedelta(hours=1)) is False
+    assert await f.refresh_if_due(at(NOW)) is True
+    assert await f.refresh_if_due(at(NOW + timedelta(hours=1))) is False
     assert len(ce.calls) == 1
     assert (db.rows[0]["amount"], db.rows[0]["currency"]) == ("0.1977203052", "USD")
     claim = json.loads(s3.objects["ops/cost/2026-10-08.json"])
     assert claim["result"]["amount"] == "0.1977203052"
     # A new UTC day asks again.
-    assert await f.refresh_if_due(NOW + timedelta(hours=2)) is True
+    assert await f.refresh_if_due(at(NOW + timedelta(hours=2))) is True
     assert len(ce.calls) == 2
 
 
 async def test_a_second_host_the_same_day_copies_the_answer_instead_of_asking() -> None:
     s3, ce = StubS3(), StubCostExplorer()
     first, replacement = StubDatabase(), StubDatabase()  # each host has its own ClickHouse
-    assert await fetcher(first, s3, ce).refresh_if_due(NOW) is True
-    assert await fetcher(replacement, s3, ce).refresh_if_due(NOW + timedelta(minutes=30)) is False
+    assert await fetcher(first, s3, ce).refresh_if_due(at(NOW)) is True
+    assert (
+        await fetcher(replacement, s3, ce).refresh_if_due(at(NOW + timedelta(minutes=30))) is False
+    )
     assert len(ce.calls) == 1
     assert replacement.rows[0]["amount"] == "0.1977203052"
 
@@ -150,8 +159,8 @@ async def test_a_claim_without_an_answer_means_no_second_request() -> None:
     s3.objects["ops/cost/2026-10-08.json"] = json.dumps({"claimed_at": "x"}).encode()
     db = StubDatabase()
     f = fetcher(db, s3, ce)
-    assert await f.refresh_if_due(NOW) is False
-    assert await f.refresh_if_due(NOW + timedelta(minutes=5)) is False
+    assert await f.refresh_if_due(at(NOW)) is False
+    assert await f.refresh_if_due(at(NOW + timedelta(minutes=5))) is False
     assert ce.calls == []
     assert db.rows == []
 
@@ -159,9 +168,9 @@ async def test_a_claim_without_an_answer_means_no_second_request() -> None:
 async def test_a_failed_request_is_recorded_and_not_retried_the_same_day() -> None:
     db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer(fail=True)
     f = fetcher(db, s3, ce)
-    assert await f.refresh_if_due(NOW) is True
-    assert await f.refresh_if_due(NOW + timedelta(minutes=5)) is False
-    assert await fetcher(StubDatabase(), s3, ce).refresh_if_due(NOW) is False  # after a restart
+    assert await f.refresh_if_due(at(NOW)) is True
+    assert await f.refresh_if_due(at(NOW + timedelta(minutes=5))) is False
+    assert await fetcher(StubDatabase(), s3, ce).refresh_if_due(at(NOW)) is False  # after a restart
     assert len(ce.calls) == 1
     assert db.rows[0]["ok"] is False
     assert "AccessDenied" in db.rows[0]["error"]
@@ -171,17 +180,59 @@ async def test_a_lost_insert_is_filled_from_the_claim_not_a_second_request() -> 
     db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
     db.fail_inserts = 1
     f = fetcher(db, s3, ce)
-    assert await f.refresh_if_due(NOW) is True
+    assert await f.refresh_if_due(at(NOW)) is True
     assert db.rows == []
-    assert await f.refresh_if_due(NOW + timedelta(minutes=5)) is False
+    assert await f.refresh_if_due(at(NOW + timedelta(minutes=5))) is False
     assert len(ce.calls) == 1
     assert db.rows[0]["amount"] == "0.1977203052"
+
+
+async def test_an_answer_that_couldnt_be_saved_anywhere_is_kept_and_saved_later() -> None:
+    class FlakyS3(StubS3):
+        fail_result = True
+
+        def put_object(self, *, Bucket: str, Key: str, Body: bytes, **kwargs: Any) -> None:
+            if "IfNoneMatch" not in kwargs and self.fail_result:
+                self.fail_result = False
+                raise RuntimeError("SlowDown")
+            super().put_object(Bucket=Bucket, Key=Key, Body=Body, **kwargs)
+
+    db, s3, ce = StubDatabase(), FlakyS3(), StubCostExplorer()
+    db.fail_inserts = 1
+    f = fetcher(db, s3, ce)
+    assert await f.refresh_if_due(at(NOW)) is True
+    assert db.rows == []
+    assert "result" not in json.loads(s3.objects["ops/cost/2026-10-08.json"])
+    assert await f.refresh_if_due(at(NOW + timedelta(minutes=5))) is False
+    assert len(ce.calls) == 1
+    assert db.rows[0]["amount"] == "0.1977203052"
+    # A replacement host later today finds the answer in the claim.
+    assert json.loads(s3.objects["ops/cost/2026-10-08.json"])["result"]["currency"] == "USD"
+
+
+async def test_no_request_when_midnight_passes_while_claiming() -> None:
+    class SlowS3(StubS3):
+        def put_object(self, **kwargs: Any) -> None:
+            super().put_object(**kwargs)
+            CLOCK["now"] = datetime(2026, 10, 9, 0, 0, 1, tzinfo=UTC)  # the claim took a while
+
+    db, ce = StubDatabase(), StubCostExplorer()
+    f = cost.CostFetcher(
+        db,  # type: ignore[arg-type]
+        tag="project=livedemos",
+        claims="s3://archive-bucket/ops/cost",
+        ce_factory=lambda: ce,
+        s3_factory=SlowS3,
+        clock=lambda: CLOCK["now"],
+    )
+    assert await f.refresh_if_due(at(datetime(2026, 10, 8, 23, 59, 59, tzinfo=UTC))) is False
+    assert ce.calls == []
 
 
 async def test_no_request_while_clickhouse_cant_say_whether_today_was_done() -> None:
     db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
     db.fail_query = True
-    assert await fetcher(db, s3, ce).refresh_if_due(NOW) is False
+    assert await fetcher(db, s3, ce).refresh_if_due(at(NOW)) is False
     assert ce.calls == []
     assert s3.objects == {}
 
@@ -198,8 +249,9 @@ async def test_no_request_when_the_claim_cant_be_written() -> None:
         claims="s3://archive-bucket/ops/cost",
         ce_factory=lambda: ce,
         s3_factory=BrokenS3,
+        clock=lambda: CLOCK["now"],
     )
-    assert await f.refresh_if_due(NOW) is False
+    assert await f.refresh_if_due(at(NOW)) is False
     assert ce.calls == []
 
 

@@ -233,6 +233,33 @@ async def measure(ch: ClickHouse, case: Case, *, runs: int) -> Result:
     )
 
 
+async def ops_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
+    """The whole Ops payload, its queries at once, as the API builds it."""
+    service = ops.OpsService(
+        WithReaderLimits(ch), ttl_s=60, threshold_s=60, target=0.99, days=30, error_cooldown_s=5
+    )
+    timings = []
+    for _ in range(runs):
+        started = time.perf_counter()
+        await service.build()
+        timings.append((time.perf_counter() - started) * 1000)
+    return statistics.median(timings), _p95(timings)
+
+
+async def index_on_full_table(ch: ClickHouse) -> float:
+    """Seconds for migration 0005's index on a table already holding the week, as on deploy."""
+    await ch.execute("ALTER TABLE wiki_edits DROP INDEX IF EXISTS ingested_at_minmax")
+    started = time.perf_counter()
+    await ch.execute(
+        "ALTER TABLE wiki_edits ADD INDEX ingested_at_minmax ingested_at TYPE minmax GRANULARITY 1"
+    )
+    await ch.execute(
+        "ALTER TABLE wiki_edits MATERIALIZE INDEX ingested_at_minmax SETTINGS mutations_sync = 1",
+        settings={"max_execution_time": "600"},
+    )
+    return time.perf_counter() - started
+
+
 async def snapshot_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
     snapshotter = Snapshotter(WithReaderLimits(ch), langs=LANGS, interval_s=1, stale_after_s=60)
     timings = []
@@ -315,6 +342,10 @@ async def run(settings: ClickHouseSettings, *, days: int, rate: int, runs: int) 
 
         p50, p95 = await snapshot_build(ch, runs=runs)
         print(f"\nwhole snapshot build (5 queries at once): p50 {p50:.0f} ms, p95 {p95:.0f} ms")
+        p50, p95 = await ops_build(ch, runs=runs)
+        print(f"whole Ops build (6 queries at once, then 1): p50 {p50:.0f} ms, p95 {p95:.0f} ms")
+        took = await index_on_full_table(ch)
+        print(f"migration 0005's ingested_at index on the full table: {took:.1f} s")
         rows_per_s = await insert_throughput(ch, batch_rows=5_000, batches=40)
         print(f"insert throughput, 5,000-row JSON batches via the view: {rows_per_s:,.0f} rows/s")
 

@@ -449,6 +449,13 @@ async def test_reconcile_finds_and_rebuilds_a_rollup_that_drifted(ch: ClickHouse
         ),
         ("ingest", "CLICKHOUSE_INGEST_PASSWORD", "ALTER TABLE demos.wiki_edits DROP COLUMN title"),
         ("ingest", "CLICKHOUSE_INGEST_PASSWORD", "DROP TABLE demos.wiki_edits"),
+        # Counts come only from raw rows, through the views.
+        (
+            "ingest",
+            "CLICKHOUSE_INGEST_PASSWORD",
+            "INSERT INTO demos.wiki_edits_per_minute (lang, edits) VALUES ('en', 1000)",
+        ),
+        ("api", "CLICKHOUSE_API_PASSWORD", "SELECT count() FROM demos.schema_migrations"),
         # The Ops tab's numbers come from tables ingest can't write.
         (
             "ingest",

@@ -208,6 +208,7 @@ async def test_reconnects_are_retried_unchanged_so_a_lost_reply_cant_double_them
         ("ingest_reconnects", 1),  # then the new one, under its own token
     ]
     assert db.inserts[0][1] == db.inserts[1][1] != db.inserts[2][1]
+    assert db.inserts[0][2] == db.inserts[0][1]  # query id too, so a retry can't overlap
     assert not consumer._reconnects
     assert consumer._reconnects_sealed is None
 
@@ -234,3 +235,16 @@ async def test_committing_a_batch_never_waits_for_reconnects() -> None:
     batch.add(edit, sse_id="sse-1", ingest_seq=1)
     await consumer._flush(batch)
     assert [table for table, *_ in db.inserts] == ["wiki_edits"]
+
+
+async def test_reconnects_are_flushed_once_more_on_shutdown() -> None:
+    db = StubDatabase()
+    consumer = Consumer(SETTINGS, db)
+
+    async def no_state(stop: asyncio.Event) -> None:
+        consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "eof"})
+        stop.set()
+
+    consumer._load_state = no_state  # type: ignore[method-assign]
+    await consumer.run(asyncio.Event())
+    assert [table for table, *_ in db.inserts] == ["ingest_reconnects"]

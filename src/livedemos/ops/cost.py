@@ -10,6 +10,7 @@ fetcher claims the day in the archive bucket with a conditional write that only 
 can win: `<claims>/YYYY-MM-DD.json`. The winner asks, then writes the answer into the same
 object. Everyone else, and a new host later that day, copies the answer from there. A claim
 with no answer (the winner died mid-way) means no new number that day, never a second call.
+An answer that couldn't be saved yet is kept in memory and saved on the next runs.
 
 The host's role may call `ce:GetCostAndUsage` and nothing else in Cost Explorer, and may
 read and write only the claims prefix (infra/live/host.tf). The filter is the `project` tag
@@ -22,6 +23,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -74,6 +76,16 @@ def _error_code(exc: Exception) -> str:
     return ""
 
 
+@dataclass(slots=True)
+class _Unsaved:
+    """An answer Cost Explorer gave that isn't in both places yet."""
+
+    key: str
+    body: dict[str, Any]  # the claim, with the answer in it
+    published: bool = False  # in the claim object, for other hosts
+    recorded: bool = False  # in this host's ClickHouse, for the API
+
+
 class CostFetcher:
     def __init__(
         self,
@@ -84,6 +96,7 @@ class CostFetcher:
         ce_factory: Callable[[], Any],
         s3_factory: Callable[[], Any],
         host: str = "",
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ):
         key, sep, value = tag.partition("=")
         if not (key and sep and value):
@@ -94,14 +107,18 @@ class CostFetcher:
         self._ce_factory = ce_factory
         self._s3_factory = s3_factory
         self._host = host
+        self._clock = clock
         self._done_on: date | None = None  # today is settled: recorded, or nothing to record
+        self._unsaved: _Unsaved | None = None
 
     async def refresh_if_due(self, now: datetime) -> bool:
         """Settle today's cost. True if this call asked Cost Explorer. Never raises."""
         today = now.astimezone(UTC).date()
-        if self._done_on == today:
-            return False
         try:
+            if self._unsaved is not None:
+                await self._save()
+            if self._done_on == today:
+                return False
             return await self._refresh(now.astimezone(UTC), today)
         except Exception:  # a broken Ops number must never stop the archive
             log.exception("cost refresh failed")
@@ -136,6 +153,11 @@ class CostFetcher:
             await self._copy_answer(s3, key, today)
             return False
 
+        # The claim is for `today`. If midnight passed while claiming, asking now would land
+        # in tomorrow's CloudTrail day, which gets its own call: leave this claim unanswered.
+        if self._clock().astimezone(UTC).date() != today:
+            log.warning("the day ended while claiming; not asking", extra={"day": str(today)})
+            return False
         row = self._row(now, today)
         try:
             ce = await asyncio.to_thread(self._ce_factory)
@@ -145,18 +167,32 @@ class CostFetcher:
             log.error("cost explorer request failed", extra={"error": repr(exc)[:300]})
             row["ok"], row["error"] = False, repr(exc)[:300]
         self._done_on = today  # asked: whatever happens next, not again today
-        try:
-            await asyncio.to_thread(
-                s3.put_object,
-                Bucket=self._bucket,
-                Key=key,
-                Body=json.dumps({**claim, "result": row}).encode(),
-                ContentType="application/json",
-            )
-        except Exception:
-            log.exception("saving the cost to the claim failed")
-        await self._record(row)
+        self._unsaved = _Unsaved(key=key, body={**claim, "result": row})
+        await self._save()
         return True
+
+    async def _save(self) -> None:
+        """Put the answer in the claim and in ClickHouse; whatever fails is retried later."""
+        unsaved = self._unsaved
+        if unsaved is None:
+            return
+        if not unsaved.published:
+            try:
+                s3 = await asyncio.to_thread(self._s3_factory)
+                await asyncio.to_thread(
+                    s3.put_object,
+                    Bucket=self._bucket,
+                    Key=unsaved.key,
+                    Body=json.dumps(unsaved.body).encode(),
+                    ContentType="application/json",
+                )
+                unsaved.published = True
+            except Exception:
+                log.exception("saving the cost to the claim failed; will retry")
+        if not unsaved.recorded:
+            unsaved.recorded = await self._record(unsaved.body["result"])
+        if unsaved.published and unsaved.recorded:
+            self._unsaved = None
 
     async def _copy_answer(self, s3: Any, key: str, today: date) -> None:
         obj = await asyncio.to_thread(s3.get_object, Bucket=self._bucket, Key=key)
@@ -166,18 +202,17 @@ class CostFetcher:
             # Claimed and not answered: in progress elsewhere, or its caller died. Look
             # again next run; there will be no second request either way.
             return
-        await self._record(result)
-        self._done_on = today
+        if await self._record(result):  # if not, the next run copies it again
+            self._done_on = today
 
-    async def _record(self, row: dict[str, Any]) -> None:
+    async def _record(self, row: dict[str, Any]) -> bool:
         try:
             await self._ch.insert("aws_cost", [row])
         except ClickHouseError as exc:
-            # Today's claim holds the answer: the next run copies it from there.
-            self._done_on = None
             log.error("saving the cost failed", extra={"error": str(exc)})
-        else:
-            log.info("cost recorded", extra={"ok": row["ok"], "amount": row["amount"]})
+            return False
+        log.info("cost recorded", extra={"ok": row["ok"], "amount": row["amount"]})
+        return True
 
     @staticmethod
     def _row(now: datetime, today: date) -> dict[str, Any]:

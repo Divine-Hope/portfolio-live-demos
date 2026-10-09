@@ -90,6 +90,11 @@ Same data and limits, ClickHouse 26.8, plus 30 days of per-minute freshness samp
 | ops: bookmark | 5.7 | 34.4 | 4,945 | 8.3 MB |
 | ops: freshness, 30 days | 5.8 | 14.3 | 43,200 | 9.6 MB |
 
+The whole Ops payload, its six queries at once and then the freshness count, as the API
+builds it: p50 15 ms, p95 25 ms (rerun on 2026-10-09; the single queries came in a little
+faster that time). Migration 0005's `ingested_at` index, added and materialized on a table
+already holding the 6.65 million rows, as a deploy would: 1.1 s.
+
 The lag query filters on `ingested_at`, which isn't in the sort key; the minmax index from
 migration 0005 makes it read the last hour's rows, not the week's. The benchmark writes
 rows in time order, the best case for that index. A replay after an outage writes old
