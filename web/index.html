@@ -90,6 +90,12 @@
   let observed = null;
   window.addEventListener("message", (event) => {
     if (event.source !== frame.contentWindow || event.origin !== location.origin) return;
+    // The widget says how tall it is, so the frame fits it at any screen width.
+    if (event.data?.type === "livedemos:height") {
+      const height = Number(event.data.height);
+      if (Number.isFinite(height) && height >= 200 && height <= 3000) frame.style.height = `${height}px`;
+      return;
+    }
     if (event.data?.type !== "livedemos:state") return;
     observed = { ...event.data, receivedAt: Date.now() };
     lang = event.data.lang;

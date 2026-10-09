@@ -143,7 +143,9 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 - Freshness is measured against the server's clock: the response's `Date` header plus `Age`, minus the payload's `as_of`, then counted on locally. A cached or fallback copy shows its real age. No reliance on the viewer's clock.
 - Article links are built in the widget from an allowlisted language and the title, never taken from the payload. The `?api=` override only works on localhost.
 - Minutes with no data render as an empty slot, not a zero.
-- Definitions sit behind keyboard-accessible info buttons.
+- Definitions sit behind one keyboard-accessible "What these numbers mean" button.
+- Phone first: the numbers stay side by side and the pills on one row down to 320 px, and every control is at least 44 px tall. Each article row is one link.
+- It reports its height to the host page with `postMessage` (`livedemos:height`), so a host can size the iframe to fit at any width instead of guessing.
 - The article list updates in place, keyed by article. Keyboard focus and a screen reader's place in the list survive every poll.
 - Screen readers hear status changes (live, paused, unreachable), not the age ticking every second.
 
