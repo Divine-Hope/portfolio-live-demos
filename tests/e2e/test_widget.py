@@ -31,6 +31,8 @@ ARTICLE_URL = re.compile(r"^https://(en|pt|de)\.wikipedia\.org/wiki/\S+$")
 LIVE = re.compile(r"^Live · last event \d+s ago$")
 POLL_S = 2
 FONTS = re.compile(r"^https://fonts\.(googleapis|gstatic)\.com/")
+# 44 px, less half a pixel: Firefox lays out on sub-pixels (43.99997 is 44 on screen).
+MIN_TAP = 43.5
 FOCUSED_KEY = "document.activeElement?.closest('#list li')?.dataset.key ?? null"
 
 
@@ -113,23 +115,27 @@ def test_shows_live_numbers(widget: Widget) -> None:
     assert widget.errors == []
 
 
-@pytest.mark.parametrize("width", [320, 768, 1280])
+@pytest.mark.parametrize("width", [320, 375, 768, 1280])
 def test_fits_phone_tablet_and_desktop(widget: Widget, width: int) -> None:
     page = widget.page
     page.set_viewport_size({"width": width, "height": 900})
     widget.open()
 
     assert page.evaluate("document.documentElement.scrollWidth") <= width, "sideways scroll"
+    tops = set()
     for pill in page.locator(".pill").all():
         expect(pill).to_be_in_viewport()
         box = pill.bounding_box()
         assert box is not None
-        assert box["height"] >= 24, "tap target too small"
+        assert box["height"] >= MIN_TAP, "tap target too small"
+        tops.add(round(box["y"]))
+    assert len(tops) == 1, "the language pills should sit on one row"
     lefts = [card.bounding_box()["x"] for card in page.locator(".metric").all()]  # type: ignore[index]
-    if width < 480:
-        assert len(set(lefts)) == 1, "metrics should stack on a phone"
-    else:
-        assert len(set(lefts)) == 3, "metrics should sit side by side"
+    assert len(set(lefts)) == 3, "the three numbers should sit side by side at every width"
+    for link in page.locator("#list a").all():
+        box = link.bounding_box()
+        assert box is not None
+        assert box["height"] >= MIN_TAP, "article row too small to tap"
     assert widget.errors == []
 
 
@@ -149,13 +155,13 @@ def test_pills_and_definitions_work_from_the_keyboard(widget: Widget) -> None:
 
     for _ in range(3):
         page.keyboard.press("Tab")
-    info = page.get_by_role("button", name="What counts as an edit")
+    info = page.get_by_role("button", name="What these numbers mean")
     expect(info).to_be_focused()
     page.keyboard.press("Enter")
     expect(info).to_have_attribute("aria-expanded", "true")
-    expect(page.locator("#def-edits")).to_be_visible()
+    expect(page.locator("#defs")).to_be_visible()
     page.keyboard.press("Enter")
-    expect(page.locator("#def-edits")).to_be_hidden()
+    expect(page.locator("#defs")).to_be_hidden()
     assert widget.errors == []
 
 
@@ -240,6 +246,7 @@ def test_old_data_says_paused(widget: Widget) -> None:
     )
     expect(page.locator("#status-live")).to_have_text("Paused. Last event 5 min ago.")
     assert page.locator("#dot").get_attribute("class") == "dot paused"
+    expect(page.locator("#metrics")).to_have_class(re.compile(r"\bheld\b"))  # last numbers, marked
 
 
 def test_the_s3_fallback_copy_says_paused_at_once(widget: Widget) -> None:
@@ -274,7 +281,7 @@ def test_live_dot_respects_reduced_motion(widget: Widget, motion: str, animation
 def test_no_accessibility_violations(widget: Widget, theme: str) -> None:
     page = widget.page
     widget.open(f"lang=all&theme={theme}")
-    page.get_by_role("button", name="What counts as an edit").click()  # include an open definition
+    page.get_by_role("button", name="What these numbers mean").click()  # include the definitions
     tags = ["wcag2a", "wcag2aa", "wcag21aa", "best-practice"]
     results = Axe().run(page, options={"runOnly": {"type": "tag", "values": tags}})
     assert results.violations_count == 0, results.generate_report()
@@ -333,3 +340,70 @@ def test_the_host_stops_saying_live_when_the_widget_goes_quiet(widget: Widget) -
     page.locator("#widget").evaluate("frame => { frame.src = 'about:blank'; }")
 
     expect(fresh).to_have_text(re.compile(r"^Paused · "), timeout=15_000)
+
+
+def test_an_api_that_never_answers_says_so(widget: Widget) -> None:
+    page = widget.page
+    page.route(LIVE_JSON, lambda route: route.fulfill(status=503, body="down"))
+    page.goto(f"{WIDGET_URL}?lang=all&theme=light")
+
+    expect(page.locator("#status-text")).to_have_text(
+        "Can't reach the data API yet. Retrying.", timeout=10_000
+    )
+    assert page.locator("#dot").get_attribute("class") == "dot down"
+    expect(page.locator("#m-edits")).to_have_text("n/a")
+
+
+@pytest.mark.parametrize("width", [375, 1280])
+def test_the_host_frame_fits_the_widget(widget: Widget, width: int) -> None:
+    """The widget reports its height; the host sizes the iframe to it, so nothing is cut off."""
+    page = widget.page
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(HOST_URL)
+    frame = page.frame_locator("#widget")
+    expect(frame.locator("#status-text")).to_have_text(LIVE, timeout=30_000)
+
+    def gap() -> float:
+        inner: float = frame.locator("html").evaluate("el => el.getBoundingClientRect().height")
+        outer: float = page.locator("#widget").evaluate("el => el.getBoundingClientRect().height")
+        return abs(inner - outer)
+
+    def settles() -> None:
+        for _ in range(10):
+            if gap() <= 1:
+                return
+            page.wait_for_timeout(300)
+        pytest.fail("the iframe doesn't match the widget's height")
+
+    settles()
+    # It keeps fitting when the content changes height, not only on first load.
+    frame.get_by_role("button", name="What these numbers mean").click()
+    settles()
+    frame.get_by_role("button", name="What these numbers mean").click()
+    settles()
+
+    # Only the widget's own frame can resize it, and only to a sane height.
+    before = page.locator("#widget").evaluate("el => el.style.height")
+    page.evaluate("window.postMessage({type: 'livedemos:height', height: 250}, '*')")
+    frame.locator("html").evaluate(
+        "() => ['x', 50, 1e6, null].forEach((height) =>"
+        " parent.postMessage({type: 'livedemos:height', height}, '*'))"
+    )
+    page.wait_for_timeout(300)
+    assert page.locator("#widget").evaluate("el => el.style.height") == before
+
+
+def test_the_chart_fits_a_320_px_phone_inside_the_host(widget: Widget) -> None:
+    page = widget.page
+    page.set_viewport_size({"width": 320, "height": 800})
+    page.goto(HOST_URL)
+    frame = page.frame_locator("#widget")
+    expect(frame.locator("#status-text")).to_have_text(LIVE, timeout=30_000)
+    card = frame.locator(".chart-card").bounding_box()
+    bars = frame.locator("#bars .bar").evaluate_all(
+        "bars => bars.map(b => b.getBoundingClientRect().right)"
+    )
+    assert card is not None
+    assert bars
+    assert max(bars) <= card["x"] + card["width"], "chart bars spill out of the card"
+    assert page.evaluate("document.documentElement.scrollWidth") <= 320, "sideways scroll"

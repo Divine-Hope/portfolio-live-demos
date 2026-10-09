@@ -40,14 +40,12 @@
     });
   });
 
-  // Definitions: visible on demand, keyboard friendly ------------------------------
-  document.querySelectorAll(".info").forEach((button) => {
-    button.addEventListener("click", () => {
-      const target = $(button.getAttribute("aria-controls"));
-      const open = button.getAttribute("aria-expanded") === "true";
-      button.setAttribute("aria-expanded", String(!open));
-      target.hidden = open;
-    });
+  // Definitions: one disclosure for all of them, keyboard friendly -------------------
+  $("defs-toggle").addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    const open = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!open));
+    $("defs").hidden = open;
   });
 
   // The host page can switch the theme without reloading us.
@@ -209,18 +207,22 @@
     li.dataset.key = key;
     const left = document.createElement("span");
     left.className = "article";
+    // The whole row is one link: title, language and count. An easy target on a phone.
     const link = document.createElement("a");
     link.href = articleUrl(item.lang, item.title);
     link.target = "_blank";
     link.rel = "noopener";
-    link.textContent = `${item.title} ↗`;
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = `${item.title} ↗`;
     const tag = document.createElement("span");
     tag.className = "lang-tag";
     tag.textContent = item.lang;
-    left.append(link, tag);
+    left.append(name, tag);
     const count = document.createElement("span");
     count.className = "count";
-    li.append(left, count);
+    link.append(left, count);
+    li.append(link);
     return li;
   }
 
@@ -266,8 +268,10 @@
       lastKind = kind;
       notifyParent(); // the host hears about every change, not only successful polls
     }
+    // Paused numbers stay on screen, marked as the last ones we had.
+    $("metrics").classList.toggle("held", kind === "paused");
     if (kind === "unreachable") {
-      dot.className = "dot";
+      dot.className = "dot down";
       text.textContent = "Can't reach the data API yet. Retrying.";
       announce("unreachable", text.textContent);
     } else if (kind === "waiting") {
@@ -309,6 +313,19 @@
       "*", // only freshness and the chosen language; nothing private
     );
   }
+
+  // Tell the host page how tall the widget is, so it can size the iframe to fit instead
+  // of guessing a height for every screen width.
+  let reportedHeight = 0;
+  function reportHeight() {
+    if (window.parent === window) return;
+    const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    if (height === reportedHeight) return;
+    reportedHeight = height;
+    window.parent.postMessage({ type: "livedemos:height", dataset: "wikipedia", height }, "*");
+  }
+  if ("ResizeObserver" in window) new ResizeObserver(reportHeight).observe(document.documentElement);
+  else window.addEventListener("resize", reportHeight);
 
   setInterval(renderStatus, 1000); // the age keeps counting between polls
   render();
