@@ -185,6 +185,7 @@ def cases(newest_ms: int, last_seq: int) -> list[Case]:
         ),
         Case("ops: ingest lag, last hour", ops.LAG, {"window_s": ops.LAG_WINDOW_S}),
         Case("ops: bookmark", ops.BOOKMARK, {}),
+        Case("ops: newest event and last stored", ops.HEAD, {}),
         Case(
             "ops: freshness, 30 days",
             ops.FRESHNESS,

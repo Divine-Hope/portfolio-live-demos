@@ -77,6 +77,8 @@ def test_counts_outside_the_window_cant_push_the_ratio_over_one() -> None:
     assert report.ratio == 1.0
 
 
-def test_the_error_budget_is_one_percent_of_30_days() -> None:
+def test_the_error_budget_is_what_the_target_leaves_over_30_days() -> None:
     win = slo.Window(start_s=0, end_s=60)
     assert slo.summarise(win=win, sampled=1, fresh=1, target=0.99, days=30).budget_minutes == 432
+    # 99.9%, the requirement: 43 minutes a month.
+    assert slo.summarise(win=win, sampled=1, fresh=1, target=0.999, days=30).budget_minutes == 43

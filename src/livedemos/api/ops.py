@@ -2,15 +2,16 @@
 
 Every number on the tab comes from here, and every number here from ClickHouse:
 
-- when the newest event happened and when ingest last stored a row, so the page can say
-  "paused since" with a real time,
+- what ingest is doing (live, catching up, paused, or no data yet), with when the newest
+  event happened and when ingest last stored a row, so the page can say "paused since"
+  with a real time,
 - ingest lag, p50 and p95, over what ingest committed in the last hour,
 - the bookmark ingest would resume from, shortened to each stream's position,
 - stream reconnects in the last 24 hours, by reason (written by ingest),
 - the 30-day freshness SLO (ops/slo.py, from samples ClickHouse takes every minute),
 - gaps recorded in the last 30 days,
-- month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py), and whether
-  the latest daily check worked, so the page can say a figure is yesterday's.
+- month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py), and how
+  today's daily check went, so the page can say a figure is from an earlier day.
 
 The answer is built at most once a minute and shared by every viewer. CloudFront caches it
 for what's left of that minute, so no copy is more than a minute old.
@@ -22,14 +23,17 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, TypeGuard
 
 from livedemos.api.contract import (
     Bookmark,
     BookmarkPosition,
+    CostCheck,
     CostReport,
     FreshnessReport,
     GapReport,
+    IngestState,
     OpsPayload,
     iso,
 )
@@ -171,6 +175,42 @@ def _plausible_ms(value: object) -> TypeGuard[int]:
     return 946_684_800_000 <= value < 4_102_444_800_000
 
 
+def ingest_state(
+    *, now: float, newest_s: float | None, stored_s: float | None, stale_after_s: float
+) -> IngestState:
+    """What ingest is doing, judged here so every viewer of the page agrees.
+
+    - live: the newest event is recent.
+    - catching_up: the newest event is old, but rows are still being stored (replaying an
+      outage from the stream). Not paused: it's working through the backlog.
+    - paused: nothing stored recently, and the newest event is old.
+    - empty: no rows at all.
+    """
+    if newest_s is None or stored_s is None:
+        return "empty"
+    if now - newest_s <= stale_after_s:
+        return "live"
+    if now - stored_s <= stale_after_s:
+        return "catching_up"
+    return "paused"
+
+
+def cost_today(*, now: float, latest: Mapping[str, Any] | None) -> CostCheck:
+    """How today's (UTC) Cost Explorer check went, from the latest attempt on record.
+
+    - ok, failed: today's attempt is recorded, and worked or didn't.
+    - pending: nothing recorded today. Not asked yet, or asked and its answer lost (no
+      second call is made that day). Either way the figure, if any, is from an earlier day.
+    """
+    today = datetime.fromtimestamp(now, UTC).date()
+    if latest is None:
+        return {"today": "pending", "last_attempt_at": None}
+    at = int(latest["fetched_ms"]) / 1000
+    if datetime.fromtimestamp(at, UTC).date() != today:
+        return {"today": "pending", "last_attempt_at": iso(at)}
+    return {"today": "ok" if bool(latest["ok"]) else "failed", "last_attempt_at": iso(at)}
+
+
 def assemble(
     *,
     now: float,
@@ -247,11 +287,16 @@ def assemble(
         }
 
     has_rows = bool(head and int(head["n"]))
+    newest_s = int(head["newest_ms"]) / 1000 if head and has_rows else None
+    stored_s = int(head["stored_ms"]) / 1000 if head and has_rows else None
     return {
         "generated_at": iso(now),
         "ingest": {
-            "newest_event_at": iso(int(head["newest_ms"]) / 1000) if head and has_rows else None,
-            "last_stored_at": iso(int(head["stored_ms"]) / 1000) if head and has_rows else None,
+            "state": ingest_state(
+                now=now, newest_s=newest_s, stored_s=stored_s, stale_after_s=stale_after_s
+            ),
+            "newest_event_at": None if newest_s is None else iso(newest_s),
+            "last_stored_at": None if stored_s is None else iso(stored_s),
             "stale_after_s": stale_after_s,
             "lag_ms": {
                 "p50": int(lag["p50_ms"]) if events and lag else None,
@@ -273,14 +318,7 @@ def assemble(
             "recent": gap_reports,
         },
         "cost": cost_report,
-        "cost_check": (
-            {
-                "last_attempt_at": iso(int(cost_check["fetched_ms"]) / 1000),
-                "ok": bool(cost_check["ok"]),
-            }
-            if cost_check
-            else None
-        ),
+        "cost_check": cost_today(now=now, latest=cost_check),
     }
 
 
