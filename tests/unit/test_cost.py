@@ -268,3 +268,45 @@ def test_settings_are_checked(tag: str, claims: str) -> None:
             ce_factory=object,
             s3_factory=object,
         )
+
+
+async def test_no_request_when_midnight_passes_while_the_client_is_built() -> None:
+    db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
+
+    def slow_client() -> StubCostExplorer:
+        CLOCK["now"] = datetime(2026, 10, 9, 0, 0, 1, tzinfo=UTC)  # credentials took a while
+        return ce
+
+    f = cost.CostFetcher(
+        db,  # type: ignore[arg-type]
+        tag="project=livedemos",
+        claims="s3://archive-bucket/ops/cost",
+        ce_factory=slow_client,
+        s3_factory=lambda: s3,
+        clock=lambda: CLOCK["now"],
+    )
+    assert await f.refresh_if_due(at(datetime(2026, 10, 8, 23, 59, 59, tzinfo=UTC))) is False
+    assert ce.calls == []
+
+
+async def test_an_unsaved_answer_blocks_the_next_day_until_it_is_saved() -> None:
+    class DownS3(StubS3):
+        down = True
+
+        def put_object(self, *, Bucket: str, Key: str, Body: bytes, **kwargs: Any) -> None:
+            if "IfNoneMatch" not in kwargs and self.down:
+                raise RuntimeError("ServiceUnavailable")
+            super().put_object(Bucket=Bucket, Key=Key, Body=Body, **kwargs)
+
+    db, s3, ce = StubDatabase(), DownS3(), StubCostExplorer()
+    db.fail_inserts = 10
+    f = fetcher(db, s3, ce)
+    assert await f.refresh_if_due(at(NOW)) is True
+    # Still failing after midnight: no new request, so the 8 October answer can't be replaced.
+    assert await f.refresh_if_due(at(NOW + timedelta(hours=2))) is False
+    assert len(ce.calls) == 1
+    # Storage recovers: 8 October is saved first, then 9 October is asked for.
+    s3.down, db.fail_inserts = False, 0
+    assert await f.refresh_if_due(at(NOW + timedelta(hours=3))) is True
+    assert [r["fetched_at"][:10] for r in db.rows] == ["2026-10-08", "2026-10-09"]
+    assert "result" in json.loads(s3.objects["ops/cost/2026-10-08.json"])

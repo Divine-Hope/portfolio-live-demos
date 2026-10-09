@@ -76,6 +76,10 @@ def _error_code(exc: Exception) -> str:
     return ""
 
 
+class _DayEnded(Exception):
+    """Midnight UTC passed between claiming a day and asking for it."""
+
+
 @dataclass(slots=True)
 class _Unsaved:
     """An answer Cost Explorer gave that isn't in both places yet."""
@@ -117,6 +121,8 @@ class CostFetcher:
         try:
             if self._unsaved is not None:
                 await self._save()
+                if self._unsaved is not None:
+                    return False  # nowhere to put another answer yet: don't ask for one
             if self._done_on == today:
                 return False
             return await self._refresh(now.astimezone(UTC), today)
@@ -153,23 +159,35 @@ class CostFetcher:
             await self._copy_answer(s3, key, today)
             return False
 
-        # The claim is for `today`. If midnight passed while claiming, asking now would land
-        # in tomorrow's CloudTrail day, which gets its own call: leave this claim unanswered.
-        if self._clock().astimezone(UTC).date() != today:
-            log.warning("the day ended while claiming; not asking", extra={"day": str(today)})
-            return False
         row = self._row(now, today)
         try:
-            ce = await asyncio.to_thread(self._ce_factory)
-            response = await asyncio.to_thread(ce.get_cost_and_usage, **request(today, *self._tag))
-            row["amount"], row["currency"], row["estimated"] = parse(response)
+            response = await asyncio.to_thread(self._ask, today)
+        except _DayEnded:
+            # Asking now would land in tomorrow's CloudTrail day, which gets its own call:
+            # leave this claim unanswered.
+            log.warning("the day ended before asking; not asking", extra={"day": str(today)})
+            return False
         except Exception as exc:  # recorded as a failed attempt; not retried today
             log.error("cost explorer request failed", extra={"error": repr(exc)[:300]})
             row["ok"], row["error"] = False, repr(exc)[:300]
+        else:
+            try:
+                row["amount"], row["currency"], row["estimated"] = parse(response)
+            except Exception as exc:
+                log.error("unexpected cost explorer answer", extra={"error": repr(exc)[:300]})
+                row["ok"], row["error"] = False, repr(exc)[:300]
         self._done_on = today  # asked: whatever happens next, not again today
         self._unsaved = _Unsaved(key=key, body={**claim, "result": row})
         await self._save()
         return True
+
+    def _ask(self, today: date) -> dict[str, Any]:
+        """Build the client, then check the day once more right before the billed request."""
+        ce = self._ce_factory()
+        if self._clock().astimezone(UTC).date() != today:
+            raise _DayEnded
+        response: dict[str, Any] = ce.get_cost_and_usage(**request(today, *self._tag))
+        return response
 
     async def _save(self) -> None:
         """Put the answer in the claim and in ClickHouse; whatever fails is retried later."""

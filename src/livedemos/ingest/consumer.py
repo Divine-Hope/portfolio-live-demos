@@ -294,7 +294,8 @@ class Consumer:
         rows, token = self._reconnects_sealed
         try:
             # Giving up on the reply doesn't stop the insert on the server. The same query id
-            # makes a retry wait its turn instead of running alongside it.
+            # makes ClickHouse refuse a retry while it still runs; the rows stay sealed for
+            # the next try.
             await asyncio.wait_for(
                 self._ch.insert("ingest_reconnects", rows, dedup_token=token, query_id=token),
                 timeout=_RECORD_RECONNECTS_TIMEOUT_S,
