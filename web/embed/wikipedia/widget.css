@@ -52,7 +52,8 @@ body { font-family: "DM Sans", system-ui, sans-serif; }
 .chart-card { display: flex; flex-direction: column; gap: 8px; }
 .row { display: flex; justify-content: space-between; gap: 8px; }
 .axis { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
-.bars { display: flex; align-items: flex-end; gap: 2px; height: 96px; }
+/* 60 bars must fit a narrow card: 1 px gaps until there's room for 2, and never spill. */
+.bars { display: flex; align-items: flex-end; gap: 1px; height: 96px; overflow: hidden; }
 .bar { flex: 1; min-width: 2px; border-radius: 2px 2px 0 0; background: var(--brand); }
 .bar.partial { background: var(--now); }
 .bar.unknown { background: transparent; border-bottom: 2px dotted var(--line); height: 100% !important; }
@@ -102,5 +103,5 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--link); outline-
   .filters-label { display: inline; }
   .pill { flex: none; padding: 0 14px; font-size: 14px; }
   .metric { padding: 12px; }
-  .bars { height: 110px; }
+  .bars { height: 110px; gap: 2px; }
 }

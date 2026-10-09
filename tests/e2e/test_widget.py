@@ -368,8 +368,42 @@ def test_the_host_frame_fits_the_widget(widget: Widget, width: int) -> None:
         outer: float = page.locator("#widget").evaluate("el => el.getBoundingClientRect().height")
         return abs(inner - outer)
 
-    for _ in range(10):
-        if gap() <= 1:
-            break
-        page.wait_for_timeout(300)
-    assert gap() <= 1, "the iframe doesn't match the widget's height"
+    def settles() -> None:
+        for _ in range(10):
+            if gap() <= 1:
+                return
+            page.wait_for_timeout(300)
+        pytest.fail("the iframe doesn't match the widget's height")
+
+    settles()
+    # It keeps fitting when the content changes height, not only on first load.
+    frame.get_by_role("button", name="What these numbers mean").click()
+    settles()
+    frame.get_by_role("button", name="What these numbers mean").click()
+    settles()
+
+    # Only the widget's own frame can resize it, and only to a sane height.
+    before = page.locator("#widget").evaluate("el => el.style.height")
+    page.evaluate("window.postMessage({type: 'livedemos:height', height: 250}, '*')")
+    frame.locator("html").evaluate(
+        "() => ['x', 50, 1e6, null].forEach((height) =>"
+        " parent.postMessage({type: 'livedemos:height', height}, '*'))"
+    )
+    page.wait_for_timeout(300)
+    assert page.locator("#widget").evaluate("el => el.style.height") == before
+
+
+def test_the_chart_fits_a_320_px_phone_inside_the_host(widget: Widget) -> None:
+    page = widget.page
+    page.set_viewport_size({"width": 320, "height": 800})
+    page.goto(HOST_URL)
+    frame = page.frame_locator("#widget")
+    expect(frame.locator("#status-text")).to_have_text(LIVE, timeout=30_000)
+    card = frame.locator(".chart-card").bounding_box()
+    bars = frame.locator("#bars .bar").evaluate_all(
+        "bars => bars.map(b => b.getBoundingClientRect().right)"
+    )
+    assert card is not None
+    assert bars
+    assert max(bars) <= card["x"] + card["width"], "chart bars spill out of the card"
+    assert page.evaluate("document.documentElement.scrollWidth") <= 320, "sideways scroll"
