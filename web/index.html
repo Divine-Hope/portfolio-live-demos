@@ -121,7 +121,7 @@
     const age = observed.last_event_age_s + (Date.now() - observed.receivedAt) / 1000;
     const live = observed.status === "live" && age <= (observed.stale_after_s ?? 60);
     dot.style.background = live ? "#15803D" : "#D97706";
-    text.textContent = `${live ? "Live" : "Paused"} · last event ${Math.round(age)}s ago`;
+    text.textContent = `${live ? "Live" : "Paused"} · latest event ${Math.round(age)}s ago`;
   }
   setInterval(renderFreshness, 1000);
 
