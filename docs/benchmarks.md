@@ -89,10 +89,12 @@ Same data and limits, ClickHouse 26.8, plus 30 days of per-minute freshness samp
 | ops: ingest lag, last hour | 5.1 | 13.6 | 60,753 | 9.0 MB |
 | ops: bookmark | 5.7 | 34.4 | 4,945 | 8.3 MB |
 | ops: freshness, 30 days | 5.8 | 14.3 | 43,200 | 9.6 MB |
+| ops: newest event and last stored (rerun 2026-10-09) | 121.5 | 151.5 | 6,652,785 | 9.2 MB |
 
-The whole Ops payload, its six queries at once and then the freshness count, as the API
-builds it: p50 15 ms, p95 25 ms (rerun on 2026-10-09; the single queries came in a little
-faster that time). Migration 0005's `ingested_at` index, added and materialized on a table
+The whole Ops payload, its queries at once and then the freshness count, as the API
+builds it: p50 15 ms, p95 25 ms; with "newest event and last stored" added on 2026-10-09,
+p50 151 ms, p95 177 ms. That query reads the whole `ingested_at` column (a week), because
+"paused since" can be days back. Once a minute, it's cheap enough not to be clever about. Migration 0005's `ingested_at` index, added and materialized on a table
 already holding the 6.65 million rows, as a deploy would: 1.1 s.
 
 The lag query filters on `ingested_at`, which isn't in the sort key; the minmax index from

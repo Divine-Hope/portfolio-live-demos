@@ -104,7 +104,14 @@ class Reconnects(TypedDict):
     by_reason: dict[str, int]
 
 
+IngestState = Literal["live", "catching_up", "paused", "empty"]
+
+
 class IngestReport(TypedDict):
+    state: IngestState  # judged by the API (api/ops.py); the page shows it, doesn't redo it
+    newest_event_at: str | None  # the newest event's own time; None with no rows
+    last_stored_at: str | None  # when ingest last stored a row (restored rows keep theirs)
+    stale_after_s: float  # the age limit `state` is judged with
     lag_ms: LagReport
     bookmark: Bookmark | None
     reconnects: Reconnects
@@ -150,9 +157,18 @@ class CostReport(TypedDict):
     source: str
 
 
+class CostCheck(TypedDict):
+    # ok / failed: today's (UTC) attempt is recorded. pending: none recorded today, so a
+    # figure in `cost`, if any, is from an earlier day. Never the error text: it can hold
+    # an account id.
+    today: Literal["ok", "failed", "pending"]
+    last_attempt_at: str | None  # the latest attempt on record, any day
+
+
 class OpsPayload(TypedDict):
     generated_at: str
     ingest: IngestReport
     freshness: FreshnessReport
     gaps: Gaps
-    cost: CostReport | None  # None until the first successful fetch
+    cost: CostReport | None  # this month's latest figure; None until there is one
+    cost_check: CostCheck

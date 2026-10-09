@@ -22,7 +22,7 @@ What the live demos must do, and how well. Each requirement has an id so tests, 
 | Id | Area | Requirement |
 |---|---|---|
 | N1 | Freshness | Edit on Wikipedia to pixels under 5 s, target. Measured and displayed. |
-| N2 | Freshness SLO | 99% of minutes over 30 days with newest-event age under 60 s, target. Shown on the Ops tab. |
+| N2 | Freshness SLO | At least 99.9% of minutes over 30 days with newest-event age under 60 s (43 minutes of error budget). More nines are better. Shown on the Ops tab. |
 | N3 | Scale | Database work doesn't grow with viewers: one snapshot per second regardless of traffic. |
 | N4 | Latency | `live.json` served from memory; "Query it" under 100 ms at p95 for the 5-minute window, target. |
 | N5 | Reliability | Unattended restarts: every long-running container has a restart policy; health checks report real liveness (ingest: the consumer loop, not just the process); a broken host is replaced by its Auto Scaling Group. Docker doesn't restart unhealthy containers on its own, so stalls are caught by alerts. |

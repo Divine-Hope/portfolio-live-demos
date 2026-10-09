@@ -87,6 +87,7 @@ def create_app(
             target=settings.slo_target,
             days=settings.slo_days,
             error_cooldown_s=settings.activity_error_cooldown_s,
+            stale_after_s=settings.stale_after_s,
         )
         log.info("api started", extra={"version": __version__, "langs": langs})
         try:

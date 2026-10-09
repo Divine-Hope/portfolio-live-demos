@@ -53,6 +53,13 @@ async def test_lag_counts_a_replay_of_old_events_stored_just_now(ch: ClickHouse)
     assert result.rows[0]["p50_ms"] > 86_400_000
 
 
+def today_so_far(fraction: float) -> datetime:
+    """A time between today's UTC midnight and now: never tomorrow, whenever this runs."""
+    now = datetime.now(UTC)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight + (now - midnight) * fraction
+
+
 async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None:
     month = datetime.now(UTC).date().replace(day=1)
     last_month = (month - timedelta(days=1)).replace(day=1)
@@ -79,7 +86,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
                 "error": "",
             },
             {
-                "fetched_at": datetime.now(UTC).isoformat(),
+                "fetched_at": today_so_far(0.5).isoformat(),
                 "ok": True,
                 "period_start": month.isoformat(),
                 "period_end": "2026-10-09",
@@ -89,7 +96,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
                 "error": "",
             },
             {
-                "fetched_at": (datetime.now(UTC) + timedelta(seconds=1)).isoformat(),
+                "fetched_at": today_so_far(0.9).isoformat(),
                 "ok": False,
                 "period_start": month.isoformat(),
                 "period_end": "2026-10-09",
@@ -111,3 +118,73 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
     # last month's total passed off as this month's.
     assert payload["cost"] is not None
     assert payload["cost"]["amount"] == "0.1977203052"
+    # The latest attempt failed: the page can say the figure is from an earlier check.
+    assert payload["cost_check"]["today"] == "failed"
+    assert payload["ingest"]["last_stored_at"] is not None
+    assert payload["ingest"]["newest_event_at"] is not None
+
+
+def service(ch: ClickHouse) -> ops.OpsService:
+    return ops.OpsService(ch, ttl_s=60, threshold_s=60, target=0.999, days=30, error_cooldown_s=5)
+
+
+def cost_row(*, at: datetime, ok: bool, start: str) -> dict[str, object]:
+    return {
+        "fetched_at": at.isoformat(),
+        "ok": ok,
+        "period_start": start,
+        "period_end": "2026-10-09",
+        "amount": "1.5" if ok else "",
+        "currency": "USD" if ok else "",
+        "estimated": ok,
+        "error": "" if ok else "AccessDenied",
+    }
+
+
+async def test_an_empty_database_reports_nothing_rather_than_zeros(ch: ClickHouse) -> None:
+    payload = await service(ch).build()
+    assert payload["ingest"]["state"] == "empty"
+    assert payload["ingest"]["newest_event_at"] is None
+    assert payload["ingest"]["lag_ms"]["p50"] is None
+    assert payload["ingest"]["bookmark"] is None
+    assert payload["cost"] is None
+    assert payload["cost_check"] == {"today": "pending", "last_attempt_at": None}
+    assert payload["freshness"]["ratio"] is None or payload["freshness"]["minutes"] == 0
+
+
+async def test_a_first_check_that_failed_gives_no_figure(ch: ClickHouse) -> None:
+    month = datetime.now(UTC).date().replace(day=1).isoformat()
+    await ch.insert("aws_cost", [cost_row(at=today_so_far(0.5), ok=False, start=month)])
+    payload = await service(ch).build()
+    assert payload["cost"] is None
+    assert payload["cost_check"]["today"] == "failed"
+
+
+async def test_last_months_figure_is_never_this_months(ch: ClickHouse) -> None:
+    month = datetime.now(UTC).date().replace(day=1)
+    last_month = (month - timedelta(days=1)).replace(day=1)
+    await ch.insert(
+        "aws_cost",
+        [
+            cost_row(
+                at=datetime.now(UTC) - timedelta(days=35), ok=True, start=last_month.isoformat()
+            )
+        ],
+    )
+    payload = await service(ch).build()
+    assert payload["cost"] is None
+    assert payload["cost_check"]["today"] == "pending"  # an old attempt says nothing of today
+
+
+async def test_restored_rows_keep_their_own_ingest_time(ch: ClickHouse) -> None:
+    # A host restored from the archive, before ingest has written anything: the rows carry
+    # the time they were first stored, and no bookmark.
+    restored = rows(5, start=datetime.now(UTC) - timedelta(days=1))
+    for row in restored:
+        row["sse_id"] = ""
+        row["ingested_at"] = row["event_time"]
+    await ch.insert("wiki_edits", restored)
+    payload = await service(ch).build()
+    assert payload["ingest"]["state"] == "paused"
+    assert payload["ingest"]["bookmark"] is None
+    assert payload["ingest"]["last_stored_at"] is not None

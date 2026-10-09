@@ -111,8 +111,8 @@ class ApiSettings(BaseSettings):
     # The Ops tab (api/ops.py): rebuilt at most this often, shared by every viewer.
     ops_cache_ttl_s: Annotated[int, Field(ge=1)] = 60
     # The freshness SLO (requirements N2): this share of minutes over this many days with
-    # the newest event younger than the threshold.
-    slo_target: Annotated[float, Field(gt=0, lt=1)] = 0.99
+    # the newest event younger than the threshold. 99.9% is the floor; more is better.
+    slo_target: Annotated[float, Field(ge=0.999, lt=1)] = 0.999
     slo_threshold_s: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60.0
     slo_days: Annotated[int, Field(ge=1, le=89)] = 30
     # Set in production: CloudFront adds this value as X-Origin-Verify, and requests

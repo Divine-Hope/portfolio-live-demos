@@ -2,12 +2,16 @@
 
 Every number on the tab comes from here, and every number here from ClickHouse:
 
+- what ingest is doing (live, catching up, paused, or no data yet), with when the newest
+  event happened and when ingest last stored a row, so the page can say "paused since"
+  with a real time,
 - ingest lag, p50 and p95, over what ingest committed in the last hour,
 - the bookmark ingest would resume from, shortened to each stream's position,
 - stream reconnects in the last 24 hours, by reason (written by ingest),
 - the 30-day freshness SLO (ops/slo.py, from samples ClickHouse takes every minute),
 - gaps recorded in the last 30 days,
-- month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py).
+- month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py), and how
+  today's daily check went, so the page can say a figure is from an earlier day.
 
 The answer is built at most once a minute and shared by every viewer. CloudFront caches it
 for what's left of that minute, so no copy is more than a minute old.
@@ -19,14 +23,17 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, TypeGuard
 
 from livedemos.api.contract import (
     Bookmark,
     BookmarkPosition,
+    CostCheck,
     CostReport,
     FreshnessReport,
     GapReport,
+    IngestState,
     OpsPayload,
     iso,
 )
@@ -98,17 +105,58 @@ ORDER BY gap_from DESC
 LIMIT {limit:UInt16}
 """
 
+# max(event_time) comes from part metadata; max(ingested_at) reads one column of the week.
+HEAD = """
+SELECT
+    toUnixTimestamp64Milli(max(event_time)) AS newest_ms,
+    toUnixTimestamp64Milli(max(ingested_at)) AS stored_ms,
+    count() AS n
+FROM wiki_edits
+"""
+
+# The latest attempt (failed or not) and this month's latest figure, in one read so they
+# can't disagree, and by aggregate so no number of repeated rows can push either out. Only
+# `ok` and the time of an attempt go out, never the error text: it can hold an account id,
+# and the page is public.
 COST = """
 SELECT
-    toUnixTimestamp64Milli(fetched_at) AS fetched_ms,
-    toString(period_start) AS start_day,
-    toString(period_end) AS end_day,
-    amount, currency, estimated
+    count() AS attempts,
+    toUnixTimestamp64Milli(max(fetched_at)) AS fetched_ms,
+    argMax(ok, fetched_at) AS last_ok,
+    countIf(ok AND period_start = {month:Date}) AS figures,
+    toUnixTimestamp64Milli(maxIf(fetched_at, ok AND period_start = {month:Date})) AS figure_ms,
+    toString(argMaxIf(period_start, fetched_at, ok AND period_start = {month:Date})) AS fig_start,
+    toString(argMaxIf(period_end, fetched_at, ok AND period_start = {month:Date})) AS fig_end,
+    argMaxIf(amount, fetched_at, ok AND period_start = {month:Date}) AS fig_amount,
+    argMaxIf(currency, fetched_at, ok AND period_start = {month:Date}) AS fig_currency,
+    argMaxIf(estimated, fetched_at, ok AND period_start = {month:Date}) AS fig_estimated
 FROM aws_cost
-WHERE ok AND period_start = toStartOfMonth(toDate(now(), 'UTC'))  -- this month's, only
-ORDER BY fetched_at DESC
-LIMIT 1
 """
+
+
+def month_start(now: float) -> str:
+    """The first day of the current UTC month: only its figures are this month's."""
+    return datetime.fromtimestamp(now, UTC).date().replace(day=1).isoformat()
+
+
+def split_cost(
+    row: Mapping[str, Any] | None,
+) -> tuple[Mapping[str, Any] | None, Mapping[str, Any] | None]:
+    """(this month's figure, the latest attempt) from the COST row; None for either missing."""
+    if not row or not int(row["attempts"]):
+        return None, None
+    latest = {"fetched_ms": row["fetched_ms"], "ok": row["last_ok"]}
+    if not int(row["figures"]):
+        return None, latest
+    figure = {
+        "fetched_ms": row["figure_ms"],
+        "start_day": row["fig_start"],
+        "end_day": row["fig_end"],
+        "amount": row["fig_amount"],
+        "currency": row["fig_currency"],
+        "estimated": row["fig_estimated"],
+    }
+    return figure, latest
 
 
 def shorten_bookmark(sse_id: str) -> Bookmark | None:
@@ -150,6 +198,42 @@ def _plausible_ms(value: object) -> TypeGuard[int]:
     return 946_684_800_000 <= value < 4_102_444_800_000
 
 
+def ingest_state(
+    *, now: float, newest_s: float | None, stored_s: float | None, stale_after_s: float
+) -> IngestState:
+    """What ingest is doing, judged here so every viewer of the page agrees.
+
+    - live: the newest event is recent.
+    - catching_up: the newest event is old, but rows are still being stored (replaying an
+      outage from the stream). Not paused: it's working through the backlog.
+    - paused: nothing stored recently, and the newest event is old.
+    - empty: no rows at all.
+    """
+    if newest_s is None or stored_s is None:
+        return "empty"
+    if now - newest_s <= stale_after_s:
+        return "live"
+    if now - stored_s <= stale_after_s:
+        return "catching_up"
+    return "paused"
+
+
+def cost_today(*, now: float, latest: Mapping[str, Any] | None) -> CostCheck:
+    """How today's (UTC) Cost Explorer check went, from the latest attempt on record.
+
+    - ok, failed: today's attempt is recorded, and worked or didn't.
+    - pending: nothing recorded today. Not asked yet, or asked and its answer lost (no
+      second call is made that day). Either way the figure, if any, is from an earlier day.
+    """
+    today = datetime.fromtimestamp(now, UTC).date()
+    if latest is None:
+        return {"today": "pending", "last_attempt_at": None}
+    at = int(latest["fetched_ms"]) / 1000
+    if datetime.fromtimestamp(at, UTC).date() != today:
+        return {"today": "pending", "last_attempt_at": iso(at)}
+    return {"today": "ok" if bool(latest["ok"]) else "failed", "last_attempt_at": iso(at)}
+
+
 def assemble(
     *,
     now: float,
@@ -162,6 +246,9 @@ def assemble(
     days: int,
     gaps: Sequence[Mapping[str, Any]],
     cost: Mapping[str, Any] | None,
+    head: Mapping[str, Any] | None = None,
+    cost_check: Mapping[str, Any] | None = None,
+    stale_after_s: float = 60.0,
 ) -> OpsPayload:
     """Pure function: query rows in, payload out."""
     events = int(lag["events"]) if lag else 0
@@ -222,9 +309,18 @@ def assemble(
             "source": "AWS Cost Explorer, UnblendedCost, tag project=livedemos",
         }
 
+    has_rows = bool(head and int(head["n"]))
+    newest_s = int(head["newest_ms"]) / 1000 if head and has_rows else None
+    stored_s = int(head["stored_ms"]) / 1000 if head and has_rows else None
     return {
         "generated_at": iso(now),
         "ingest": {
+            "state": ingest_state(
+                now=now, newest_s=newest_s, stored_s=stored_s, stale_after_s=stale_after_s
+            ),
+            "newest_event_at": None if newest_s is None else iso(newest_s),
+            "last_stored_at": None if stored_s is None else iso(stored_s),
+            "stale_after_s": stale_after_s,
             "lag_ms": {
                 "p50": int(lag["p50_ms"]) if events and lag else None,
                 "p95": int(lag["p95_ms"]) if events and lag else None,
@@ -245,6 +341,7 @@ def assemble(
             "recent": gap_reports,
         },
         "cost": cost_report,
+        "cost_check": cost_today(now=now, latest=cost_check),
     }
 
 
@@ -264,8 +361,10 @@ class OpsService:
         target: float,
         days: int,
         error_cooldown_s: float,
+        stale_after_s: float = 60.0,
     ):
         self._db = db
+        self._stale_after_s = stale_after_s
         self._ttl_s = ttl_s
         self._threshold_s = threshold_s
         self._target = target
@@ -294,13 +393,14 @@ class OpsService:
 
     async def build(self) -> OpsPayload:
         now = time.time()
-        lag, bookmark, reconnects, first, gaps, cost = await asyncio.gather(
+        lag, bookmark, reconnects, first, gaps, cost, head = await asyncio.gather(
             self._db.query(LAG, params={"window_s": LAG_WINDOW_S}),
             self._db.query(BOOKMARK),
             self._db.query(RECONNECTS, params={"window_s": RECONNECT_WINDOW_S}),
             self._db.query(FIRST_SAMPLE),
             self._db.query(GAPS, params={"days": GAP_WINDOW_DAYS, "limit": MAX_GAPS}),
-            self._db.query(COST),
+            self._db.query(COST, params={"month": month_start(now)}),
+            self._db.query(HEAD),
         )
         first_ms = (
             int(first.rows[0]["first_ms"]) if first.rows and int(first.rows[0]["n"]) else None
@@ -326,6 +426,7 @@ class OpsService:
                 target=self._target,
                 days=self._days,
             )
+        figure, latest = split_cost(cost.rows[0] if cost.rows else None)
         return assemble(
             now=now,
             lag=lag.rows[0] if lag.rows else None,
@@ -336,5 +437,8 @@ class OpsService:
             target=self._target,
             days=self._days,
             gaps=gaps.rows,
-            cost=cost.rows[0] if cost.rows else None,
+            cost=figure,
+            head=head.rows[0] if head.rows else None,
+            cost_check=latest,
+            stale_after_s=self._stale_after_s,
         )

@@ -66,6 +66,62 @@ def test_nothing_measured_yet_is_null_not_zero() -> None:
     assert payload["freshness"]["ratio"] is None
     assert payload["freshness"]["from"] is None
     assert payload["cost"] is None
+    assert payload["cost_check"] == {"today": "pending", "last_attempt_at": None}
+    assert payload["ingest"]["state"] == "empty"
+    assert payload["ingest"]["newest_event_at"] is None
+    assert payload["ingest"]["last_stored_at"] is None
+
+
+NOW_S = 1_791_500_000.0  # 2026-10-08T22:53:20Z
+
+
+def test_paused_ingest_and_a_failed_cost_check_are_reported_with_times() -> None:
+    payload = empty_assemble(
+        now=NOW_S,
+        head={"newest_ms": 1_791_499_000_000, "stored_ms": 1_791_499_000_400, "n": 5},
+        cost_check={"fetched_ms": 1_791_499_900_000, "ok": 0},
+        stale_after_s=60.0,
+    )
+    assert payload["ingest"]["state"] == "paused"
+    assert payload["ingest"]["newest_event_at"] == "2026-10-08T22:36:40.000Z"
+    assert payload["ingest"]["last_stored_at"] == "2026-10-08T22:36:40.400Z"
+    assert payload["ingest"]["stale_after_s"] == 60.0
+    assert payload["cost_check"] == {
+        "today": "failed",
+        "last_attempt_at": "2026-10-08T22:51:40.000Z",
+    }  # never the error text: it can hold an account id
+
+
+@pytest.mark.parametrize(
+    ("newest_age_s", "stored_age_s", "state"),
+    [
+        (2, 1, "live"),
+        (60, 1, "live"),  # the limit itself is still live, as in the widget
+        (172_800, 1, "catching_up"),  # replaying two-day-old events, stored just now
+        (172_800, 61, "paused"),
+        (61, 61, "paused"),
+    ],
+)
+def test_ingest_state(newest_age_s: float, stored_age_s: float, state: str) -> None:
+    got = ops.ingest_state(
+        now=NOW_S, newest_s=NOW_S - newest_age_s, stored_s=NOW_S - stored_age_s, stale_after_s=60
+    )
+    assert got == state
+
+
+@pytest.mark.parametrize(
+    ("latest", "today"),
+    [
+        (None, "pending"),  # never attempted
+        ({"fetched_ms": 1_791_499_900_000, "ok": 1}, "ok"),
+        ({"fetched_ms": 1_791_499_900_000, "ok": 0}, "failed"),
+        # Yesterday's attempt, nothing today: not asked yet, or its answer was lost.
+        ({"fetched_ms": 1_791_400_000_000, "ok": 1}, "pending"),
+        ({"fetched_ms": 1_791_400_000_000, "ok": 0}, "pending"),
+    ],
+)
+def test_cost_today_judges_only_todays_attempt(latest: dict[str, int] | None, today: str) -> None:
+    assert ops.cost_today(now=NOW_S, latest=latest)["today"] == today
 
 
 def test_assemble_reports_every_number_it_was_given() -> None:
@@ -152,3 +208,25 @@ async def test_a_failure_is_remembered_for_the_cooldown() -> None:
     with pytest.raises(ops.OpsUnavailable):
         await svc.get()
     assert db.queries == tried
+
+
+def test_the_figure_and_the_check_come_from_the_same_read() -> None:
+    row = {
+        "attempts": 400,  # however many repeated rows: aggregates, so nothing is pushed out
+        "fetched_ms": 1_791_499_900_000,
+        "last_ok": 0,
+        "figures": 3,
+        "figure_ms": 1_791_400_000_000,
+        "fig_start": "2026-10-01",
+        "fig_end": "2026-10-08",
+        "fig_amount": "1.2",
+        "fig_currency": "USD",
+        "fig_estimated": 1,
+    }
+    figure, latest = ops.split_cost(row)
+    assert figure is not None
+    assert figure["amount"] == "1.2"  # this month's newest success, not the failure after it
+    assert latest == {"fetched_ms": 1_791_499_900_000, "ok": 0}
+    assert ops.split_cost({**row, "figures": 0}) == (None, latest)  # no figure this month
+    assert ops.split_cost({**row, "attempts": 0}) == (None, None)
+    assert ops.month_start(NOW_S) == "2026-10-01"
