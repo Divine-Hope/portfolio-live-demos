@@ -2,12 +2,15 @@
 
 Every number on the tab comes from here, and every number here from ClickHouse:
 
+- when the newest event happened and when ingest last stored a row, so the page can say
+  "paused since" with a real time,
 - ingest lag, p50 and p95, over what ingest committed in the last hour,
 - the bookmark ingest would resume from, shortened to each stream's position,
 - stream reconnects in the last 24 hours, by reason (written by ingest),
 - the 30-day freshness SLO (ops/slo.py, from samples ClickHouse takes every minute),
 - gaps recorded in the last 30 days,
-- month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py).
+- month-to-date AWS cost, as Cost Explorer last reported it (ops/cost.py), and whether
+  the latest daily check worked, so the page can say a figure is yesterday's.
 
 The answer is built at most once a minute and shared by every viewer. CloudFront caches it
 for what's left of that minute, so no copy is more than a minute old.
@@ -98,6 +101,24 @@ ORDER BY gap_from DESC
 LIMIT {limit:UInt16}
 """
 
+# max(event_time) comes from part metadata; max(ingested_at) reads one column of the week.
+HEAD = """
+SELECT
+    toUnixTimestamp64Milli(max(event_time)) AS newest_ms,
+    toUnixTimestamp64Milli(max(ingested_at)) AS stored_ms,
+    count() AS n
+FROM wiki_edits
+"""
+
+# The latest daily attempt, failed or not. Only whether it worked goes out: the error text
+# can hold an account id, and the repo and page are public.
+COST_CHECK = """
+SELECT toUnixTimestamp64Milli(fetched_at) AS fetched_ms, ok
+FROM aws_cost
+ORDER BY fetched_at DESC
+LIMIT 1
+"""
+
 COST = """
 SELECT
     toUnixTimestamp64Milli(fetched_at) AS fetched_ms,
@@ -162,6 +183,9 @@ def assemble(
     days: int,
     gaps: Sequence[Mapping[str, Any]],
     cost: Mapping[str, Any] | None,
+    head: Mapping[str, Any] | None = None,
+    cost_check: Mapping[str, Any] | None = None,
+    stale_after_s: float = 60.0,
 ) -> OpsPayload:
     """Pure function: query rows in, payload out."""
     events = int(lag["events"]) if lag else 0
@@ -222,9 +246,13 @@ def assemble(
             "source": "AWS Cost Explorer, UnblendedCost, tag project=livedemos",
         }
 
+    has_rows = bool(head and int(head["n"]))
     return {
         "generated_at": iso(now),
         "ingest": {
+            "newest_event_at": iso(int(head["newest_ms"]) / 1000) if head and has_rows else None,
+            "last_stored_at": iso(int(head["stored_ms"]) / 1000) if head and has_rows else None,
+            "stale_after_s": stale_after_s,
             "lag_ms": {
                 "p50": int(lag["p50_ms"]) if events and lag else None,
                 "p95": int(lag["p95_ms"]) if events and lag else None,
@@ -245,6 +273,14 @@ def assemble(
             "recent": gap_reports,
         },
         "cost": cost_report,
+        "cost_check": (
+            {
+                "last_attempt_at": iso(int(cost_check["fetched_ms"]) / 1000),
+                "ok": bool(cost_check["ok"]),
+            }
+            if cost_check
+            else None
+        ),
     }
 
 
@@ -264,8 +300,10 @@ class OpsService:
         target: float,
         days: int,
         error_cooldown_s: float,
+        stale_after_s: float = 60.0,
     ):
         self._db = db
+        self._stale_after_s = stale_after_s
         self._ttl_s = ttl_s
         self._threshold_s = threshold_s
         self._target = target
@@ -294,13 +332,15 @@ class OpsService:
 
     async def build(self) -> OpsPayload:
         now = time.time()
-        lag, bookmark, reconnects, first, gaps, cost = await asyncio.gather(
+        lag, bookmark, reconnects, first, gaps, cost, head, check = await asyncio.gather(
             self._db.query(LAG, params={"window_s": LAG_WINDOW_S}),
             self._db.query(BOOKMARK),
             self._db.query(RECONNECTS, params={"window_s": RECONNECT_WINDOW_S}),
             self._db.query(FIRST_SAMPLE),
             self._db.query(GAPS, params={"days": GAP_WINDOW_DAYS, "limit": MAX_GAPS}),
             self._db.query(COST),
+            self._db.query(HEAD),
+            self._db.query(COST_CHECK),
         )
         first_ms = (
             int(first.rows[0]["first_ms"]) if first.rows and int(first.rows[0]["n"]) else None
@@ -337,4 +377,7 @@ class OpsService:
             days=self._days,
             gaps=gaps.rows,
             cost=cost.rows[0] if cost.rows else None,
+            head=head.rows[0] if head.rows else None,
+            cost_check=check.rows[0] if check.rows else None,
+            stale_after_s=self._stale_after_s,
         )

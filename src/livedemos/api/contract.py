@@ -105,6 +105,9 @@ class Reconnects(TypedDict):
 
 
 class IngestReport(TypedDict):
+    newest_event_at: str | None  # the newest event's own time; None with no rows
+    last_stored_at: str | None  # when ingest last stored a row
+    stale_after_s: float  # newest event older than this: the page says "Paused"
     lag_ms: LagReport
     bookmark: Bookmark | None
     reconnects: Reconnects
@@ -150,9 +153,15 @@ class CostReport(TypedDict):
     source: str
 
 
+class CostCheck(TypedDict):
+    last_attempt_at: str  # the latest daily Cost Explorer attempt
+    ok: bool  # False: the figure in `cost`, if any, is from an earlier day
+
+
 class OpsPayload(TypedDict):
     generated_at: str
     ingest: IngestReport
     freshness: FreshnessReport
     gaps: Gaps
-    cost: CostReport | None  # None until the first successful fetch
+    cost: CostReport | None  # this month's latest figure; None until there is one
+    cost_check: CostCheck | None  # None before the first attempt

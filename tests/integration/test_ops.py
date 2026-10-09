@@ -111,3 +111,8 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
     # last month's total passed off as this month's.
     assert payload["cost"] is not None
     assert payload["cost"]["amount"] == "0.1977203052"
+    # The latest attempt failed: the page can say the figure is from an earlier check.
+    assert payload["cost_check"] is not None
+    assert payload["cost_check"]["ok"] is False
+    assert payload["ingest"]["last_stored_at"] is not None
+    assert payload["ingest"]["newest_event_at"] is not None

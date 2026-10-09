@@ -66,6 +66,22 @@ def test_nothing_measured_yet_is_null_not_zero() -> None:
     assert payload["freshness"]["ratio"] is None
     assert payload["freshness"]["from"] is None
     assert payload["cost"] is None
+    assert payload["cost_check"] is None
+    assert payload["ingest"]["newest_event_at"] is None
+    assert payload["ingest"]["last_stored_at"] is None
+
+
+def test_paused_ingest_and_a_failed_cost_check_are_reported_with_times() -> None:
+    payload = empty_assemble(
+        head={"newest_ms": 1_791_499_000_000, "stored_ms": 1_791_499_000_400, "n": 5},
+        cost_check={"fetched_ms": 1_791_500_000_000, "ok": 0},
+        stale_after_s=60.0,
+    )
+    assert payload["ingest"]["newest_event_at"] == "2026-10-08T22:36:40.000Z"
+    assert payload["ingest"]["last_stored_at"] == "2026-10-08T22:36:40.400Z"
+    assert payload["ingest"]["stale_after_s"] == 60.0
+    assert payload["cost_check"] == {"last_attempt_at": "2026-10-08T22:53:20.000Z", "ok": False}
+    assert "error" not in payload["cost_check"]  # error text can hold an account id
 
 
 def test_assemble_reports_every_number_it_was_given() -> None:
