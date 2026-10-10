@@ -13,6 +13,7 @@ variable "project" {
 variable "budget_email" {
   description = "Where budget and host alarm emails go. Set it in terraform.tfvars (gitignored)."
   type        = string
+  sensitive   = true
 }
 
 variable "monthly_budget_usd" {
@@ -70,7 +71,7 @@ variable "github_repo" {
 }
 
 variable "state_bucket" {
-  description = "The Terraform state bucket (the one in backend.hcl), so CI's plan role can take the state lock. Its name holds the account id, so it lives in terraform.tfvars and the TF_STATE_BUCKET variable, never in git."
+  description = "The Terraform state bucket (the one in backend.hcl), so CI's plan role can take the state lock. Its name holds the account id, so it lives in terraform.tfvars and the TF_STATE_BUCKET secret, never in git."
   type        = string
 }
 
