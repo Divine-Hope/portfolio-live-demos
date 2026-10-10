@@ -16,33 +16,23 @@ locals {
 
 # Only this repo's `production` environment can assume the role, so a fork or another
 # branch's workflow can't deploy.
-data "aws_iam_policy_document" "deploy_trust" {
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${local.github_sub}:environment:production"]
-    }
-  }
+module "deploy_role" {
+  source             = "../modules/github-oidc-role"
+  name               = "${var.project}-deploy"
+  oidc_provider_arn  = aws_iam_openid_connect_provider.github.arn
+  subjects           = ["${local.github_sub}:environment:production"]
+  inline_policy_name = "deploy-to-host"
+  inline_policy_json = data.aws_iam_policy_document.deploy.json
 }
 
-resource "aws_iam_role" "deploy" {
-  name                 = "${var.project}-deploy"
-  assume_role_policy   = data.aws_iam_policy_document.deploy_trust.json
-  max_session_duration = 3600
+moved {
+  from = aws_iam_role.deploy
+  to   = module.deploy_role.aws_iam_role.this
+}
+
+moved {
+  from = aws_iam_role_policy.deploy
+  to   = module.deploy_role.aws_iam_role_policy.this[0]
 }
 
 # Just enough to deploy: record the image tag, run the deploy script on the host (any
@@ -63,7 +53,7 @@ data "aws_iam_policy_document" "deploy" {
   statement {
     sid       = "RunOnTheHostOnly"
     actions   = ["ssm:SendCommand"]
-    resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:instance/*"]
     condition {
       test     = "StringEquals"
       variable = "ssm:resourceTag/Name"
@@ -74,7 +64,7 @@ data "aws_iam_policy_document" "deploy" {
   statement {
     sid       = "WithTheShellDocument"
     actions   = ["ssm:SendCommand"]
-    resources = ["arn:aws:ssm:${var.region}::document/AWS-RunShellScript"]
+    resources = ["arn:${local.partition}:ssm:${var.region}::document/AWS-RunShellScript"]
   }
 
   # The host changes when the group replaces it, so the workflow looks it up.
@@ -89,12 +79,6 @@ data "aws_iam_policy_document" "deploy" {
     actions   = ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations"]
     resources = ["*"] # these actions don't support resource-level permissions
   }
-}
-
-resource "aws_iam_role_policy" "deploy" {
-  name   = "deploy-to-host"
-  role   = aws_iam_role.deploy.id
-  policy = data.aws_iam_policy_document.deploy.json
 }
 
 # What the workflow deploys to. Kept outside the host's own prefix so it doesn't end up

@@ -27,7 +27,7 @@ resource "aws_iam_role" "host" {
 # Session Manager shell and Run Command (used by deploys).
 resource "aws_iam_role_policy_attachment" "host_ssm" {
   role       = aws_iam_role.host.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  policy_arn = "arn:${local.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 data "aws_iam_policy_document" "host" {
@@ -35,8 +35,8 @@ data "aws_iam_policy_document" "host" {
     sid     = "ReadOwnSettings"
     actions = ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"]
     resources = [
-      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}",
-      "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/*",
+      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.ssm_prefix}",
+      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.ssm_prefix}/*",
     ]
   }
 
@@ -57,7 +57,7 @@ data "aws_iam_policy_document" "host" {
   statement {
     sid       = "TakeTheElasticIpForThisGroup"
     actions   = ["ec2:AssociateAddress"]
-    resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:instance/*"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:instance/*"]
     condition {
       test     = "StringEquals"
       variable = "ec2:ResourceTag/Name"
@@ -68,7 +68,7 @@ data "aws_iam_policy_document" "host" {
   statement {
     sid       = "TakeTheElasticIpOnItsInterface"
     actions   = ["ec2:AssociateAddress"]
-    resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:network-interface/*"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:network-interface/*"]
     condition {
       test     = "StringEquals"
       variable = "ec2:ResourceTag/Name"
@@ -127,9 +127,15 @@ data "aws_iam_policy_document" "host" {
 }
 
 resource "aws_iam_role_policy" "host" {
-  name   = "own-settings-and-snapshots"
+  name   = "host-runtime"
   role   = aws_iam_role.host.id
   policy = data.aws_iam_policy_document.host.json
+
+  # A new name replaces the policy. Create the new one first, so the host never runs
+  # without its permissions.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_iam_instance_profile" "host" {
@@ -140,7 +146,7 @@ resource "aws_iam_instance_profile" "host" {
 locals {
   host_group = "${var.project}-host"
   host_group_arn = join(":", [
-    "arn:aws:autoscaling:${var.region}:${data.aws_caller_identity.current.account_id}",
+    "arn:${local.partition}:autoscaling:${var.region}:${local.account_id}",
     "autoScalingGroup:*:autoScalingGroupName/${local.host_group}",
   ])
   # CPU credits only exist for T types; any other type launched with the setting fails.

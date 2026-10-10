@@ -12,6 +12,12 @@ concurrency:
 permissions:
   contents: read
 
+# Shared by every job. The values that hold the account ID or the email are secrets, set
+# per job: only the Terraform jobs get them.
+env:
+  AWS_REGION: eu-west-1
+  TF_VAR_grafana_cloud: ${{ vars.TF_GRAFANA_CLOUD }} # endpoints and user ids, not secret
+
 jobs:
   checks:
     name: lint, types, unit tests
@@ -36,14 +42,16 @@ jobs:
       - run: uv run pytest
 
   terraform:
-    name: terraform fmt and validate
+    name: terraform fmt, validate, tflint, trivy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: tf
+        run: echo "version=$(cat .terraform-version)" >>"$GITHUB_OUTPUT"
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
-          terraform_version: "^1.11.0"
+          terraform_version: ${{ steps.tf.outputs.version }}
           terraform_wrapper: false
       - run: terraform fmt -check -recursive -diff infra
       - name: Validate each stack (no AWS credentials needed)
@@ -52,6 +60,24 @@ jobs:
             terraform -chdir=$stack init -backend=false -input=false
             terraform -chdir=$stack validate
           done
+      - name: tflint (AWS ruleset)
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # plugin download, without the anonymous rate limit
+        run: |
+          # Pinned releases, checked against their published checksums before they run.
+          curl -fsSLo tflint.zip https://github.com/terraform-linters/tflint/releases/download/v0.64.0/tflint_linux_amd64.zip
+          echo "cca9d13e2e1d7a2c627af60ff899a3c9b74212899416aeb96ec764d2ef954537  tflint.zip" | sha256sum -c -
+          unzip -q tflint.zip tflint
+          cd infra
+          ../tflint --init
+          ../tflint --recursive --config="$PWD/.tflint.hcl"
+      - name: trivy config
+        run: |
+          curl -fsSLo trivy.tar.gz https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+          echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  trivy.tar.gz" | sha256sum -c -
+          tar -xzf trivy.tar.gz trivy
+          # Findings that are a cost choice are skipped inline, each with its reason.
+          ./trivy config --quiet --exit-code 1 --severity MEDIUM,HIGH,CRITICAL infra
 
   terraform-plan:
     name: terraform plan (what merging would change)
@@ -64,24 +90,25 @@ jobs:
       id-token: write   # read-only role; see infra/live/ci.tf
     env:
       TF_VAR_budget_email: ${{ secrets.TF_BUDGET_EMAIL }}
-      TF_VAR_grafana_cloud: ${{ vars.TF_GRAFANA_CLOUD }}   # endpoints and user ids, not secret
       TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}   # holds the account ID, so a secret: GitHub masks secrets in logs
       TF_VAR_state_bucket: ${{ secrets.TF_STATE_BUCKET }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: tf
+        run: echo "version=$(cat .terraform-version)" >>"$GITHUB_OUTPUT"
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
-          terraform_version: "~1.11"
+          terraform_version: ${{ steps.tf.outputs.version }}
           terraform_wrapper: false
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_TF_PLAN_ROLE_ARN }}
-          aws-region: eu-west-1
+          aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
       - name: Plan, without the state lock (read-only; main's plan and apply take it)
         working-directory: infra/live
         run: |
-          terraform init -input=false -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="region=eu-west-1" >/dev/null
+          terraform init -input=false -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="region=$AWS_REGION" >/dev/null
           terraform plan -input=false -no-color -lock=false -out=tfplan >/dev/null
           ../../deploy/ci/plan-summary.sh tfplan >>"$GITHUB_STEP_SUMMARY"
           # The same check main runs before applying, so a destroy is caught at review.
