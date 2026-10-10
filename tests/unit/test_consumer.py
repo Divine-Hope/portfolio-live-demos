@@ -1,11 +1,13 @@
 """The consumer's failure handling, against a stub database (no network, no ClickHouse)."""
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from httpx_sse import ServerSentEvent
 
@@ -248,3 +250,30 @@ async def test_reconnects_are_flushed_once_more_on_shutdown() -> None:
     consumer._load_state = no_state  # type: ignore[method-assign]
     await consumer.run(asyncio.Event())
     assert [table for table, *_ in db.inserts] == ["ingest_reconnects"]
+
+
+async def test_wikimedia_ending_the_stream_is_its_own_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # What production sees every 15 minutes: the server ends the chunked response.
+    @contextlib.asynccontextmanager
+    async def closes(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        raise httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body"
+        )
+        yield
+
+    monkeypatch.setattr("livedemos.ingest.consumer.aconnect_sse", closes)
+    consumer = Consumer(SETTINGS, StubDatabase())
+    assert await consumer._stream_once(asyncio.Event()) == "source_closed"
+
+
+async def test_other_network_failures_stay_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextlib.asynccontextmanager
+    async def fails(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        raise httpx.ConnectError("connection refused")
+        yield
+
+    monkeypatch.setattr("livedemos.ingest.consumer.aconnect_sse", fails)
+    consumer = Consumer(SETTINGS, StubDatabase())
+    assert await consumer._stream_once(asyncio.Event()) == "network"

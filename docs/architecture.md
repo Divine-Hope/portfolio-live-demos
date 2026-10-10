@@ -201,7 +201,8 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | What fails | What happens | How we know |
 |---|---|---|
 | ingest process crashes or is killed | Restarts; waits for its in-flight insert; resumes from the last committed bookmark; seam deduped. Proven by `make proof`, which kills it mid-insert. | `ingest_connected`, `time() - ingest_last_commit_timestamp_seconds` |
-| Wikimedia drops the connection | Reconnect with jittered backoff from the bookmark | `ingest_reconnects_total{reason}` |
+| Wikimedia ends the connection (it does so every 15 minutes, mid-response) | Reconnect within a second from the bookmark | `ingest_reconnects_total{reason="source_closed"}` |
+| The network drops the connection | Reconnect with jittered backoff from the bookmark | `ingest_reconnects_total{reason="network"}` |
 | Half-open socket | Idle watchdog reconnects after 30 s | `reason="idle"` |
 | ClickHouse down | ingest disconnects and waits; after 10 s the api answers 503, so CloudFront serves the S3 copy and the widget shows "Paused" | `reason="clickhouse"`, readiness |
 | Insert reports failure but committed, or commits later | The sealed batch is retried with the same token; ClickHouse keeps one copy | `test_an_insert_that_commits_but_reports_failure_is_not_written_twice`, `test_an_insert_that_lands_after_its_retry_is_not_written_twice` |

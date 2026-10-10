@@ -227,6 +227,11 @@ class Consumer:
         except httpx.HTTPStatusError as exc:
             log.warning("stream refused", extra={"status": exc.response.status_code})
             return "http_status"
+        except httpx.RemoteProtocolError as exc:
+            # Wikimedia ends every stream connection after about 15 minutes, mid-response
+            # (measured 10 Oct: 09:20:55, 09:35:56, 09:50:57). Routine, not a fault.
+            log.info("stream closed by the source", extra={"error": repr(exc)})
+            return "source_closed"
         except httpx.HTTPError as exc:
             log.warning("stream error", extra={"error": repr(exc)})
             return "network"
