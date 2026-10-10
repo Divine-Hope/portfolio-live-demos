@@ -28,7 +28,7 @@ What the live demos must do, and how well. Each requirement has an id so tests, 
 | N5 | Reliability | Unattended restarts: every long-running container has a restart policy; health checks report real liveness (ingest: the consumer loop, not just the process); a broken host is replaced by its Auto Scaling Group. Docker doesn't restart unhealthy containers on its own, so stalls are caught by alerts. |
 | N6 | Recovery | A lost host is replaced and restores itself from the Parquet archive and the stream, with no manual data work. |
 | N7 | Resources | Whole stack fits a 2 GB host, or measurements say otherwise and we resize. |
-| N8 | Cost | Budget $10 a month, with email alerts at 80% of actual spend and 100% of forecast. About $5 a month until 31 Dec 2026. |
+| N8 | Cost | Budget $10 a month, with email alerts at 80% of actual spend and 100% of forecast. What it costs: [architecture](architecture.md#cost). |
 | N9 | Security | No public database port, read-only API user, allowlisted parameters, no SSH, no stored cloud keys in CI. |
 | N10 | Observability | Metrics and structured logs from every service; alerts for stale data, no data, memory, disk and errors. |
 | N11 | Maintainability | Lint, format, strict typing and tests in CI; decisions recorded as ADRs. |

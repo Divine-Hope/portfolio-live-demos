@@ -1,27 +1,15 @@
 # Benchmarks
 
-What the API's and ingest's queries cost at full retained volume, and what the stack costs
-while it runs.
-Rerun the first part with `make bench`; it uses its own database (`demos_bench`) and
-leaves the stack's data alone.
+What the API's and ingest's queries cost at full retained volume, and what the stack costs while it runs. Rerun the first part with `make bench`; it uses its own database (`demos_bench`) and leaves the stack's data alone.
 
 ## Queries at 7 days of data
 
 ### Setup
 
-- **Data:** exactly 7 days of synthetic edits at 11 a second, twice the live rate measured
-  on 2026-10-04 (en 3.6/s, de 1.0/s, pt 0.9/s): 6.65 million rows, 296 MB compressed.
-  Language mix, bot share and a skewed title distribution follow the live stream.
-- **Limits:** the `api` profile's limits (2 threads, 200 MB, 3 s) applied to every query as
-  query settings, including the whole-snapshot timing. The benchmark connects as admin,
-  because the `api` user can only read the real `demos` database; the other `api`
-  constraints (read-only, settings can't be raised) are tested separately in
-  `test_application_users_cant_exceed_their_role`.
-- **Runs:** 20 per query. Timing and rows read are ClickHouse's own; peak memory is from
-  `system.query_log`.
-- **Machine:** an Apple Silicon laptop, ClickHouse 25.8 in Docker under the stack's 1.2 GB
-  container limit and `clickhouse/config.d/low-memory.xml`. Not the production instance
-  (a t4g.small has 2 vCPUs).
+- **Data:** exactly 7 days of synthetic edits at 11 a second, twice the live rate measured on 2026-10-04 (en 3.6/s, de 1.0/s, pt 0.9/s): 6.65 million rows, 296 MB compressed. Language mix, bot share and a skewed title distribution follow the live stream.
+- **Limits:** the `api` profile's limits (2 threads, 200 MB, 3 s) applied to every query as query settings, including the whole-snapshot timing. The benchmark connects as admin, because the `api` user can only read the real `demos` database; the other `api` constraints (read-only, settings can't be raised) are tested separately in `test_application_users_cant_exceed_their_role`.
+- **Runs:** 20 per query. Timing and rows read are ClickHouse's own; peak memory is from `system.query_log`.
+- **Machine:** an Apple Silicon laptop, ClickHouse 25.8 in Docker under the stack's 1.2 GB container limit and `clickhouse/config.d/low-memory.xml`. Not the production instance (a t4g.small has 2 vCPUs).
 
 ### Results, 2026-10-05
 
@@ -39,17 +27,12 @@ leaves the stack's data alone.
 | resume: last 20k by ingest order | 6.1 | 13.1 | 41,003 | 23.7 MB |
 
 - Whole snapshot build, five queries at once: p50 10 ms, p95 15 ms.
-- Insert throughput, 5,000-row JSON batches through the rollup view (ingest's own write
-  path): about 140,000 rows a second. Catching up an hour's outage (about 20,000 rows)
-  takes well under a second of insert time; the stream's replay speed is the limit.
-- The p95 column is noisy: the queries run while ClickHouse is still merging the freshly
-  loaded data. An earlier run put the 24 h p95 at 776 ms. Both are inside the 3 s limit.
+- Insert throughput, 5,000-row JSON batches through the rollup view (ingest's own write path): about 140,000 rows a second. Catching up an hour's outage (about 20,000 rows) takes well under a second of insert time; the stream's replay speed is the limit.
+- The p95 column is noisy: the queries run while ClickHouse is still merging the freshly loaded data. An earlier run put the 24 h p95 at 776 ms. Both are inside the 3 s limit.
 
 ### 3 and 7 days, 2026-10-08
 
-The same benchmark (7 days at 11 edits/s, twice the live rate: 6,652,800 raw rows), on
-ClickHouse 26.8, after migration 0004 added the per-minute page sets. 20 runs each, with
-the `api` user's limits.
+The same benchmark (7 days at 11 edits/s, twice the live rate: 6,652,800 raw rows), on ClickHouse 26.8, after migration 0004 added the per-minute page sets. 20 runs each, with the `api` user's limits.
 
 | Query | p50 ms | p95 ms | Rows read | Peak memory |
 |---|---:|---:|---:|---:|
@@ -58,31 +41,19 @@ the `api` user's limits.
 | query it: 7 days, all langs (page sets) | 284.0 | 422.4 | 60,515 | 141.5 MB |
 | query it: 7 days, raw rows (what the page sets replace) | 1,109.3 | 1,332.7 | 6,652,800 | 132.0 MB |
 
-The page sets give the same count as raw rows (integration tests) from 1% of the rows, 4
-times faster. Their memory grows with distinct pages: at twice the live rate a week peaks
-at 142 MB of the `api` user's 200 MB. The sets take 107 MB on disk for that week, so
-about 100 MB at the live rate for their 14 days.
+The page sets give the same count as raw rows (integration tests) from 1% of the rows, 4 times faster. Their memory grows with distinct pages: at twice the live rate a week peaks at 142 MB of the `api` user's 200 MB. The sets take 107 MB on disk for that week, so about 100 MB at the live rate for their 14 days.
 
-The 24 h query reads the same rows in both runs, but its p50 went from 71.8 ms (25.8) to
-148.4 ms (26.8) and its p95 from 1,659 ms to 214 ms. Two runs on a laptop, three days and a
-version apart, can't say which of the two changed it; the production numbers will.
+The 24 h query reads the same rows in both runs, but its p50 went from 71.8 ms (25.8) to 148.4 ms (26.8) and its p95 from 1,659 ms to 214 ms. Two runs on a laptop, three days and a version apart, can't say which of the two changed it; the production numbers will.
 
 ### What it says
 
-- The per-second snapshot costs the same at 7 days as at 7 minutes: every query reads only
-  its window, by primary key, or the rollup.
-- Resume stays bounded: a few hundred rows to find the newest sequence, about 41,000 for
-  the tail, whatever the table's size (migration 0002).
-- "Query it" over 24 hours is the one expensive query: a million rows, because counting
-  distinct pages needs raw rows. It stays inside the API user's limits. Caching, request
-  coalescing and the admission cap mean it runs at most once per language set every 10 s,
-  and never more than 2 at once. 3 and 7 days read per-minute page sets instead
-  (migration 0004), measured above.
+- The per-second snapshot costs the same at 7 days as at 7 minutes: every query reads only its window, by primary key, or the rollup.
+- Resume stays bounded: a few hundred rows to find the newest sequence, about 41,000 for the tail, whatever the table's size (migration 0002).
+- "Query it" over 24 hours is the one expensive query: a million rows, because counting distinct pages needs raw rows. It stays inside the API user's limits. Caching, request coalescing and the admission cap mean it runs at most once per language set every 10 s, and never more than 2 at once. 3 and 7 days read per-minute page sets instead (migration 0004), measured above.
 
 ### The Ops tab's queries, 2026-10-08
 
-Same data and limits, ClickHouse 26.8, plus 30 days of per-minute freshness samples
-(43,200 rows). 20 runs each.
+Same data and limits, ClickHouse 26.8, plus 30 days of per-minute freshness samples (43,200 rows). 20 runs each.
 
 | Query | p50 ms | p95 ms | Rows read | Peak memory |
 |---|---:|---:|---:|---:|
@@ -91,22 +62,13 @@ Same data and limits, ClickHouse 26.8, plus 30 days of per-minute freshness samp
 | ops: freshness, 30 days | 5.8 | 14.3 | 43,200 | 9.6 MB |
 | ops: newest event and last stored (rerun 2026-10-09) | 121.5 | 151.5 | 6,652,785 | 9.2 MB |
 
-The whole Ops payload, its queries at once and then the freshness count, as the API
-builds it: p50 15 ms, p95 25 ms; with "newest event and last stored" added on 2026-10-09,
-p50 151 ms, p95 177 ms. That query reads the whole `ingested_at` column (a week), because
-"paused since" can be days back. Once a minute, it's cheap enough not to be clever about. Migration 0005's `ingested_at` index, added and materialized on a table
-already holding the 6.65 million rows, as a deploy would: 1.1 s.
+The whole Ops payload, its queries at once and then the freshness count, as the API builds it: p50 15 ms, p95 25 ms; with "newest event and last stored" added on 2026-10-09, p50 151 ms, p95 177 ms. That query reads the whole `ingested_at` column (a week), because "paused since" can be days back. Once a minute, it's cheap enough not to be clever about. Migration 0005's `ingested_at` index, added and materialized on a table already holding the 6.65 million rows, as a deploy would: 1.1 s.
 
-The lag query filters on `ingested_at`, which isn't in the sort key; the minmax index from
-migration 0005 makes it read the last hour's rows, not the week's. The benchmark writes
-rows in time order, the best case for that index. A replay after an outage writes old
-events late, so in production it reads a little more, still a small part of the table.
+The lag query filters on `ingested_at`, which isn't in the sort key; the minmax index from migration 0005 makes it read the last hour's rows, not the week's. The benchmark writes rows in time order, the best case for that index. A replay after an outage writes old events late, so in production it reads a little more, still a small part of the table.
 
 ## The running stack, under live ingest
 
-Measured on the same laptop on 2026-10-05, ingesting the real Wikimedia stream (about 5.5
-kept edits a second during those 27 minutes; production's 24-hour average on 2026-10-06 was
-2.6 a second, 9,302 an hour) for 27 minutes, from `system.part_log` and `docker stats`.
+Measured on the same laptop on 2026-10-05, ingesting the real Wikimedia stream (about 5.5 kept edits a second during those 27 minutes; production's 24-hour average on 2026-10-06 was 2.6 a second, 9,302 an hour) for 27 minutes, from `system.part_log` and `docker stats`.
 
 | What | Measured |
 |---|---|

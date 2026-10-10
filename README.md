@@ -35,6 +35,8 @@ flowchart TB
 
 Details, failure modes and cost: [docs/architecture.md](docs/architecture.md). Requirements and how each is tested: [docs/requirements.md](docs/requirements.md).
 
+Running it: the [runbook](docs/runbook.md), the [alert fire drill](docs/runbook.md#fire-drill), and the one [postmortem](docs/postmortems/2026-10-06-clickhouse-memory-drift.md) so far.
+
 ## Run it locally
 
 You need Docker and `make`. [uv](https://docs.astral.sh/uv/) too for the tests, `make bench` and `make e2e`.
@@ -75,9 +77,7 @@ No internet, or don't want to hit Wikimedia? `make up-offline` runs the same sta
 
 ## Query the archive
 
-Every hour of edits lands in S3 as Parquet, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`.
-Production's bucket is private; this is how I read it, and the same query works on your own
-copy. With DuckDB and AWS credentials that can read the bucket:
+Every hour of edits lands in S3 as Parquet, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`. Production's bucket is private; this is how I read it, and the same query works on your own copy. With DuckDB and AWS credentials that can read the bucket:
 
 ```sql
 INSTALL httpfs; LOAD httpfs;
@@ -90,8 +90,7 @@ WHERE dt >= '2026-10-01'
 GROUP BY dt, lang ORDER BY dt, lang;
 ```
 
-Locally the archive is in SeaweedFS: use `CREATE SECRET (TYPE s3, KEY_ID 'any', SECRET 'any',
-ENDPOINT 'localhost:8333', URL_STYLE 'path', USE_SSL false)` and `s3://archive/...`.
+Locally the archive is in SeaweedFS: use `CREATE SECRET (TYPE s3, KEY_ID 'any', SECRET 'any', ENDPOINT 'localhost:8333', URL_STYLE 'path', USE_SSL false)` and `s3://archive/...`.
 
 ## Repo layout
 

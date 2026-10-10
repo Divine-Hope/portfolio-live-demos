@@ -1,22 +1,9 @@
 """Bring a host that has lost its data back from the archive, before ingest starts.
 
-`livedemos-migrate` runs this after the migrations, so on every boot and deploy.
-It does nothing unless the raw table is empty: a host rebuilt from scratch, or one that was
-down longer than raw retention. Then, for every archived hour newer than the rollup's last
-minute (up to 90 days back):
-
-- the newest archived day and the one before go back into the raw table, whole, with the
-  ids and ingest times they were archived with. The rollup gets them through its view, as
-  it did the first time, and the archive service finds raw rows that match its files;
-- older days are rebuilt straight into the rollup (`rebuild --allow-missing`, a month at
-  a time).
-
-Ingest then replays the stream from a little before the newest archived event and skips
-the ids it restored (see ingest/resume.py): the seam is matched by event id, not by time,
-so a late event is neither lost nor counted twice.
-
-A failure stops `migrate`, so the stack doesn't start with history it could have had. Fix
-the cause, or start without the restore: `ARCHIVE_RESTORE=false` (docs/runbook.md).
+Runs after the migrations (`livedemos-migrate`), and does nothing unless the raw table is
+empty. The newest two archived days go back into raw rows, older days into the rollup;
+ingest then replays the stream and skips the restored ids. A failure stops the stack from
+starting: docs/architecture.md, "archive", and docs/runbook.md.
 """
 
 from __future__ import annotations

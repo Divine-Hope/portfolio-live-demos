@@ -53,7 +53,7 @@ def assemble(
     gaps: Iterable[Mapping[str, Any]],
     stale_after_s: float,
 ) -> LivePayload:
-    """Pure function: query rows in, widget payload out. Unit-tested on its own."""
+    """Pure function: query rows in, widget payload out."""
     if newest is None:
         return {
             "dataset": "wikipedia",

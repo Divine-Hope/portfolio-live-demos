@@ -1,7 +1,8 @@
 # 0006. The resume bookmark is stored on the rows it describes
 
-Date: 2026-10-04, revised 2026-10-05
+Date: 2026-10-04
 Status: Accepted
+Revisions: 2026-10-05, a failed insert is retried unchanged. Before, ingest dropped the batch and re-read the bookmark, and a commit landing after that re-read was written twice under a different token (`test_an_insert_that_lands_after_its_retry_is_not_written_twice` failed 3 times out of 3 against that version).
 
 ## Context
 
@@ -14,7 +15,7 @@ Each row in `wiki_edits` stores the `sse_id` it arrived with, plus an `ingest_se
 Supporting rules:
 
 - The in-memory bookmark only moves after an insert commits. On a stream error the unsent batch is dropped and replayed.
-- A failed insert is different: it may have committed, or may still be running on the server. That batch is sealed (a frozen record of the rows, one token, one query id; nothing changes the rows after sealing) and retried as it is until ClickHouse confirms it. Same token, so whichever attempt lands second is dropped. While the first attempt still runs, its query id is taken and the retry is refused. Only then does the bookmark move. (Until 2026-10-05 ingest dropped the batch and re-read the bookmark instead. A commit landing after that re-read was written twice under a different token: `test_an_insert_that_lands_after_its_retry_is_not_written_twice` fails 3 times out of 3 against that version.)
+- A failed insert is different: it may have committed, or may still be running on the server. That batch is sealed (a frozen record of the rows, one token, one query id; nothing changes the rows after sealing) and retried as it is until ClickHouse confirms it. Same token, so whichever attempt lands second is dropped. While the first attempt still runs, its query id is taken and the retry is refused. Only then does the bookmark move.
 - On start, ingest waits for inserts a killed predecessor left running (their query ids are prefixed `ingest-`, visible in `system.processes`), for as long as that takes, and only then reads the bookmark. It never resumes past a running insert; it warns every 60 s (`ingest_inflight_waits_total`). The writer profile's 30 s query limit ends any insert in practice. Checked: a SIGKILLed client's insert keeps running server-side. Not reproduced: a duplicate without this wait. Raw rows commit within milliseconds, before the materialized view finishes, so the proof test passes with the wait removed too; the wait closes the window between the server receiving an insert and committing it, which is too short to hit on purpose.
 - `ingest_seq` is seeded from the highest committed value, so a clock set back across a restart can't make an older row look newest.
 - A batch never spans two UTC days. An INSERT is atomic only within one partition, and the table is partitioned by day.
@@ -31,6 +32,6 @@ Supporting rules:
   - A seam of 20,000 events. A replay that resends more than the last 20,000 ingested events (hours of traffic) would double the excess.
   - The rollup is written by a materialized view in the same INSERT but not the same transaction. Checked: raw rows are visible before the view finishes. `make reconcile` compares every minute and language against raw rows and, with `REPAIR=1`, stops ingest and rebuilds those that differ. Repair refuses while an ingest insert is running (raw rows can be visible while its view still writes) or rows are still arriving, and fails if either happens during it (`test_repair_refuses_while_an_insert_is_still_writing_the_rollup`). It isn't scheduled: it runs by hand.
 - About 150 bytes per row of extra storage before compression (ZSTD), on a table that only keeps 7 days.
-- Startup reads the bookmark with bounded queries (migration 0002): the newest event time from part metadata, the highest `ingest_seq` from an aggregate projection (one row per part), then the last 20,000 rows by `ingest_seq` from a projection sorted by it. ClickHouse only uses that projection for a range on its key, so the read starts an hour of sequence below the newest and doubles the range until it holds 20,000 rows: the range bounds the read, never which rows count, so a clock jump can't split the seam (`test_the_seam_is_the_last_rows_even_across_a_clock_jump`). At 7 days of data: a few hundred rows, then about 41,000 ([benchmarks](../benchmarks.md)). Before, it filtered by event time and could miss a last-committed event more than a day late.
+- Startup reads the bookmark with bounded queries, whatever the table's size ([architecture](../architecture.md#ingest-srclivedemosingest), [benchmarks](../benchmarks.md)).
 - When raw rows have expired but the 90-day rollup still has data, a start is a gap from the rollup's last minute, not a first boot. A bookmark that ages out while ingest stays up (a long outage) is dropped before reconnecting, and the gap recorded.
 - Retention, measured 2026-10-04: `?since=` 32 and 45 days back both started at 2026-09-23T09:44Z, so about 11 days of history were available. A `since` older than that starts silently at the oldest event, with no error. `ingest` assumes 7 days (`INGEST_RETENTION_S`), which is inside what was observed. Raising it to match Wikimedia wouldn't help: the bookmark lives on raw rows, and raw rows are kept 7 days, so after a longer outage there's no bookmark to resume from anyway.

@@ -235,12 +235,8 @@ resource "aws_autoscaling_group" "host" {
   desired_capacity    = 1
   vpc_zone_identifier = [for s in aws_subnet.public : s.id]
 
-  # A new host only counts as in service once it's live and holds the Elastic IP: user
-  # data completes this hook (CONTINUE), or abandons it if the stack can't start, and the
-  # group then terminates it and tries again. One that never answers is abandoned after two
-  # hours: the longest the user data can take (install, a 30-minute restore, 25 minutes of
-  # readiness waits), with room. Until then the old host, if it's still there, keeps serving: Capacity
-  # Rebalancing only retires it once the replacement is in service.
+  # A new host is in service only once it's live and holds the Elastic IP; until then the
+  # old one keeps serving. Two hours covers the longest user data can take (ADR 0010).
   initial_lifecycle_hook {
     name                 = "live"
     lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"

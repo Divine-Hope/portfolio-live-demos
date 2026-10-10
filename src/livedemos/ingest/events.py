@@ -1,6 +1,6 @@
 """Turn raw Wikimedia `recentchange` events into rows we keep, or a reason we skip them.
 
-Pure functions only, so every rule here is unit-tested without a network or database.
+Pure functions: no network, no database.
 """
 
 from __future__ import annotations

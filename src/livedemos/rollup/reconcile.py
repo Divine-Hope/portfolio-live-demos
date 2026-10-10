@@ -3,19 +3,9 @@
     livedemos-reconcile            # report mismatched minutes, exit 1 if any
     livedemos-reconcile --repair   # rebuild them from raw rows
 
-Why this exists: a ClickHouse INSERT writes the raw part and then the materialized view's
-part, and the two are not one transaction. If the second write fails, the retry's
-deduplication can't always tell which half landed, so the rollup can drift from raw. Raw
-rows are the source of truth for as long as they're kept (7 days); this compares every
-(minute, language) in that range and, with --repair, rebuilds the ones that differ.
-
-Minutes newer than `--settle-minutes` are skipped: late events are still arriving there.
-
-Repair deletes a minute's rollup rows and rebuilds them from raw rows. If ingest wrote a
-late event for that minute in between, the view would add it and the rebuild would count
-it again. So repair needs ingest stopped (`make reconcile REPAIR=1` stops and restarts it):
-it refuses while an ingest insert is running or rows are still arriving, and checks again
-afterwards that none ran or arrived during the repair. It runs as `migrator`, not as ingest.
+A raw insert and its view's insert aren't one transaction, so the rollup can drift. Repair
+needs ingest stopped (`make reconcile REPAIR=1` does that), or a late event could count
+twice. docs/architecture.md, "ClickHouse".
 """
 
 from __future__ import annotations
