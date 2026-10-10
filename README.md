@@ -24,14 +24,12 @@ First up: what's being edited on English, Portuguese and German Wikipedia, right
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    WM["Wikimedia EventStreams"] -- "SSE, resumable" --> ING["ingest"]
-    ING -- "1 s batches" --> CH[("ClickHouse")]
-    CH --> API["api: 1 s snapshot"]
-    API --> EDGE["CDN, 1 s cache"]
-    EDGE -- "poll every 2 s" --> W["embed widget"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/architecture-dark.drawio.png">
+  <img src="docs/img/architecture-light.drawio.png" alt="Wikimedia EventStreams feeds ingest on one EC2 host in an Auto Scaling Group on AWS. Ingest writes 1 s batches to ClickHouse, the api builds a snapshot every second, and CloudFront caches it for the browser, which loads the page from Cloudflare Pages. ClickHouse writes hourly Parquet to an S3 archive that restores a new host; the api writes a fallback snapshot to S3. GitHub Actions deploys; Grafana Cloud gets metrics and logs.">
+</picture>
+
+Both images embed their draw.io source: open either one in [app.diagrams.net](https://app.diagrams.net) to edit it.
 
 Details, failure modes and cost: [docs/architecture.md](docs/architecture.md). Requirements and how each is tested: [docs/requirements.md](docs/requirements.md).
 
