@@ -16,7 +16,7 @@ from livedemos.logs import setup_logging
 
 log = logging.getLogger("livedemos.ingest")
 
-_STOP_TIMEOUT_S = 8.0
+_STOP_TIMEOUT_S = 6.0
 
 
 async def run() -> int:
@@ -45,9 +45,9 @@ async def run() -> int:
                 log.error("consumer crashed", exc_info=consumer.exception())
                 return 1
         else:
-            # The consumer sees `stop` within a flush interval and finishes the batch in
-            # hand. Docker kills after 10 s, so stop waiting before that. Anything not
-            # committed is replayed from the bookmark on the next start.
+            # The consumer sees `stop` within a flush interval. Its last reconnect flush can
+            # take 2 s more after a cancel, so 6 s here plus that stays inside the 15 s grace
+            # compose gives ingest. Anything not committed is replayed on the next start.
             try:
                 await asyncio.wait_for(consumer, timeout=_STOP_TIMEOUT_S)
             except TimeoutError:

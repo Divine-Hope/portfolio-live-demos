@@ -19,6 +19,7 @@ import sys
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -86,7 +87,7 @@ def start_ingest(stream_base: str) -> subprocess.Popen[bytes]:
         "INGEST_BACKOFF_INITIAL_S": "0.2",
         "INGEST_BACKOFF_MAX_S": "1",
     }
-    return subprocess.Popen([sys.executable, "-m", "livedemos.ingest"], env=env)
+    return subprocess.Popen([str(Path(sys.executable).with_name("livedemos-ingest"))], env=env)
 
 
 async def test_kill_mid_insert_loses_nothing_and_duplicates_nothing(
