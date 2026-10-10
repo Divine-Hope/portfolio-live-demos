@@ -236,7 +236,8 @@ resource "aws_autoscaling_group" "host" {
   vpc_zone_identifier = [for s in aws_subnet.public : s.id]
 
   # A new host is in service only once it's live and holds the Elastic IP; until then the
-  # old one keeps serving. Two hours covers the longest user data can take (runbook, "How a new host goes live").
+  # old one keeps serving. Two hours covers the longest user data can take
+  # (runbook, "How a new host goes live").
   initial_lifecycle_hook {
     name                 = "live"
     lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"

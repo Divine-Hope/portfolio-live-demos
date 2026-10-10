@@ -114,12 +114,12 @@ e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWS
 # Credentials come from your SSO profile: run `aws sso login` for your SSO session first.
 TF_PROFILE ?= livedemos
 TF := AWS_PROFILE=$(TF_PROFILE) terraform
-AWS_REGION ?= eu-west-1
+LIVEDEMOS_REGION ?= eu-west-1
 
 # CI runs the version in .terraform-version; a different one locally can rewrite the lock files.
 .PHONY: tf-version
 tf-version:
-	@want=$$(cat .terraform-version); have=$$(terraform version -json | jq -r .terraform_version); \
+	@want=$$(cat .terraform-version); have=$$(terraform version | sed -n '1s/^Terraform v//p'); \
 	[ "$$want" = "$$have" ] || { echo "terraform $$have, but .terraform-version says $$want"; exit 1; }
 
 .PHONY: tf-bootstrap
@@ -133,7 +133,7 @@ tf-init: tf-version ## AWS: connect infra/live to the state bucket
 
 .PHONY: host-id
 host-id: ## AWS: the live host's instance id: whichever holds the Elastic IP
-	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-addresses --region $(AWS_REGION) \
+	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-addresses --region $(LIVEDEMOS_REGION) \
 		--filters Name=tag:Name,Values=livedemos-host --query 'Addresses[0].InstanceId' --output text
 
 .PHONY: tf-plan
