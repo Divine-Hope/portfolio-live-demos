@@ -47,12 +47,3 @@ module "archive" {
   }]
 }
 
-moved {
-  from = aws_s3_bucket_versioning.archive
-  to   = module.archive.aws_s3_bucket_versioning.this[0]
-}
-
-moved {
-  from = aws_s3_bucket_lifecycle_configuration.archive
-  to   = module.archive.aws_s3_bucket_lifecycle_configuration.this[0]
-}

@@ -44,31 +44,6 @@ module "tf_apply_role" {
   managed_policy_arns = ["arn:${local.partition}:iam::aws:policy/AdministratorAccess"]
 }
 
-moved {
-  from = aws_iam_role.tf_plan
-  to   = module.tf_plan_role.aws_iam_role.this
-}
-
-moved {
-  from = aws_iam_role_policy_attachment.tf_plan_read_only
-  to   = module.tf_plan_role.aws_iam_role_policy_attachment.this["arn:aws:iam::aws:policy/ReadOnlyAccess"]
-}
-
-moved {
-  from = aws_iam_role_policy.tf_plan_lock
-  to   = module.tf_plan_role.aws_iam_role_policy.this[0]
-}
-
-moved {
-  from = aws_iam_role.tf_apply
-  to   = module.tf_apply_role.aws_iam_role.this
-}
-
-moved {
-  from = aws_iam_role_policy_attachment.tf_apply_admin
-  to   = module.tf_apply_role.aws_iam_role_policy_attachment.this["arn:aws:iam::aws:policy/AdministratorAccess"]
-}
-
 output "tf_plan_role_arn" {
   description = "Set as the AWS_TF_PLAN_ROLE_ARN repository secret."
   value       = module.tf_plan_role.arn
