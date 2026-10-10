@@ -133,7 +133,7 @@ jobs:
       # The archive tests need an S3 API that ClickHouse can reach by name, as in compose.
       - name: Start SeaweedFS (local S3) with an archive bucket
         run: |
-          docker network create ci
+          docker network create --subnet 172.29.0.0/24 ci   # the range users.d lets in
           docker run -d --name s3 --network ci -p 127.0.0.1:8333:8333 chrislusf/seaweedfs:4.48 server -s3 -dir=/data
           for _ in $(seq 1 60); do
             docker exec s3 sh -c 'echo s3.bucket.list | weed shell -master=localhost:9333' 2>/dev/null |

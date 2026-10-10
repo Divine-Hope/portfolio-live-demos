@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from livedemos.clickhouse import ClickHouse, ClickHouseError
+from livedemos.clickhouse import ClickHouse, ClickHouseError, _bind, quote
 from livedemos.config import ClickHouseSettings
 
 
@@ -78,3 +78,36 @@ async def test_unreachable_is_a_clickhouse_error() -> None:
 
     with pytest.raises(ClickHouseError, match="unreachable"):
         await client(httpx.MockTransport(handler)).query("SELECT 1")
+
+
+async def test_query_asks_for_json_without_touching_the_sql() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": [], "statistics": {}})
+
+    await client(httpx.MockTransport(handler)).query("SELECT 1; -- trailing comment")
+    assert seen[0].url.params["default_format"] == "JSON"
+    assert seen[0].content == b"SELECT 1; -- trailing comment"
+
+
+@pytest.mark.parametrize(
+    ("value", "bound"),
+    [
+        (["en", "pt"], "['en','pt']"),
+        (["Rock 'n' roll"], "['Rock \\'n\\' roll']"),
+        (["C:\\path"], "['C:\\\\path']"),
+        ([1, 2], "[1,2]"),
+        ("tab\there", "tab\\there"),
+        ("back\\slash", "back\\\\slash"),
+        (True, "1"),
+    ],
+    ids=["strings", "quote", "backslash-in-array", "numbers", "tab", "backslash", "bool"],
+)
+def test_parameters_are_bound_in_clickhouse_escaped_format(value: object, bound: str) -> None:
+    assert _bind({"p": value}) == {"param_p": bound}
+
+
+def test_quote_makes_a_string_literal() -> None:
+    assert quote("it's a \\ test") == "'it\\'s a \\\\ test'"
