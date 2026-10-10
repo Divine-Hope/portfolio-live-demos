@@ -221,8 +221,14 @@ def _array_element(value: Any) -> str:
     return quote(str(value))
 
 
+# ClickHouse's Escaped format: a backslash before each of these.
+_ESCAPES = str.maketrans(
+    {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r", "\0": "\\0", "\b": "\\b", "\f": "\\f"}
+)
+
+
 def _escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
+    return text.translate(_ESCAPES)
 
 
 def quote(text: str) -> str:

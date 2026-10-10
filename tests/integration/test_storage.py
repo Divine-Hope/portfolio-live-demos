@@ -435,6 +435,38 @@ async def test_reconcile_finds_and_rebuilds_a_rollup_that_drifted(ch: ClickHouse
     assert bots == await scalar(ch, "SELECT countIf(is_bot) FROM wiki_edits")
 
 
+async def test_migrator_hands_the_freshness_view_to_its_definer() -> None:
+    """Migration 0006 as production runs it: the real migrator, on a database at version 5.
+    Then the view must still refresh, now with freshness_definer's rights. Needs a ClickHouse
+    without `demos` (CI), so it comes before the tests that create it; a local stack's
+    `demos` is left alone."""
+    admin = ClickHouse(clickhouse_test_settings().model_copy(update={"database": "demos"}))
+    migrator = ClickHouse(user_settings("migrator", "CLICKHOUSE_MIGRATOR_PASSWORD"))
+    try:
+        exists = await admin.query(
+            "SELECT count() AS n FROM system.databases WHERE name = 'demos'",
+            settings={"database": "default"},
+        )
+        if int(exists.rows[0]["n"]):
+            pytest.skip("`demos` exists here; this needs a fresh ClickHouse")
+        assert await migrate(admin, upto=5) == [1, 2, 3, 4, 5]
+        assert await migrate(migrator) == [6]
+        view = await admin.query(
+            "SELECT definer FROM system.tables "
+            "WHERE database = 'demos' AND name = 'freshness_samples_mv'"
+        )
+        assert view.rows == [{"definer": "freshness_definer"}]
+        await admin.insert("wiki_edits", rows(5), dedup_token="definer")
+        await admin.execute("SYSTEM REFRESH VIEW freshness_samples_mv")
+        await admin.execute("SYSTEM WAIT VIEW freshness_samples_mv")
+        sampled = await admin.query("SELECT count() AS n, max(age_s) AS age FROM freshness_samples")
+        assert int(sampled.rows[0]["n"]) >= 1
+        assert sampled.rows[0]["age"] is not None
+    finally:
+        await migrator.aclose()
+        await admin.aclose()
+
+
 @pytest.mark.usefixtures("demos_schema")
 @pytest.mark.parametrize(
     ("user", "password_env", "sql"),
@@ -521,7 +553,7 @@ async def test_ingest_can_read_what_it_needs_to_resume() -> None:
 
 
 async def test_awkward_strings_round_trip_as_parameters(ch: ClickHouse) -> None:
-    awkward = ["Rock 'n' roll", "C:\\temp", "tab\there", 'say "hi"']
+    awkward = ["Rock 'n' roll", "C:\\temp", "tab\there", 'say "hi"', "cr\rlf\n", "nul\0"]
     result = await ch.query(
         "SELECT {titles:Array(String)} AS titles, {one:String} AS one;",
         params={"titles": awkward, "one": awkward[1]},
@@ -533,3 +565,4 @@ async def test_an_insert_with_an_unknown_column_fails(ch: ClickHouse) -> None:
     row = rows(1)[0] | {"titel": "typo"}
     with pytest.raises(ClickHouseError):
         await ch.insert("wiki_edits", [row])
+

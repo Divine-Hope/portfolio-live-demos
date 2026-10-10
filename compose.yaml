@@ -190,6 +190,7 @@ services:
 # (clickhouse/users.d/livedemos.xml).
 networks:
   default:
+    enable_ipv6: false   # users.d allows IPv4 from this range only
     ipam:
       config:
         - subnet: 172.29.0.0/24
