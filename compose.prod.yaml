@@ -16,6 +16,10 @@ x-image: &image
 services:
   clickhouse:
     ports: !reset []          # reachable only on the Docker network
+    environment:
+      # No SQL user management in production: users and grants change only through
+      # users.d and a deploy.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "0"
     logging: *logging
 
   migrate:

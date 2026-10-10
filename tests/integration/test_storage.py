@@ -51,7 +51,7 @@ async def test_migrations_run_once_and_are_recorded(ch: ClickHouse) -> None:
         "wiki_pages_per_minute_mv",
     ]
     applied = await ch.query("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4, 5]
+    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4, 5, 6]
 
 
 async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
@@ -60,7 +60,7 @@ async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
     assert await migrate(ch, upto=1) == [1]
     await ch.insert("wiki_edits", rows(50), dedup_token="before-upgrade")
 
-    assert await migrate(ch) == [2, 3, 4, 5]
+    assert await migrate(ch) == [2, 3, 4, 5, 6]
     projections = await ch.query(
         "SELECT DISTINCT name FROM system.projection_parts "
         "WHERE database = {db:String} AND table = 'wiki_edits' AND active ORDER BY name",
@@ -80,7 +80,7 @@ async def test_a_database_from_before_versioned_migrations_is_adopted(ch: ClickH
         await ch.execute(sql, settings={"database": db})
     await ch.insert("wiki_edits", rows(40), dedup_token="legacy")
 
-    assert await migrate(ch) == [1, 2, 3, 4, 5]  # 1 is a no-op that records the baseline
+    assert await migrate(ch) == [1, 2, 3, 4, 5, 6]  # 1 is a no-op that records the baseline
     assert await scalar(ch, "SELECT count() FROM wiki_edits") == 40
     assert await scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute") == 40
 
@@ -518,3 +518,18 @@ async def test_ingest_can_read_what_it_needs_to_resume() -> None:
         )
     finally:
         await client.aclose()
+
+
+async def test_awkward_strings_round_trip_as_parameters(ch: ClickHouse) -> None:
+    awkward = ["Rock 'n' roll", "C:\\temp", "tab\there", 'say "hi"']
+    result = await ch.query(
+        "SELECT {titles:Array(String)} AS titles, {one:String} AS one;",
+        params={"titles": awkward, "one": awkward[1]},
+    )
+    assert result.rows == [{"titles": awkward, "one": awkward[1]}]
+
+
+async def test_an_insert_with_an_unknown_column_fails(ch: ClickHouse) -> None:
+    row = rows(1)[0] | {"titel": "typo"}
+    with pytest.raises(ClickHouseError):
+        await ch.insert("wiki_edits", [row])

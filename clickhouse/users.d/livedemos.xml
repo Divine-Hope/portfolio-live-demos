@@ -5,7 +5,10 @@
     ingest    reads what resume needs; writes edits, gaps and reconnects; nothing else
     api       reads only the tables it serves, with tight per-query limits (it's public)
     archiver  reads raw rows and writes them to S3 as Parquet; records the daily AWS cost
+  Plus freshness_definer, which nobody logs in as: the freshness view runs with its rights.
   Passwords come from environment variables, never from this file.
+  Only the Compose network (compose.yaml) and the container itself can connect.
+  Grants name the `demos` database: the migrations' {database} is that in every deploy.
 -->
 <clickhouse>
     <profiles>
@@ -55,8 +58,11 @@
         <migrator>
             <password from_env="CLICKHOUSE_MIGRATOR_PASSWORD"/>
             <profile>archive</profile>
-            <quota>default</quota>
-            <networks><ip>::/0</ip></networks>
+            <networks>
+                <ip>172.29.0.0/24</ip>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
             <grants>
                 <query>GRANT CREATE DATABASE ON demos.*</query>
                 <query>GRANT CREATE TABLE, CREATE VIEW, ALTER, SELECT, INSERT ON demos.*</query>
@@ -68,13 +74,18 @@
                 <query>GRANT READ ON S3('https?://(livedemos-archive-[a-z0-9-]+\\.s3\\.[a-z0-9-]+\\.amazonaws\\.com|s3:8333/archive)/.*')</query>
                 <query>GRANT CREATE TEMPORARY TABLE ON *.*</query>
                 <query>GRANT TRUNCATE ON demos.wiki_edits_per_minute_staging</query>
+                <!-- Migration 0006 hands the freshness view to freshness_definer. -->
+                <query>GRANT SET DEFINER ON freshness_definer</query>
             </grants>
         </migrator>
         <ingest>
             <password from_env="CLICKHOUSE_INGEST_PASSWORD"/>
             <profile>writer</profile>
-            <quota>default</quota>
-            <networks><ip>::/0</ip></networks>
+            <networks>
+                <ip>172.29.0.0/24</ip>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
             <grants>
                 <!-- Edits. The per-minute tables fill through their views; ingest can't
                      write them directly, so it can't invent a count without raw rows. -->
@@ -90,8 +101,12 @@
         <api>
             <password from_env="CLICKHOUSE_API_PASSWORD"/>
             <profile>reader</profile>
-            <quota>default</quota>
-            <networks><ip>::/0</ip></networks>
+            <quota>api</quota>
+            <networks>
+                <ip>172.29.0.0/24</ip>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
             <grants>
                 <!-- What the API serves, and nothing else (no ledger, no archive bookkeeping). -->
                 <query>GRANT SELECT ON demos.wiki_edits</query>
@@ -106,8 +121,11 @@
         <archiver>
             <password from_env="CLICKHOUSE_ARCHIVER_PASSWORD"/>
             <profile>archive</profile>
-            <quota>default</quota>
-            <networks><ip>::/0</ip></networks>
+            <networks>
+                <ip>172.29.0.0/24</ip>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
             <grants>
                 <query>GRANT SELECT ON demos.wiki_edits</query>
                 <query>GRANT SELECT, INSERT ON demos.archive_hours</query>
@@ -122,5 +140,34 @@
                 <query>GRANT CREATE TEMPORARY TABLE ON *.*</query>
             </grants>
         </archiver>
+        <!-- The freshness view's definer (migration 0006): it reads the newest event and
+             writes a sample, nothing else. The password is the hash of random bytes nobody
+             kept, so no one can log in as it. -->
+        <freshness_definer>
+            <password_sha256_hex>0d9695c9462f214094b9c439fa4fa5bdbf4e10bcf7723f1c28c936c6c68869a8</password_sha256_hex>
+            <networks><ip>::1</ip></networks>
+            <grants>
+                <query>GRANT SELECT ON demos.wiki_edits</query>
+                <query>GRANT INSERT ON demos.freshness_samples</query>
+                <!-- The integration tests' database, so their copy of the view runs too. -->
+                <query>GRANT SELECT ON demos_test.wiki_edits</query>
+                <query>GRANT INSERT ON demos_test.freshness_samples</query>
+            </grants>
+        </freshness_definer>
     </users>
+
+    <!-- The api is public. Limits per minute, about six times what it uses: 450 queries
+         a minute, under a second of execution time, no errors (production, 2026-10-10,
+         system.quotas_usage). Past them, ClickHouse refuses its queries until the minute
+         ends; the widget shows Paused rather than the host falling over. -->
+    <quotas>
+        <api>
+            <interval>
+                <duration>60</duration>
+                <queries>3000</queries>
+                <errors>300</errors>
+                <execution_time>120</execution_time>
+            </interval>
+        </api>
+    </quotas>
 </clickhouse>
