@@ -41,6 +41,13 @@ from livedemos.ingest.resume import (
 log = logging.getLogger(__name__)
 
 _MAX_EXPONENT = 32  # 2**32 seconds is already far past any cap; keeps the float finite
+# Wikimedia's HTTP termination layer ends every stream connection after 15 minutes
+# (https://wikitech.wikimedia.org/wiki/Event_Platform/EventStreams_HTTP_Service, "Server-side
+# enforced timeout"); it arrives as an incomplete chunked read. Only a close that matches
+# that, on a stream that was up, counts as routine: anything else stays "network".
+_SOURCE_TIMEOUT_S = 15 * 60
+_SOURCE_TIMEOUT_SLACK_S = 60
+_monotonic = time.monotonic  # replaced in tests
 # Reconnects for the Ops tab: written by their own task, off the ingest path, every few
 # seconds and with a short timeout, so a slow write can never hold up a batch. Kept in
 # memory while ClickHouse is down (often why we reconnected); the oldest go past this many.
@@ -97,7 +104,8 @@ class Consumer:
                 if self._pending is not None:
                     await self._commit_pending(stop)
                 delay = self._backoff.next_delay()
-                log.warning("reconnecting", extra={"reason": reason, "delay_s": round(delay, 2)})
+                level = logging.INFO if reason == "source_closed" else logging.WARNING
+                log.log(level, "reconnecting", extra={"reason": reason, "delay_s": round(delay, 2)})
                 await _sleep_or_stop(delay, stop)
         finally:
             recorder.cancel()
@@ -180,6 +188,7 @@ class Consumer:
 
         timeout = httpx.Timeout(connect=10.0, read=self._s.idle_timeout_s, write=10.0, pool=10.0)
         batch = self._new_batch()
+        connected_at: float | None = None  # once the response headers are accepted
         try:
             async with (
                 httpx.AsyncClient(timeout=timeout) as client,
@@ -189,6 +198,7 @@ class Consumer:
             ):
                 source.response.raise_for_status()
                 metrics.CONNECTED.set(1)
+                connected_at = _monotonic()
                 log.info("connected", extra={"resumed": bool(self._bookmark)})
                 # A reader task parses and filters into a bounded queue, so the flush timer
                 # fires even when the stream goes quiet, a slow insert pushes back on the
@@ -228,10 +238,12 @@ class Consumer:
             log.warning("stream refused", extra={"status": exc.response.status_code})
             return "http_status"
         except httpx.RemoteProtocolError as exc:
-            # Wikimedia ends every stream connection after about 15 minutes, mid-response
-            # (measured 10 Oct: 09:20:55, 09:35:56, 09:50:57). Routine, not a fault.
-            log.info("stream closed by the source", extra={"error": repr(exc)})
-            return "source_closed"
+            lasted = None if connected_at is None else _monotonic() - connected_at
+            if _is_source_timeout(exc, lasted):
+                log.info("stream closed by the source", extra={"lasted_s": round(lasted or 0)})
+                return "source_closed"
+            log.warning("stream error", extra={"error": repr(exc), "lasted_s": lasted})
+            return "network"
         except httpx.HTTPError as exc:
             log.warning("stream error", extra={"error": repr(exc)})
             return "network"
@@ -372,6 +384,15 @@ class Consumer:
             return
         # Stopping with the outcome unknown: the next start waits for in-flight inserts
         # and reads the bookmark from what actually committed.
+
+
+def _is_source_timeout(exc: httpx.RemoteProtocolError, lasted_s: float | None) -> bool:
+    """Wikimedia's scheduled close: a stream that was up ends mid-body at about 15 minutes."""
+    return (
+        lasted_s is not None
+        and abs(lasted_s - _SOURCE_TIMEOUT_S) <= _SOURCE_TIMEOUT_SLACK_S
+        and "incomplete chunked read" in str(exc)
+    )
 
 
 class _EndOfStream:

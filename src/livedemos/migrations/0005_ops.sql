@@ -38,8 +38,8 @@ ALTER TABLE {database}.wiki_edits
 ALTER TABLE {database}.wiki_edits MATERIALIZE INDEX ingested_at_minmax SETTINGS mutations_sync = 1;
 
 -- Each time ingest's stream connection ended and it reconnected, and why. Written by
--- ingest; reasons are the ones in ingest/consumer.py (idle, eof, network, http_status,
--- clickhouse).
+-- ingest; reasons are the ones in ingest/consumer.py (idle, eof, source_closed, network,
+-- http_status, clickhouse).
 CREATE TABLE IF NOT EXISTS {database}.ingest_reconnects
 (
     at      DateTime64(3, 'UTC'),

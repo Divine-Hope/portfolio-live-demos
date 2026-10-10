@@ -201,7 +201,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | What fails | What happens | How we know |
 |---|---|---|
 | ingest process crashes or is killed | Restarts; waits for its in-flight insert; resumes from the last committed bookmark; seam deduped. Proven by `make proof`, which kills it mid-insert. | `ingest_connected`, `time() - ingest_last_commit_timestamp_seconds` |
-| Wikimedia ends the connection (it does so every 15 minutes, mid-response) | Reconnect within a second from the bookmark | `ingest_reconnects_total{reason="source_closed"}` |
+| Wikimedia ends the connection at its [15-minute limit](https://wikitech.wikimedia.org/wiki/Event_Platform/EventStreams_HTTP_Service) | Reconnect within a second from the bookmark. Counted as routine only when a stream that was up ends mid-body after 14 to 16 minutes; any other protocol error counts as `network` | `ingest_reconnects_total{reason="source_closed"}` |
 | The network drops the connection | Reconnect with jittered backoff from the bookmark | `ingest_reconnects_total{reason="network"}` |
 | Half-open socket | Idle watchdog reconnects after 30 s | `reason="idle"` |
 | ClickHouse down | ingest disconnects and waits; after 10 s the api answers 503, so CloudFront serves the S3 copy and the widget shows "Paused" | `reason="clickhouse"`, readiness |
