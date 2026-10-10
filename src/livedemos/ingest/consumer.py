@@ -13,7 +13,6 @@ only one copy is kept. Only then does the bookmark move and the stream reconnect
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import random
@@ -26,8 +25,9 @@ from uuid import uuid4
 import httpx
 from httpx_sse import EventSource, aconnect_sse
 
-from livedemos.clickhouse import ClickHouseError, Database
+from livedemos.aio import sleep_unless_stopped
 from livedemos.config import IngestSettings
+from livedemos.db.clickhouse import ClickHouseError, Database
 from livedemos.ingest import metrics
 from livedemos.ingest.batch import Batch, PendingInsert, RecentIds, SequenceGenerator
 from livedemos.ingest.events import Edit, Skip, parse
@@ -48,9 +48,7 @@ _MAX_EXPONENT = 32  # 2**32 seconds is already far past any cap; keeps the float
 _SOURCE_TIMEOUT_S = 15 * 60
 _SOURCE_TIMEOUT_SLACK_S = 60
 _monotonic = time.monotonic  # replaced in tests
-# Reconnects for the Ops tab: written by their own task, off the ingest path, every few
-# seconds and with a short timeout, so a slow write can never hold up a batch. Kept in
-# memory while ClickHouse is down (often why we reconnected); the oldest go past this many.
+# Reconnects waiting to be recorded: the oldest go past this many.
 _MAX_UNRECORDED_RECONNECTS = 1_000
 _RECORD_RECONNECTS_EVERY_S = 5.0
 _RECORD_RECONNECTS_TIMEOUT_S = 2.0
@@ -75,6 +73,51 @@ class Backoff:
         return random.uniform(0, ceiling)  # noqa: S311 - jitter, not crypto
 
 
+class ReconnectRecorder:
+    """Each reconnect and why, for the Ops tab. Written by its own task, off the ingest path,
+    every few seconds and with a short timeout, so a slow write never holds up a batch.
+    Kept in memory while ClickHouse is down (often why ingest reconnected)."""
+
+    def __init__(self, ch: Database):
+        self._ch = ch
+        self._waiting: deque[dict[str, str]] = deque(maxlen=_MAX_UNRECORDED_RECONNECTS)
+        self._sealed: tuple[list[dict[str, str]], str] | None = None
+
+    def add(self, reason: str) -> None:
+        self._waiting.append({"at": datetime.now(UTC).isoformat(), "reason": reason})
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            await sleep_unless_stopped(stop, _RECORD_RECONNECTS_EVERY_S)
+            await self.flush()
+
+    async def flush(self) -> None:
+        """Write the reconnects not yet recorded. Never raises.
+
+        Like a batch of edits: the rows are sealed with a token first and retried unchanged
+        until ClickHouse confirms them, so an insert that landed but timed out isn't counted
+        twice. Reconnects that happen meanwhile wait for the next batch.
+        """
+        if self._sealed is None:
+            if not self._waiting:
+                return
+            self._sealed = (list(self._waiting), f"reconnects-{uuid4().hex}")
+            self._waiting.clear()
+        rows, token = self._sealed
+        try:
+            # Giving up on the reply doesn't stop the insert on the server. The same query id
+            # makes ClickHouse refuse a retry while it still runs; the rows stay sealed for
+            # the next try.
+            await asyncio.wait_for(
+                self._ch.insert("ingest_reconnects", rows, dedup_token=token, query_id=token),
+                timeout=_RECORD_RECONNECTS_TIMEOUT_S,
+            )
+        except (ClickHouseError, TimeoutError) as exc:
+            log.warning("recording reconnects failed", extra={"error": repr(exc)})
+            return
+        self._sealed = None
+
+
 class Consumer:
     def __init__(self, settings: IngestSettings, ch: Database):
         self._s = settings
@@ -87,12 +130,11 @@ class Consumer:
         self._floor: datetime | None = None  # see ResumeState.floor
         self._pending: PendingInsert | None = None  # sent, outcome unknown
         self._backoff = Backoff(settings.backoff_initial_s, settings.backoff_max_s)
-        self._reconnects: deque[dict[str, str]] = deque(maxlen=_MAX_UNRECORDED_RECONNECTS)
-        self._reconnects_sealed: tuple[list[dict[str, str]], str] | None = None
+        self._reconnects = ReconnectRecorder(ch)
 
     async def run(self, stop: asyncio.Event) -> None:
         metrics.HEARTBEAT.set_to_current_time()
-        recorder = asyncio.create_task(self._record_reconnects_until(stop))
+        recorder = asyncio.create_task(self._reconnects.run(stop))
         try:
             await self._load_state(stop)
             while not stop.is_set():
@@ -100,17 +142,17 @@ class Consumer:
                 if stop.is_set():
                     break
                 metrics.RECONNECTS.labels(reason=reason).inc()
-                self._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": reason})
+                self._reconnects.add(reason)
                 if self._pending is not None:
                     await self._commit_pending(stop)
                 delay = self._backoff.next_delay()
                 level = logging.INFO if reason == "source_closed" else logging.WARNING
                 log.log(level, "reconnecting", extra={"reason": reason, "delay_s": round(delay, 2)})
-                await _sleep_or_stop(delay, stop)
+                await sleep_unless_stopped(stop, delay)
         finally:
             recorder.cancel()
             await asyncio.gather(recorder, return_exceptions=True)
-            await self._record_reconnects()  # one last, bounded try before exiting
+            await self._reconnects.flush()  # one last, bounded try before exiting
 
     async def _load_state(self, stop: asyncio.Event) -> None:
         backoff = Backoff(self._s.backoff_initial_s, self._s.backoff_max_s)
@@ -129,7 +171,7 @@ class Consumer:
                 continue
             except ClickHouseError as exc:
                 log.warning("loading resume state failed", extra={"error": str(exc)})
-            await _sleep_or_stop(backoff.next_delay(), stop)
+            await sleep_unless_stopped(stop, backoff.next_delay())
 
     async def _load_state_once(self) -> None:
         now = datetime.now(UTC)
@@ -176,8 +218,8 @@ class Consumer:
         """Hold one connection until something goes wrong. Returns the reason it ended."""
         try:
             await self._expire_old_bookmark()
-        except ClickHouseError as exc:
-            log.error("recording a gap failed", extra={"error": str(exc)})
+        except ClickHouseError:
+            log.exception("recording a gap failed")
             return "clickhouse"
         headers = {"User-Agent": self._s.user_agent, "Accept": "text/event-stream"}
         params: dict[str, str] = {}
@@ -187,7 +229,6 @@ class Consumer:
             params["since"] = self._since.isoformat().replace("+00:00", "Z")
 
         timeout = httpx.Timeout(connect=10.0, read=self._s.idle_timeout_s, write=10.0, pool=10.0)
-        batch = self._new_batch()
         connected_at: float | None = None  # once the response headers are accepted
         try:
             async with (
@@ -200,38 +241,7 @@ class Consumer:
                 metrics.CONNECTED.set(1)
                 connected_at = _monotonic()
                 log.info("connected", extra={"resumed": bool(self._bookmark)})
-                # A reader task parses and filters into a bounded queue, so the flush timer
-                # fires even when the stream goes quiet, a slow insert pushes back on the
-                # socket, and only rows we keep take up memory.
-                queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=self._s.flush_max_rows * 2)
-                reader = asyncio.create_task(_read_into(source, queue, self._parse))
-                try:
-                    while not stop.is_set():
-                        metrics.HEARTBEAT.set_to_current_time()
-                        metrics.QUEUE_DEPTH.set(queue.qsize())
-                        wait_s = batch.time_left() if len(batch) else self._s.flush_interval_s
-                        try:
-                            item = await asyncio.wait_for(queue.get(), timeout=wait_s)
-                        except TimeoutError:
-                            item = None
-                        if isinstance(item, BaseException):
-                            raise item
-                        if item is _EOF:
-                            return "eof"
-                        if isinstance(item, tuple):
-                            edit, sse_id = item
-                            if self._is_new(edit, batch):
-                                if not batch.accepts(edit):  # one partition per INSERT
-                                    await self._flush(batch)
-                                    batch = self._new_batch()
-                                batch.add(edit, sse_id=sse_id, ingest_seq=self._seq.next())
-                        if batch.due():
-                            await self._flush(batch)
-                            batch = self._new_batch()
-                    return "stop"
-                finally:
-                    reader.cancel()
-                    await asyncio.gather(reader, return_exceptions=True)
+                return await self._pump(source, stop)
         except httpx.ReadTimeout:
             return "idle"
         except httpx.HTTPStatusError as exc:
@@ -247,13 +257,51 @@ class Consumer:
         except httpx.HTTPError as exc:
             log.warning("stream error", extra={"error": repr(exc)})
             return "network"
-        except ClickHouseError as exc:
+        except ClickHouseError:
             # Backpressure: stop reading. Wikimedia keeps the events; we'll come back for them.
-            log.error("insert failed, disconnecting", extra={"error": str(exc)})
+            log.exception("insert failed, disconnecting")
             return "clickhouse"
         finally:
             metrics.CONNECTED.set(0)
             metrics.QUEUE_DEPTH.set(0)
+
+    async def _pump(self, source: EventSource, stop: asyncio.Event) -> str:
+        """Batch and flush events from an open stream until it ends or `stop` is set.
+
+        A reader task parses and filters into a bounded queue, so the flush timer fires even
+        when the stream goes quiet, a slow insert pushes back on the socket, and only rows
+        we keep take up memory. Stream and insert errors propagate to the caller.
+        """
+        batch = self._new_batch()
+        queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=self._s.flush_max_rows * 2)
+        reader = asyncio.create_task(_read_into(source, queue, self._parse))
+        try:
+            while not stop.is_set():
+                metrics.HEARTBEAT.set_to_current_time()
+                metrics.QUEUE_DEPTH.set(queue.qsize())
+                wait_s = batch.time_left() if len(batch) else self._s.flush_interval_s
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=wait_s)
+                except TimeoutError:
+                    item = None
+                if isinstance(item, BaseException):
+                    raise item
+                if item is _EOF:
+                    return "eof"
+                if isinstance(item, tuple):
+                    edit, sse_id = item
+                    if self._is_new(edit, batch):
+                        if not batch.accepts(edit):  # one partition per INSERT
+                            await self._flush(batch)
+                            batch = self._new_batch()
+                        batch.add(edit, sse_id=sse_id, ingest_seq=self._seq.next())
+                if batch.due():
+                    await self._flush(batch)
+                    batch = self._new_batch()
+            return "stop"
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
             if len(batch) and self._pending is None:
                 log.info("dropping unsent batch, it will be replayed", extra={"rows": len(batch)})
 
@@ -264,7 +312,7 @@ class Consumer:
         except json.JSONDecodeError:
             metrics.EVENTS.labels(outcome=Skip.MALFORMED).inc()
             return None
-        result = parse(event, wikis=self._s.wiki_set, types=self._s.type_set)
+        result = parse(event, wikis=self._s.wikis, types=self._s.types)
         if isinstance(result, Skip):
             metrics.EVENTS.labels(outcome=result.value).inc()
             return None
@@ -290,37 +338,6 @@ class Consumer:
         self._pending = pending  # if this raises, the outcome is unknown: keep it
         await self._insert(pending)
         self._committed(pending)
-
-    async def _record_reconnects_until(self, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            await _sleep_or_stop(_RECORD_RECONNECTS_EVERY_S, stop)
-            await self._record_reconnects()
-
-    async def _record_reconnects(self) -> None:
-        """Write the reconnects not yet recorded, for the Ops tab. Never raises.
-
-        Like a batch of edits: the rows are sealed with a token first and retried unchanged
-        until ClickHouse confirms them, so an insert that landed but timed out isn't counted
-        twice. Reconnects that happen meanwhile wait for the next batch.
-        """
-        if self._reconnects_sealed is None:
-            if not self._reconnects:
-                return
-            self._reconnects_sealed = (list(self._reconnects), f"reconnects-{uuid4().hex}")
-            self._reconnects.clear()
-        rows, token = self._reconnects_sealed
-        try:
-            # Giving up on the reply doesn't stop the insert on the server. The same query id
-            # makes ClickHouse refuse a retry while it still runs; the rows stay sealed for
-            # the next try.
-            await asyncio.wait_for(
-                self._ch.insert("ingest_reconnects", rows, dedup_token=token, query_id=token),
-                timeout=_RECORD_RECONNECTS_TIMEOUT_S,
-            )
-        except (ClickHouseError, TimeoutError) as exc:
-            log.warning("recording reconnects failed", extra={"error": repr(exc)})
-            return
-        self._reconnects_sealed = None
 
     async def _insert(self, pending: PendingInsert) -> None:
         started = time.perf_counter()
@@ -371,7 +388,7 @@ class Consumer:
         backoff = Backoff(self._s.backoff_initial_s, self._s.backoff_max_s)
         while not stop.is_set():
             metrics.HEARTBEAT.set_to_current_time()
-            await _sleep_or_stop(backoff.next_delay(), stop)
+            await sleep_unless_stopped(stop, backoff.next_delay())
             if stop.is_set():
                 break
             try:
@@ -416,10 +433,5 @@ async def _read_into(
             if edit is not None:
                 await queue.put((edit, message.id))
         await queue.put(_EOF)
-    except Exception as exc:  # handed to the consumer loop, which decides what it means
+    except Exception as exc:  # noqa: BLE001 (handed to the consumer loop, which decides what it means)
         await queue.put(exc)
-
-
-async def _sleep_or_stop(delay: float, stop: asyncio.Event) -> None:
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(stop.wait(), timeout=delay)

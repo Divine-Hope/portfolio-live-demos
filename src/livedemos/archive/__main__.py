@@ -1,19 +1,18 @@
-"""Entry point: `python -m livedemos.archive`.
+"""Entry point: `livedemos-archive`.
 
 The service also fetches the month's AWS cost once a day (ops/cost.py), when
 ARCHIVE_COST_TAG and ARCHIVE_COST_CLAIMS are set: it's the one process that runs only on
 the live host.
 
-python -m livedemos.archive                        # the service: archive due hours, repeat
-python -m livedemos.archive --once                 # one pass, then exit
-python -m livedemos.archive --hour 2026-10-06T09   # rewrite that hour's file, even if it exists
+livedemos-archive                        # the service: archive due hours, repeat
+livedemos-archive --once                 # one pass, then exit
+livedemos-archive --hour 2026-10-06T09   # rewrite that hour's file, even if it exists
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import logging
 import signal
 import sys
@@ -23,10 +22,12 @@ from datetime import UTC, datetime
 import httpx
 from prometheus_client import start_http_server
 
+from livedemos.aio import sleep_unless_stopped
 from livedemos.archive import metrics
-from livedemos.archive.job import HOUR_S, Archiver, NothingToArchive
-from livedemos.clickhouse import ClickHouse, ClickHouseError
-from livedemos.config import archive_settings, clickhouse_settings
+from livedemos.archive.job import Archiver, NothingToArchive
+from livedemos.archive.s3 import HOUR_S
+from livedemos.config import archive_settings, clickhouse_settings, cost_settings
+from livedemos.db.clickhouse import ClickHouse, ClickHouseError
 from livedemos.logs import setup_logging
 from livedemos.ops.cost import CostFetcher
 
@@ -77,21 +78,18 @@ async def _serve(
         if live and cost is not None:
             await cost.refresh_if_due(datetime.now(UTC))
         metrics.LAST_RUN.set(time.time())
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        await sleep_unless_stopped(stop, interval_s)
 
 
-async def main(args: argparse.Namespace) -> int:
-    setup_logging()
+async def run(args: argparse.Namespace) -> int:
     settings = archive_settings()
-    ch = ClickHouse(clickhouse_settings())
-    archiver = Archiver(settings, ch)
-    try:
+    async with ClickHouse(clickhouse_settings()) as ch:
+        archiver = Archiver(settings, ch)
         if args.hour is not None:
             try:
                 outcome = await archiver.archive_hour(args.hour, manual=True)
             except NothingToArchive as exc:
-                log.error("not rewritten", extra={"reason": str(exc)})
+                log.error("not rewritten", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
                 return 2
             log.info("hour rewritten", extra={"result": outcome.result, "rows": outcome.rows})
             return 0 if outcome.result == "written" else 1
@@ -100,13 +98,14 @@ async def main(args: argparse.Namespace) -> int:
             return 0 if all(r.result == "written" for r in results) else 1
         start_http_server(settings.metrics_port)
         cost = None
-        if settings.cost_tag and settings.cost_claims:
+        costs = cost_settings()
+        if costs.enabled:
             import boto3  # only in production; credentials come from the instance role
 
             cost = CostFetcher(
                 ch,
-                tag=settings.cost_tag,
-                claims=settings.cost_claims,
+                tag=costs.cost_tag,
+                claims=costs.cost_claims,
                 # Cost Explorer has one endpoint, in us-east-1.
                 ce_factory=lambda: boto3.client("ce", region_name="us-east-1"),
                 s3_factory=lambda: boto3.client("s3"),
@@ -114,13 +113,17 @@ async def main(args: argparse.Namespace) -> int:
             )
         await _serve(archiver, cost, settings.interval_s, settings.only_on_ip)
         return 0
-    finally:
-        await ch.aclose()
 
 
-if __name__ == "__main__":
+def main() -> int:
     parser = argparse.ArgumentParser(description="Hourly Parquet archive of raw edits.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="one pass, then exit")
     mode.add_argument("--hour", type=_hour, help="rewrite one hour (UTC), e.g. 2026-10-06T09")
-    sys.exit(asyncio.run(main(parser.parse_args())))
+    args = parser.parse_args()
+    setup_logging()
+    return asyncio.run(run(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

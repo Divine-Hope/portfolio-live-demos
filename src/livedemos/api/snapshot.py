@@ -14,7 +14,6 @@ most one batch of late events, and the next snapshot agrees with itself again.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
@@ -22,9 +21,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from livedemos.aio import sleep_unless_stopped
 from livedemos.api import metrics, queries
-from livedemos.api.contract import Article, LangSummary, LivePayload, MinuteBucket, article_url, iso
-from livedemos.clickhouse import Queryable
+from livedemos.api.contract import Article, LangSummary, LivePayload, MinuteBucket, article_url
+from livedemos.dates import iso
+from livedemos.db.clickhouse import Queryable
 
 log = logging.getLogger(__name__)
 
@@ -191,8 +192,7 @@ class Snapshotter:
                 log.exception("snapshot failed")
             elapsed = time.perf_counter() - started
             metrics.SNAPSHOT_SECONDS.observe(elapsed)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=max(0.0, self._interval_s - elapsed))
+            await sleep_unless_stopped(stop, self._interval_s - elapsed)
 
     async def build(self) -> Snapshot:
         head = await self._db.query(queries.NEWEST)

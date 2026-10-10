@@ -8,7 +8,7 @@ NEWEST = 1_759_600_000.0  # a fixed instant, minute-aligned + 40 s below
 NEWEST_MINUTE = int(NEWEST // 60) * 60
 
 
-def build(**overrides: Any) -> dict[str, Any]:
+def build(**overrides: Any) -> Any:
     args: dict[str, Any] = {
         "now": NEWEST + 2,
         "newest": NEWEST,

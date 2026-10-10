@@ -22,14 +22,18 @@ FOLDER = "livedemos"
 
 
 def main() -> None:
-    client = httpx.Client(
+    with httpx.Client(
         base_url=os.environ["GRAFANA_URL"],
         headers={
             "Authorization": f"Bearer {os.environ['GRAFANA_TOKEN']}",
             "X-Disable-Provenance": "true",
         },
         timeout=30,
-    )
+    ) as client:
+        load(client)
+
+
+def load(client: httpx.Client) -> None:
     sources = client.get("/api/datasources").raise_for_status().json()
     prom_uid = next(d["uid"] for d in sources if d["type"] == "prometheus" and "-prom" in d["name"])
 

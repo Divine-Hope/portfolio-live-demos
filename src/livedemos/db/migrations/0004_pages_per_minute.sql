@@ -32,7 +32,7 @@ AS SELECT
 FROM {database}.wiki_edits
 GROUP BY minute, lang;
 
--- Archived hours whose page sets were filled from Parquet (archive/pages.py), recorded only
+-- Archived hours whose page sets were filled from Parquet (rollup/pages.py), recorded only
 -- once an hour's insert has finished. An hour with raw rows gets its sets from the view
 -- instead. Without this, an interrupted fill would look done.
 CREATE TABLE IF NOT EXISTS {database}.wiki_pages_filled

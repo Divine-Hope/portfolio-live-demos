@@ -12,6 +12,8 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
+from livedemos.dates import iso
+
 
 class Skip(StrEnum):
     CANARY = "canary"  # Wikimedia's synthetic test events
@@ -116,8 +118,8 @@ def lang_of(wiki: str) -> str:
 def to_row(edit: Edit, *, sse_id: str, ingest_seq: int, ingested_at: datetime) -> dict[str, Any]:
     return {
         "event_id": edit.event_id,
-        "event_time": _iso_ms(edit.event_time),
-        "ingested_at": _iso_ms(ingested_at),
+        "event_time": iso(edit.event_time),
+        "ingested_at": iso(ingested_at),
         "wiki": edit.wiki,
         "lang": edit.lang,
         "type": edit.type,
@@ -127,7 +129,3 @@ def to_row(edit: Edit, *, sse_id: str, ingest_seq: int, ingested_at: datetime) -
         "sse_id": sse_id,
         "ingest_seq": ingest_seq,
     }
-
-
-def _iso_ms(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")

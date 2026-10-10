@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 import httpx
 
@@ -62,6 +62,12 @@ class Queryable(Protocol):
     ) -> QueryResult: ...
 
 
+class Warehouse(Queryable, Protocol):
+    """Reads, plus statements that return no rows (INSERT ... SELECT, DDL)."""
+
+    async def execute(self, sql: str, *, params: Any = None, settings: Any = None) -> None: ...
+
+
 class Database(Queryable, Protocol):
     """What ingest needs: reads, plus idempotent batch inserts."""
 
@@ -78,12 +84,13 @@ class Database(Queryable, Protocol):
 class ClickHouse:
     def __init__(self, settings: ClickHouseSettings, client: httpx.AsyncClient | None = None):
         self._settings = settings
+        self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=settings.url,
             timeout=settings.timeout_s,
             headers={
                 "X-ClickHouse-User": settings.user,
-                "X-ClickHouse-Key": settings.password,
+                "X-ClickHouse-Key": settings.password.get_secret_value(),
             },
         )
 
@@ -92,7 +99,14 @@ class ClickHouse:
         return self._settings.database
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
 
     async def ping(self) -> bool:
         try:

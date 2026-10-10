@@ -48,6 +48,11 @@ class Freshness:
     budget_used: int
 
 
+def budget_minutes(*, days: int, target: float) -> int:
+    """Minutes allowed to miss the threshold over a full window."""
+    return round(days * 1_440 * (1 - target))
+
+
 def window(*, now_s: float, first_sample_s: float | None, days: int) -> Window | None:
     """The minutes to count, or None before the first sample."""
     if first_sample_s is None:
@@ -78,6 +83,6 @@ def summarise(*, win: Window, sampled: int, fresh: int, target: float, days: int
         unmeasured=unmeasured,
         ratio=ratio,
         met=None if ratio is None else ratio >= target,
-        budget_minutes=round(days * 1_440 * (1 - target)),
+        budget_minutes=budget_minutes(days=days, target=target),
         budget_used=stale + unmeasured,
     )

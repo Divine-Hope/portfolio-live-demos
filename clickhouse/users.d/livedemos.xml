@@ -66,7 +66,7 @@
             <grants>
                 <query>GRANT CREATE DATABASE ON demos.*</query>
                 <query>GRANT CREATE TABLE, CREATE VIEW, ALTER, SELECT, INSERT ON demos.*</query>
-                <!-- Its run lock (migrate.py), and nothing else it may drop. -->
+                <!-- Its run lock (rollup/lock.py), and nothing else it may drop. -->
                 <query>GRANT DROP TABLE ON demos.schema_migrations_lock</query>
                 <!-- Reconcile repairs only while no ingest insert runs: it must see them. -->
                 <query>GRANT SELECT(query_id, current_database, user) ON system.processes</query>

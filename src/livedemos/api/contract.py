@@ -6,14 +6,8 @@ when data counts as stale, travels in the payload instead of being hardcoded twi
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Literal, TypedDict
 from urllib.parse import quote
-
-
-def iso(ts: float) -> str:
-    """Unix seconds as ISO 8601 UTC with milliseconds: `2026-10-04T18:00:00.123Z`."""
-    return datetime.fromtimestamp(ts, UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def article_url(lang: str, title: str) -> str:
@@ -108,7 +102,7 @@ IngestState = Literal["live", "catching_up", "paused", "empty"]
 
 
 class IngestReport(TypedDict):
-    state: IngestState  # judged by the API (api/ops.py); the page shows it, doesn't redo it
+    state: IngestState  # judged by the API (ops/report.py); the page shows it, doesn't redo it
     newest_event_at: str | None  # the newest event's own time; None with no rows
     last_stored_at: str | None  # when ingest last stored a row (restored rows keep theirs)
     stale_after_s: float  # the age limit `state` is judged with

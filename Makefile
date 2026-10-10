@@ -83,28 +83,28 @@ reconcile: clickhouse ## Check the per-minute rollup against raw rows; REPAIR=1 
 ifdef REPAIR
 	docker compose stop ingest
 	sleep 30   # repair refuses while rows are still arriving
-	docker compose run --rm migrate python -m livedemos.reconcile --repair; \
+	docker compose run --rm migrate livedemos-reconcile --repair; \
 		status=$$?; docker compose start ingest; exit $$status
 else
-	docker compose run --rm migrate python -m livedemos.reconcile
+	docker compose run --rm migrate livedemos-reconcile
 endif
 
 .PHONY: archive-hour
 archive-hour: clickhouse ## Rewrite one hour's Parquet file from ClickHouse: HOUR=2026-10-06T09 (pauses the service)
 	docker compose stop archive
-	docker compose run --rm archive python -m livedemos.archive --hour $(HOUR); \
+	docker compose run --rm archive livedemos-archive --hour $(HOUR); \
 		status=$$?; docker compose start archive; exit $$status
 
 .PHONY: rebuild-rollups
 rebuild-rollups: clickhouse ## Rebuild the per-minute rollup from the archive: FROM=2026-10-01 TO=2026-10-03 [ALLOW_MISSING=1] (stops ingest)
 	docker compose stop ingest
 	sleep 30   # the rebuild refuses while rows are still arriving
-	docker compose run --rm migrate python -m livedemos.archive.rebuild --from $(FROM) --to $(TO) $(if $(ALLOW_MISSING),--allow-missing); \
+	docker compose run --rm migrate livedemos-rebuild --from $(FROM) --to $(TO) $(if $(ALLOW_MISSING),--allow-missing); \
 		status=$$?; docker compose start ingest; exit $$status
 
 .PHONY: bench
 bench: clickhouse ## Benchmark every query at 7 days of retained data (separate database)
-	$(CH_TEST_ENV) uv run python -m livedemos.devtools.bench
+	$(CH_TEST_ENV) uv run python -m devtools.bench
 
 .PHONY: e2e
 e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWSER=firefox or webkit to switch)

@@ -19,15 +19,16 @@ import sys
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from livedemos.clickhouse import ClickHouse, ClickHouseError
 from livedemos.config import ClickHouseSettings, IngestSettings
+from livedemos.db.clickhouse import ClickHouse, ClickHouseError
 from livedemos.ingest.consumer import Consumer
-from livedemos.reconcile import find_mismatches
+from livedemos.rollup.reconcile import find_mismatches
 
 from .conftest import TEST_DB, clickhouse_test_settings, free_port
 
@@ -53,7 +54,7 @@ FROM wiki_edits
 @pytest.fixture
 async def fake_stream() -> AsyncIterator[str]:
     port = free_port()
-    module = "livedemos.devtools.fake_eventstreams"
+    module = "devtools.fake_eventstreams"
     cmd = [sys.executable, "-m", module, "--host", "127.0.0.1", "--port", str(port), *FAKE_ARGS]
     proc = subprocess.Popen(cmd)
     base = f"http://127.0.0.1:{port}"
@@ -79,14 +80,14 @@ def start_ingest(stream_base: str) -> subprocess.Popen[bytes]:
         **os.environ,
         "CLICKHOUSE_URL": settings.url,
         "CLICKHOUSE_USER": settings.user,
-        "CLICKHOUSE_PASSWORD": settings.password,
+        "CLICKHOUSE_PASSWORD": settings.password.get_secret_value(),
         "CLICKHOUSE_DATABASE": TEST_DB,
         "INGEST_STREAM_URL": f"{stream_base}/v2/stream/recentchange",
         "INGEST_METRICS_PORT": str(free_port()),
         "INGEST_BACKOFF_INITIAL_S": "0.2",
         "INGEST_BACKOFF_MAX_S": "1",
     }
-    return subprocess.Popen([sys.executable, "-m", "livedemos.ingest"], env=env)
+    return subprocess.Popen([str(Path(sys.executable).with_name("livedemos-ingest"))], env=env)
 
 
 async def test_kill_mid_insert_loses_nothing_and_duplicates_nothing(

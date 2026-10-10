@@ -10,18 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from livedemos.clickhouse import ClickHouse
-from livedemos.ingest.resume import INSERT_QUERY_ID_PREFIX
+from livedemos.db.clickhouse import ClickHouse
+from livedemos.ingest.resume import INSERT_QUERY_ID_PREFIX, MAX_SEQ, RUNNING_INSERTS
 
 _LAST_INGEST = "SELECT toUnixTimestamp64Milli(max(ingested_at)) AS ms, count() AS n FROM wiki_edits"
-# max(ingest_seq) comes from the seq_max projection: a cheap sentinel for "a batch landed".
-_LAST_SEQ = "SELECT max(ingest_seq) AS seq FROM wiki_edits"
-# An insert whose raw rows are already visible can still be writing the rollup (the view
-# runs after the raw part commits), so "no new rows" isn't enough: no insert may be running.
-_RUNNING_INSERTS = (
-    "SELECT count() AS n FROM system.processes "
-    "WHERE startsWith(query_id, {prefix:String}) AND current_database = currentDatabase()"
-)
 
 
 class IngestRunning(RuntimeError):
@@ -34,9 +26,13 @@ async def _last_ingest_ms(ch: ClickHouse) -> int:
 
 
 async def _ingest_state(ch: ClickHouse) -> tuple[int, int]:
-    """(inserts running now, highest committed ingest_seq)."""
-    running = await ch.query(_RUNNING_INSERTS, params={"prefix": INSERT_QUERY_ID_PREFIX})
-    seq = await ch.query(_LAST_SEQ)
+    """(inserts running now, highest committed ingest_seq).
+
+    An insert whose raw rows are already visible can still be writing the rollup (the view
+    runs after the raw part commits), so "no new rows" isn't enough: none may be running.
+    """
+    running = await ch.query(RUNNING_INSERTS, params={"prefix": INSERT_QUERY_ID_PREFIX})
+    seq = await ch.query(MAX_SEQ)
     return int(running.rows[0]["n"]), int(seq.rows[0]["seq"]) if seq.rows else 0
 
 

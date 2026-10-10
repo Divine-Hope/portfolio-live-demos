@@ -1,6 +1,6 @@
 import pytest
 
-from livedemos.migrate import load
+from livedemos.db.migrate import load
 
 
 def test_migrations_are_numbered_in_order_and_rendered() -> None:

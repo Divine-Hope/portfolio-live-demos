@@ -98,11 +98,12 @@ ENDPOINT 'localhost:8333', URL_STYLE 'path', USE_SSL false)` and `s3://archive/.
 ```
 src/livedemos/
   ingest/         stream consumer: parse, batch, resume
-  api/            snapshot loop, Query it, health
-  devtools/       fake EventStreams server, and the benchmark
-  migrations/     versioned ClickHouse schema, applied once each by `migrate`
-  archive/        hourly Parquet archive on S3, rebuilding the rollup, restoring a new host
-  reconcile.py    rollup-versus-raw check and repair
+  api/            snapshot loop, Query it, the Ops tab, health
+  db/             ClickHouse client and the versioned schema (migrations/)
+  rollup/         the per-minute rollup: lock, reconcile, rebuild, restore, page sets
+  archive/        hourly Parquet archive on S3
+  ops/            the Ops tab's report, freshness SLO and AWS cost
+devtools/         fake EventStreams server, and the benchmark (not in the package)
 clickhouse/       low-memory server config, least-privilege users
 web/              embeddable widget and a local demo host page
 infra/            Terraform: network, host group, CloudFront, buckets, CI and deploy roles

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from livedemos.clickhouse import Database
+from livedemos.db.clickhouse import Database
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +32,24 @@ class ResumeState:
     gap: tuple[datetime, datetime] | None  # history we know we've lost, to record
 
 
+# Ingest's inserts still running in this database. Another database's (a test run next to
+# a local stack) mustn't count.
+RUNNING_INSERTS = (
+    "SELECT count() AS n FROM system.processes "
+    "WHERE startsWith(query_id, {prefix:String}) AND current_database = currentDatabase()"
+)
+# Answered by the `seq_max` projection: one row per part (migration 0002).
+MAX_SEQ = "SELECT max(ingest_seq) AS seq FROM wiki_edits"
+# The newest rows by ingest order, from a floor on the `by_ingest_seq` projection's key.
+INGEST_TAIL = """
+SELECT toString(event_id) AS id, sse_id
+FROM wiki_edits
+WHERE ingest_seq >= {floor:UInt64}
+ORDER BY ingest_seq DESC
+LIMIT {limit:UInt32}
+"""
+
+
 async def wait_for_inflight_inserts(ch: Database, *, timeout_s: float) -> bool:
     """Wait until no ingest INSERT is still running on the server. False on timeout.
 
@@ -44,11 +62,7 @@ async def wait_for_inflight_inserts(ch: Database, *, timeout_s: float) -> bool:
     """
     deadline = time.monotonic() + timeout_s
     while True:
-        result = await ch.query(
-            "SELECT count() AS n FROM system.processes "
-            "WHERE startsWith(query_id, {prefix:String}) AND current_database = currentDatabase()",
-            params={"prefix": INSERT_QUERY_ID_PREFIX},
-        )
+        result = await ch.query(RUNNING_INSERTS, params={"prefix": INSERT_QUERY_ID_PREFIX})
         if not int(result.rows[0]["n"]):
             return True
         if time.monotonic() >= deadline:
@@ -109,7 +123,7 @@ RESTORE_REPLAY_MARGIN = timedelta(minutes=30)
 async def _after_restore(
     ch: Database, *, now: datetime, retention: timedelta, recent_ids: list[str], last_seq: int
 ) -> ResumeState:
-    """The newest raw rows came back from the archive (archive/restore.py), no bookmark.
+    """The newest raw rows came back from the archive (rollup/restore.py), no bookmark.
 
     Replay from before the newest restored event and skip the restored ids: everything
     the old host ingested after these were archived is still in the source. `recent_ids`
@@ -129,7 +143,7 @@ async def _after_restore(
         "resuming after a restore from the archive",
         extra={"since": since.isoformat(), "seam_ids": len(recent_ids)},
     )
-    # Restored raw rows are whole days (archive/restore.py); before them, the rollup.
+    # Restored raw rows are whole days (rollup/restore.py); before them, the rollup.
     floor = oldest.replace(hour=0, minute=0, second=0, microsecond=0)
     return ResumeState(None, since, floor, recent_ids, last_seq, None, gap)
 
@@ -181,8 +195,7 @@ async def _newest_rollup_minute(ch: Database) -> datetime | None:
 
 
 async def _max_ingest_seq(ch: Database) -> int:
-    # Answered by the `seq_max` projection: one row per part (migration 0002).
-    result = await ch.query("SELECT max(ingest_seq) AS seq FROM wiki_edits")
+    result = await ch.query(MAX_SEQ)
     return int(result.rows[0]["seq"]) if result.rows else 0
 
 
@@ -201,16 +214,7 @@ async def _ingest_tail(ch: Database, last_seq: int, *, limit: int) -> tuple[str 
     span = SEAM_WINDOW_NS
     while True:
         floor = max(0, last_seq - span)
-        result = await ch.query(
-            """
-            SELECT toString(event_id) AS id, sse_id
-            FROM wiki_edits
-            WHERE ingest_seq >= {floor:UInt64}
-            ORDER BY ingest_seq DESC
-            LIMIT {limit:UInt32}
-            """,
-            params={"floor": floor, "limit": limit},
-        )
+        result = await ch.query(INGEST_TAIL, params={"floor": floor, "limit": limit})
         if len(result.rows) >= limit or floor == 0:
             break
         span *= 2

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Live data demos: public event streams in, embeddable analytics out."
 readme = "README.md"
 license = "MIT"
+authors = [{ name = "Divine Emmanuel" }]
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.35",
@@ -14,6 +15,18 @@ dependencies = [
     "pydantic-settings>=2.6",
     "uvicorn>=0.32",
 ]
+
+[project.urls]
+Homepage = "https://divinehope.dev/live-demos/"
+Repository = "https://github.com/Divine-Hope/portfolio-live-demos"
+
+[project.scripts]
+livedemos-migrate = "livedemos.db.__main__:main"
+livedemos-ingest = "livedemos.ingest.__main__:main"
+livedemos-ingest-health = "livedemos.ingest.health:main"
+livedemos-archive = "livedemos.archive.__main__:main"
+livedemos-reconcile = "livedemos.rollup.reconcile:main"
+livedemos-rebuild = "livedemos.rollup.rebuild:main"
 
 [dependency-groups]
 dev = [
@@ -41,27 +54,40 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC", "S", "PT"]
+select = [
+    "E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC", "S", "PT",
+    "BLE", "RET", "C4", "PIE", "TRY",
+]
 ignore = [
-    "S608",  # SQL built from allowlisted constants only; see api/queries.py
+    # SQL is built with f-strings only from constants, identifiers checked against an
+    # allowlist and computed integers; every value is a bound parameter. See api/queries.py,
+    # archive/job.py, rollup/restore.py, rollup/rebuild.py and db/migrate.py.
+    "S608",
+    "TRY003",  # a message on the exception that explains the refusal is the point
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S603", "S607", "ASYNC220"]  # tests spawn real processes
-"src/livedemos/devtools/**" = ["S311"]
+"devtools/**" = ["S311"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
-packages = ["livedemos"]
+files = ["src", "tests", "devtools", "deploy/grafana"]
 mypy_path = "src"
 
 [[tool.mypy.overrides]]
 module = ["boto3", "boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
+# The browser tests' packages are in the e2e group, which the type check doesn't install.
+[[tool.mypy.overrides]]
+module = ["playwright.*", "axe_playwright_python.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]  # devtools/, which isn't part of the package
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [

@@ -1,6 +1,6 @@
 """Rebuild the per-minute rollup from the Parquet archive, for whole UTC days.
 
-    python -m livedemos.archive.rebuild --from 2026-10-01 --to 2026-10-03   # [from, to)
+    livedemos-rebuild --from 2026-10-01 --to 2026-10-03   # [from, to)
 
 For when the rollup is lost or wrong and the raw rows are gone (older than 7 days, or a
 host rebuilt from scratch). The live rollup is never half-rebuilt:
@@ -15,7 +15,7 @@ host rebuilt from scratch). The live rollup is never half-rebuilt:
    holds complete replacement months, then swap each month in with REPLACE PARTITION.
    Each swap is atomic: a month is either all old or all new, never empty.
 
-It holds the maintenance lock (`livedemos.migrate.exclusive`) throughout, so it never
+It holds the maintenance lock (`rollup/lock.py`) throughout, so it never
 overlaps a migration, a reconcile repair or another rebuild. It needs ingest stopped
 (`make rebuild-rollups` does that), and runs as `migrator`.
 """
@@ -29,26 +29,21 @@ import sys
 import time
 from datetime import UTC, date, datetime, timedelta
 
-from livedemos.archive import pages
-from livedemos.archive.job import (
-    HOUR_S,
-    READ_SCHEMA,
-    S3_SETTINGS,
-    Archiver,
-    days_glob,
-    s3_function,
-)
-from livedemos.clickhouse import ClickHouse
+from livedemos.archive.job import READ_SCHEMA, RECORDED_COUNTS, Archiver
+from livedemos.archive.s3 import HOUR_S, S3_SETTINGS, days_glob, s3_function
 from livedemos.config import ArchiveSettings, archive_settings, clickhouse_settings
+from livedemos.dates import day_start, iso
+from livedemos.db.clickhouse import ClickHouse
 from livedemos.logs import setup_logging
-from livedemos.maintenance import (
+from livedemos.rollup import pages
+from livedemos.rollup.lock import LockHeld, exclusive
+from livedemos.rollup.maintenance import (
     REBUILD_INSERT_SETTINGS,
     IngestMark,
     IngestRunning,
     require_ingest_still_stopped,
     require_ingest_stopped,
 )
-from livedemos.migrate import MigrationError, exclusive
 
 log = logging.getLogger(__name__)
 
@@ -61,10 +56,6 @@ _COLUMNS = "minute, lang, edits, bot_edits"
 
 class ArchiveIncomplete(RuntimeError):
     """Hours in the range have no file, or a file produced no rows."""
-
-
-def _iso(hour_s: int) -> str:
-    return datetime.fromtimestamp(hour_s, UTC).isoformat()
 
 
 async def rebuild(
@@ -85,7 +76,7 @@ async def rebuild(
     days = (end - first).days
     if not 0 < days <= MAX_DAYS:
         raise ValueError(f"the range must cover 1 to {MAX_DAYS} days")
-    from_s = int(datetime(first.year, first.month, first.day, tzinfo=UTC).timestamp())
+    from_s = day_start(first)
     to_s = from_s + days * DAY_S
     async with exclusive(ch):
         return await _rebuild(
@@ -109,7 +100,7 @@ async def _rebuild(
     missing = sorted(set(hours) - archived)
     if missing and not allow_missing:
         raise ArchiveIncomplete(
-            f"{len(missing)} hour(s) have no file, first {_iso(missing[0])}. If they're "
+            f"{len(missing)} hour(s) have no file, first {iso(missing[0])}. If they're "
             "outages (see ingest_gaps), rerun with --allow-missing to rebuild the rest."
         )
 
@@ -144,20 +135,15 @@ async def _rebuild(
     staged_edits = {int(r["h"]): int(r["e"]) for r in staged.rows}
     empty = sorted(archived - set(staged_hours))
     if empty:  # a file is only written for an hour with rows
-        raise ArchiveIncomplete(f"{len(empty)} file(s) produced no rows, first {_iso(empty[0])}")
+        raise ArchiveIncomplete(f"{len(empty)} file(s) produced no rows, first {iso(empty[0])}")
     # What each file held when it was written (or found), where this host knows it.
-    recorded = await ch.query(
-        "SELECT toUnixTimestamp(hour) AS h, argMax(rows, (written_at, rows)) AS n "
-        "FROM archive_hours WHERE hour >= fromUnixTimestamp({from_s:Int64}) "
-        "AND hour < fromUnixTimestamp({to_s:Int64}) GROUP BY h",
-        params=bounds,
-    )
+    recorded = await ch.query(RECORDED_COUNTS, params=bounds)
     short = sorted(
         int(r["h"]) for r in recorded.rows if staged_edits.get(int(r["h"]), 0) != int(r["n"])
     )
     if short:
         raise ArchiveIncomplete(
-            f"{len(short)} file(s) don't hold the rows recorded for them, first {_iso(short[0])}"
+            f"{len(short)} file(s) don't hold the rows recorded for them, first {iso(short[0])}"
         )
 
     if mark is None:
@@ -203,16 +189,14 @@ async def _rebuild(
 
 async def _main(args: argparse.Namespace) -> int:
     setup_logging()
-    ch = ClickHouse(clickhouse_settings())
-    try:
-        rows = await rebuild(
-            ch, archive_settings(), args.first, args.end, allow_missing=args.allow_missing
-        )
-    except (IngestRunning, ArchiveIncomplete, MigrationError) as exc:
-        log.error("not rebuilt", extra={"reason": str(exc)})
-        return 1
-    finally:
-        await ch.aclose()
+    async with ClickHouse(clickhouse_settings()) as ch:
+        try:
+            rows = await rebuild(
+                ch, archive_settings(), args.first, args.end, allow_missing=args.allow_missing
+            )
+        except (IngestRunning, ArchiveIncomplete, LockHeld) as exc:
+            log.error("not rebuilt", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
+            return 1
     log.info("rollup rebuilt from the archive", extra={"rollup_rows": rows})
     return 0
 

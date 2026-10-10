@@ -1,6 +1,6 @@
 import json
 
-from livedemos.devtools.fake_eventstreams import TOPICS, FakeStream
+from devtools.fake_eventstreams import TOPICS, FakeStream
 
 
 def filled(n: int = 200, *, topic_skew_ms: int = 1_500, same_ms_share: float = 0.2) -> FakeStream:
