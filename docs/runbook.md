@@ -119,16 +119,17 @@ the newest archived event and skipping the events it restored. The archive servi
 its predecessor's files and leaves them. The chart is continuous, or shows a labelled gap
 if the outage outlived the stream's retention.
 
-**Drill, 2026-10-07 08:41 UTC** (`apply -replace`, image already built, 45 archived hours):
+**Drill, 2026-10-10 11:28 UTC** (the command above, on demand t4g.small, 85 archived hours):
 
-| Step | Time after the apply started |
+| Step | Time after the terminate |
 |---|---|
-| Old instance destroyed, new one created | 53 s (apply complete) |
-| CloudFront serves the fallback snapshot ("Paused") | from 66 s |
-| Stack up with the restored data, honestly "stale" (newest event 47 minutes old) | 334 s |
-| Ingest has replayed the outage: live | 470 s (7 min 50 s) |
+| CloudFront serves the fallback snapshot ("Paused") | by 8 s |
+| Replacement launched | 20 s |
+| Stack started; restored 274,645 raw rows (35 hours) and 85 rollup hours in 8 s | 2 min 21 s |
+| Ingest replaying the stream from 10:30 | 2 min 24 s |
+| Caught up: takes the Elastic IP, live through CloudFront | 7 min 26 s |
 
-The chart afterwards: the 51 minutes it shared with a copy taken just before the drill
+The chart afterwards: the 50 minutes it shared with a copy taken just before the drill
 matched exactly in every language, and the 8 minutes of the outage were filled by the
 replay at normal levels. No gap, no dip, nothing counted twice.
 

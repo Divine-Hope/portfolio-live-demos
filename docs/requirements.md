@@ -51,7 +51,7 @@ What the live demos must do, and how well. Each requirement has an id so tests, 
 | N3 | Snapshot loop design plus the 1 s edge cache; load checks locally and on CloudFront ([architecture](architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out)) |
 | N4 | `make bench` ([benchmarks](benchmarks.md)); on the host, "Query it" reports ClickHouse's own timing on every answer |
 | N5 | `restart: unless-stopped` and health checks in `compose.yaml`; `tests/unit/test_health.py`; the group's EC2 health check (`infra/live/host.tf`); alerts in `deploy/grafana/alerts.json` |
-| N6 | ADR 0010's drill: a new host restored itself in 7 min 50 s; `tests/unit/test_archive.py` and `tests/integration/test_archive.py` for the restore |
+| N6 | The runbook's drill (2026-10-10, host terminated through the Auto Scaling Group): live again in 7 min 26 s; `tests/unit/test_archive.py` and `tests/integration/test_archive.py` for the restore |
 | N7 | `make bench` at 7 days and twice the live rate ([benchmarks](benchmarks.md)); memory measured in production on 2026-10-07 ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)) |
 | N8 | `infra/live/budget.tf` |
 | N9 | `clickhouse/users.d/livedemos.xml`, `tests/integration/test_storage.py::test_application_users_cant_exceed_their_role` (as the real users), `tests/unit/test_activity.py`, the Terraform plan on every pull request |

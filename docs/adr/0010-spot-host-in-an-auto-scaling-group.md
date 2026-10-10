@@ -42,7 +42,8 @@ under 5% for c6g.medium, c7g.medium and m6g.medium.
 
 A Spot host can be taken away. Losing the host used to mean a manual rebuild; since the self-restore work
 it doesn't. A new host restores itself from the Parquet archive and the stream with no
-manual steps, in 7 min 50 s in the drill, with the chart continuous afterwards.
+manual steps. Terminating the group's host on 2026-10-10, the replacement was live 7 min
+26 s later, with the chart continuous (runbook, "Rebuild the host from scratch").
 
 ## Decision
 

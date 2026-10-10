@@ -20,7 +20,7 @@ First up: what's being edited on English, Portuguese and German Wikipedia, right
 - **Query costs measured at full size.** Every API query runs against 7 days of synthetic data at twice the live rate, under the API user's limits, on a laptop ([benchmarks](docs/benchmarks.md)).
 - **Database work doesn't grow with viewers.** One snapshot a second, cached for a second at the edge. Measured on CloudFront: 1,000 simulated viewers (as many as one laptop could drive) sent the API one request a second ([architecture](docs/architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out)).
 - **It's honest when it's stale.** If the stream stops, the widget says "Paused" and the numbers freeze. Missing minutes show as gaps, not zeros ([tests](tests/e2e/test_widget.py)).
-- **One host, but it heals itself.** No broker, no semantic layer, no lakehouse format, each with a written reason ([decisions](docs/adr/README.md)). A lost host is replaced and restores itself from the Parquet archive with no manual steps: 7 min 50 s in a drill ([ADR 0010](docs/adr/0010-spot-host-in-an-auto-scaling-group.md)).
+- **One host, but it heals itself.** No broker, no semantic layer, no lakehouse format, each with a written reason ([decisions](docs/adr/README.md)). A lost host is replaced and restores itself from the Parquet archive with no manual steps: live again 7 min 26 s after the host was terminated, in a drill on 10 October 2026 ([ADR 0010](docs/adr/0010-spot-host-in-an-auto-scaling-group.md)).
 
 ## Architecture
 
