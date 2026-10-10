@@ -25,16 +25,6 @@ module "deploy_role" {
   inline_policy_json = data.aws_iam_policy_document.deploy.json
 }
 
-moved {
-  from = aws_iam_role.deploy
-  to   = module.deploy_role.aws_iam_role.this
-}
-
-moved {
-  from = aws_iam_role_policy.deploy
-  to   = module.deploy_role.aws_iam_role_policy.this[0]
-}
-
 # Just enough to deploy: record the image tag, run the deploy script on the host (any
 # instance of the group, found by its Name tag), and read the result.
 data "aws_iam_policy_document" "deploy" {

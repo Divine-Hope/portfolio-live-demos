@@ -67,21 +67,6 @@ resource "aws_cloudfront_cache_policy" "api" {
   }
 }
 
-moved {
-  from = aws_cloudfront_cache_policy.live
-  to   = aws_cloudfront_cache_policy.api["live"]
-}
-
-moved {
-  from = aws_cloudfront_cache_policy.activity
-  to   = aws_cloudfront_cache_policy.api["activity"]
-}
-
-moved {
-  from = aws_cloudfront_cache_policy.ops
-  to   = aws_cloudfront_cache_policy.api["ops"]
-}
-
 # The api sends CORS headers itself; the S3 fallback doesn't. This adds them to both,
 # so the widget can read Date and Age cross-origin whichever origin answered.
 resource "aws_cloudfront_response_headers_policy" "cors" {
