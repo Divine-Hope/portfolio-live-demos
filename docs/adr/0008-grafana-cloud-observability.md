@@ -9,7 +9,7 @@ The services expose Prometheus metrics and JSON logs. They need dashboards, aler
 
 ## Decision
 
-Grafana Alloy on the host ships metrics and logs to Grafana Cloud (free tier: 10k series, 50 GB logs, 14-day retention, alerting included). A synthetic check hits the public URL every minute. CloudWatch is used only for what AWS sees best: EC2 status-check auto-recovery, and AWS Budgets.
+Grafana Alloy on the host ships metrics and logs to Grafana Cloud (free tier: 10k series, 50 GB logs, 14-day retention, alerting included). A synthetic check hits the public URL every minute. AWS covers only what it sees best: the Auto Scaling Group's health check and launch emails ([ADR 0010](0010-spot-host-in-an-auto-scaling-group.md)), and AWS Budgets.
 
 ## Consequences
 

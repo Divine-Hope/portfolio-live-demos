@@ -9,7 +9,6 @@
 // a minute, and every alert here works on 5-minute windows. Labels stay bounded: services,
 // routes, outcomes and a short list of ClickHouse and host metrics, never titles or IPs.
 
-
 prometheus.remote_write "cloud" {
 	endpoint {
 		url = sys.env("GRAFANA_PROM_URL")
@@ -37,7 +36,6 @@ loki.write "cloud" {
 		host = "livedemos",
 	}
 }
-
 
 prometheus.scrape "app" {
 	targets = [
@@ -114,7 +112,6 @@ prometheus.relabel "host" {
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
 
-
 prometheus.exporter.cadvisor "containers" {
 	docker_host                  = "unix:///var/run/docker.sock"
 	docker_only                  = true
@@ -154,7 +151,6 @@ prometheus.relabel "containers" {
 	}
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
-
 
 discovery.docker "containers" {
 	host = "unix:///var/run/docker.sock"

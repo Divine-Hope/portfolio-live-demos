@@ -64,6 +64,7 @@ ignore = [
     # archive/job.py, rollup/restore.py, rollup/rebuild.py and db/migrate.py.
     "S608",
     "TRY003",  # a message on the exception that explains the refusal is the point
+    "TRY400",  # refusals log at error with their reason; a traceback adds nothing
 ]
 
 [tool.ruff.lint.per-file-ignores]

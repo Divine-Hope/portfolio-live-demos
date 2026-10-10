@@ -89,7 +89,7 @@ async def run(args: argparse.Namespace) -> int:
             try:
                 outcome = await archiver.archive_hour(args.hour, manual=True)
             except NothingToArchive as exc:
-                log.error("not rewritten", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
+                log.error("not rewritten", extra={"reason": str(exc)})
                 return 2
             log.info("hour rewritten", extra={"result": outcome.result, "rows": outcome.rows})
             return 0 if outcome.result == "written" else 1

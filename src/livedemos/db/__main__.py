@@ -36,7 +36,7 @@ async def run(*, unlock_only: bool) -> int:
             done = await restore(ch, settings, now=datetime.now(UTC))
         except (RestoreFailed, ArchiveIncomplete, IngestRunning, LockHeld) as exc:
             # Nothing else starts until it's fixed (docs/runbook.md).
-            log.error("restore refused", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
+            log.error("restore refused", extra={"reason": str(exc)})
             return 1
         if done.rollup_hours or done.raw_hours or done.pages_hours:
             log.info(
