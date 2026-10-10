@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -437,9 +438,8 @@ async def test_reconcile_finds_and_rebuilds_a_rollup_that_drifted(ch: ClickHouse
 
 async def test_migrator_hands_the_freshness_view_to_its_definer() -> None:
     """Migration 0006 as production runs it: the real migrator, on a database at version 5.
-    Then the view must still refresh, now with freshness_definer's rights. Needs a ClickHouse
-    without `demos` (CI), so it comes before the tests that create it; a local stack's
-    `demos` is left alone."""
+    Then the view must still refresh, now with freshness_definer's rights. In CI it starts
+    `demos` over; locally it leaves a stack's `demos` alone and skips."""
     admin = ClickHouse(clickhouse_test_settings().model_copy(update={"database": "demos"}))
     migrator = ClickHouse(user_settings("migrator", "CLICKHOUSE_MIGRATOR_PASSWORD"))
     try:
@@ -448,7 +448,9 @@ async def test_migrator_hands_the_freshness_view_to_its_definer() -> None:
             settings={"database": "default"},
         )
         if int(exists.rows[0]["n"]):
-            pytest.skip("`demos` exists here; this needs a fresh ClickHouse")
+            if not os.environ.get("CI"):
+                pytest.skip("`demos` holds a local stack's data; this runs in CI")
+            await admin.execute("DROP DATABASE demos SYNC", settings={"database": "default"})
         assert await migrate(admin, upto=5) == [1, 2, 3, 4, 5]
         assert await migrate(migrator) == [6]
         view = await admin.query(
@@ -565,4 +567,3 @@ async def test_an_insert_with_an_unknown_column_fails(ch: ClickHouse) -> None:
     row = rows(1)[0] | {"titel": "typo"}
     with pytest.raises(ClickHouseError):
         await ch.insert("wiki_edits", [row])
-
