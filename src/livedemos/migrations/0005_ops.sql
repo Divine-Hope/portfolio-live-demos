@@ -17,8 +17,8 @@ TTL minute + INTERVAL 90 DAY;
 
 -- Plain max() and count() are answered from part metadata: a few rows read a minute.
 -- ClickHouse runs it once at creation, then at the start of every minute, and doesn't
--- catch up on minutes it missed while down. It runs as the migrator, which can read
--- wiki_edits and write the samples, and nothing else here.
+-- catch up on minutes it missed while down. Created as the migrator; migration 0006 hands
+-- it to a user that can only read wiki_edits and write the samples.
 CREATE MATERIALIZED VIEW IF NOT EXISTS {database}.freshness_samples_mv
 REFRESH EVERY 1 MINUTE APPEND
 TO {database}.freshness_samples

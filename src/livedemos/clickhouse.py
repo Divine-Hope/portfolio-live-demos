@@ -18,15 +18,18 @@ import httpx
 from livedemos.config import ClickHouseSettings
 
 # Return numbers as numbers and timestamps as ISO 8601, so the API can pass them through.
+# A URL setting rather than "FORMAT JSON" appended to the SQL, which a trailing ";" or
+# comment would break.
 _READ_SETTINGS = {
+    "default_format": "JSON",
     "output_format_json_quote_64bit_integers": "0",
     "date_time_output_format": "iso",
 }
+# Deduplicating in the materialized views too is the writer profile's job (users.d).
+# A misspelled column fails the insert instead of being dropped.
 _WRITE_SETTINGS = {
     "date_time_input_format": "best_effort",
-    "input_format_skip_unknown_fields": "1",
-    # A deduplicated retry must not double-count in materialized views either.
-    "deduplicate_blocks_in_dependent_materialized_views": "1",
+    "input_format_skip_unknown_fields": "0",
 }
 
 
@@ -121,7 +124,7 @@ class ClickHouse:
         ClickHouse binds them server-side, so nothing is string-formatted into SQL.
         """
         query_params = {**_READ_SETTINGS, **(settings or {}), **_bind(params)}
-        response = await self._post(f"{sql}\nFORMAT JSON", params=query_params)
+        response = await self._post(sql, params=query_params)
         # HTTP 200 doesn't mean the query succeeded: once rows start streaming, an error
         # can only be written into the body. Either way it must surface as ClickHouseError.
         try:
@@ -201,8 +204,33 @@ def _bind(params: Mapping[str, Any] | None) -> dict[str, str]:
 
 
 def _param_value(value: Any) -> str:
+    # ClickHouse reads a parameter in its escaped text format: a backslash, tab or newline
+    # in a plain value is an escape, and an array is a literal with quoted strings.
     if isinstance(value, bool):
         return "1" if value else "0"
     if isinstance(value, (list, tuple)):
-        return "[" + ",".join(json.dumps(v) for v in value).replace('"', "'") + "]"
-    return str(value)
+        return "[" + ",".join(_array_element(v) for v in value) + "]"
+    return _escape(str(value))
+
+
+def _array_element(value: Any) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return quote(str(value))
+
+
+# ClickHouse's Escaped format: a backslash before each of these.
+_ESCAPES = str.maketrans(
+    {"\\": "\\\\", "\t": "\\t", "\n": "\\n", "\r": "\\r", "\0": "\\0", "\b": "\\b", "\f": "\\f"}
+)
+
+
+def _escape(text: str) -> str:
+    return text.translate(_ESCAPES)
+
+
+def quote(text: str) -> str:
+    """A ClickHouse string literal."""
+    return "'" + _escape(text).replace("'", "\\'") + "'"

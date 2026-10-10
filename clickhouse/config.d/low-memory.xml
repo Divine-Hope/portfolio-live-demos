@@ -1,32 +1,30 @@
 <!--
   ClickHouse tuned for a 2 GB host (EC2 t4g.small) that also runs ingest, the API and an
   observability agent. Defaults assume a big server; these keep the footprint small and
-  predictable. The numbers are sized from the retained-volume benchmark
-  (docs/benchmarks.md), run on a laptop under the same 1.2 GB container limit. They have
-  not yet been measured on the production instance; that is still on the roadmap.
+  predictable. Sized from the retained-volume benchmark (docs/benchmarks.md), under the
+  same 1.2 GB container limit.
 -->
 <clickhouse>
-    <!-- Hard ceiling for the whole server. Queries fail before the kernel OOM-kills us. -->
-    <max_server_memory_usage>943718400</max_server_memory_usage> <!-- 900 MiB -->
+    <!-- Hard ceiling for the whole server, as a share of the container's mem_limit
+         (compose.yaml), so it follows a resize. Queries fail before the kernel OOM-kills. -->
+    <max_server_memory_usage_to_ram_ratio>0.75</max_server_memory_usage_to_ram_ratio>
+    <!-- 26.8 would otherwise keep recomputing that ceiling from the memory left free in the
+         container, page cache included, and shrink it as the cache grows: 571 MiB here
+         instead of 900. -->
+    <memory_worker_dynamic_hard_limit>0</memory_worker_dynamic_hard_limit>
 
-    <!-- Without this, the server's own count of its memory drifts upwards and is never
-         corrected: in production it claimed 676 MiB while the container used 415 MiB, and
-         after a day it hit the ceiling above and refused queries and merges with real
-         memory to spare. The memory worker resyncs the count with the container's actual
-         (anonymous) memory, from cgroups, every few hundred ms. -->
+    <!-- Keeps the server's count of its memory in line with the container's real usage
+         (docs/postmortems/2026-10-06-clickhouse-memory-drift.md). -->
     <memory_worker_correct_memory_tracker>1</memory_worker_correct_memory_tracker>
 
     <!-- Caches sized for a dataset of a few GB, not hundreds. -->
     <mark_cache_size>67108864</mark_cache_size> <!-- 64 MiB -->
     <index_mark_cache_size>16777216</index_mark_cache_size> <!-- 16 MiB -->
-    <uncompressed_cache_size>16777216</uncompressed_cache_size> <!-- 16 MiB, off by default -->
     <max_concurrent_queries>32</max_concurrent_queries>
 
     <!-- Fewer background threads: one writer, small parts, little to merge. -->
     <background_pool_size>4</background_pool_size>
-    <!-- Queue slots, not threads. 4 x 7 = 28 covers the built-in thresholds (20 for
-         mutations, 25 for OPTIMIZE): 26.8 checks those, not the lower ones in <merge_tree>
-         below, on ALTER ... ADD PROJECTION. -->
+    <!-- Queue slots, not threads: 4 x 7 = 28, above the 25 that ADD PROJECTION checks. -->
     <background_merges_mutations_concurrency_ratio>7</background_merges_mutations_concurrency_ratio>
     <background_common_pool_size>2</background_common_pool_size>
     <background_schedule_pool_size>16</background_schedule_pool_size>
@@ -39,7 +37,6 @@
     <merge_tree>
         <merge_max_block_size>1024</merge_max_block_size>
         <max_bytes_to_merge_at_max_space_in_pool>1073741824</max_bytes_to_merge_at_max_space_in_pool>
-        <!-- Must fit inside background_pool_size * ratio (28). -->
         <number_of_free_entries_in_pool_to_lower_max_size_of_merge>0</number_of_free_entries_in_pool_to_lower_max_size_of_merge>
         <number_of_free_entries_in_pool_to_execute_mutation>2</number_of_free_entries_in_pool_to_execute_mutation>
         <number_of_free_entries_in_pool_to_execute_optimize_entire_partition>2</number_of_free_entries_in_pool_to_execute_optimize_entire_partition>
@@ -63,6 +60,12 @@
     <metric_log remove="1"/>
     <asynchronous_metric_log remove="1"/>
     <processors_profile_log remove="1"/>
+    <error_log remove="1"/>
+    <background_schedule_pool_log remove="1"/>
+    <aggregated_zookeeper_log remove="1"/>
+    <zookeeper_connection_log remove="1"/>
+    <delta_lake_metadata_log remove="1"/>
+    <s3queue_log remove="1"/>
     <opentelemetry_span_log remove="1"/>
     <asynchronous_insert_log remove="1"/>
     <iceberg_metadata_log remove="1"/>

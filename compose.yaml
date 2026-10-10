@@ -46,7 +46,8 @@ services:
       nofile: { soft: 262144, hard: 262144 }
     mem_limit: 1200m
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --user admin --password \"$$CLICKHOUSE_PASSWORD\" --query 'SELECT 1'"]
+      # /ping needs no credentials, so no password lands on a command line.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -184,6 +185,15 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "livedemos.devtools.fake_eventstreams", "--port", "8090", "--rate", "30", "--drop-after-s", "300"]
     mem_limit: 256m
+
+# Pinned, because ClickHouse lets its users connect from this range only
+# (clickhouse/users.d/livedemos.xml).
+networks:
+  default:
+    enable_ipv6: false   # users.d allows IPv4 from this range only
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
 
 volumes:
   clickhouse-data:

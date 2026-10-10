@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -51,7 +52,7 @@ async def test_migrations_run_once_and_are_recorded(ch: ClickHouse) -> None:
         "wiki_pages_per_minute_mv",
     ]
     applied = await ch.query("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4, 5]
+    assert [r["version"] for r in applied.rows] == [1, 2, 3, 4, 5, 6]
 
 
 async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
@@ -60,7 +61,7 @@ async def test_an_existing_database_upgrades_in_place(ch: ClickHouse) -> None:
     assert await migrate(ch, upto=1) == [1]
     await ch.insert("wiki_edits", rows(50), dedup_token="before-upgrade")
 
-    assert await migrate(ch) == [2, 3, 4, 5]
+    assert await migrate(ch) == [2, 3, 4, 5, 6]
     projections = await ch.query(
         "SELECT DISTINCT name FROM system.projection_parts "
         "WHERE database = {db:String} AND table = 'wiki_edits' AND active ORDER BY name",
@@ -80,7 +81,7 @@ async def test_a_database_from_before_versioned_migrations_is_adopted(ch: ClickH
         await ch.execute(sql, settings={"database": db})
     await ch.insert("wiki_edits", rows(40), dedup_token="legacy")
 
-    assert await migrate(ch) == [1, 2, 3, 4, 5]  # 1 is a no-op that records the baseline
+    assert await migrate(ch) == [1, 2, 3, 4, 5, 6]  # 1 is a no-op that records the baseline
     assert await scalar(ch, "SELECT count() FROM wiki_edits") == 40
     assert await scalar(ch, "SELECT sum(edits) FROM wiki_edits_per_minute") == 40
 
@@ -435,6 +436,39 @@ async def test_reconcile_finds_and_rebuilds_a_rollup_that_drifted(ch: ClickHouse
     assert bots == await scalar(ch, "SELECT countIf(is_bot) FROM wiki_edits")
 
 
+async def test_migrator_hands_the_freshness_view_to_its_definer() -> None:
+    """Migration 0006 as production runs it: the real migrator, on a database at version 5.
+    Then the view must still refresh, now with freshness_definer's rights. In CI it starts
+    `demos` over; locally it leaves a stack's `demos` alone and skips."""
+    admin = ClickHouse(clickhouse_test_settings().model_copy(update={"database": "demos"}))
+    migrator = ClickHouse(user_settings("migrator", "CLICKHOUSE_MIGRATOR_PASSWORD"))
+    try:
+        exists = await admin.query(
+            "SELECT count() AS n FROM system.databases WHERE name = 'demos'",
+            settings={"database": "default"},
+        )
+        if int(exists.rows[0]["n"]):
+            if not os.environ.get("CI"):
+                pytest.skip("`demos` holds a local stack's data; this runs in CI")
+            await admin.execute("DROP DATABASE demos SYNC", settings={"database": "default"})
+        assert await migrate(admin, upto=5) == [1, 2, 3, 4, 5]
+        assert await migrate(migrator) == [6]
+        view = await admin.query(
+            "SELECT definer FROM system.tables "
+            "WHERE database = 'demos' AND name = 'freshness_samples_mv'"
+        )
+        assert view.rows == [{"definer": "freshness_definer"}]
+        await admin.insert("wiki_edits", rows(5), dedup_token="definer")
+        await admin.execute("SYSTEM REFRESH VIEW freshness_samples_mv")
+        await admin.execute("SYSTEM WAIT VIEW freshness_samples_mv")
+        sampled = await admin.query("SELECT count() AS n, max(age_s) AS age FROM freshness_samples")
+        assert int(sampled.rows[0]["n"]) >= 1
+        assert sampled.rows[0]["age"] is not None
+    finally:
+        await migrator.aclose()
+        await admin.aclose()
+
+
 @pytest.mark.usefixtures("demos_schema")
 @pytest.mark.parametrize(
     ("user", "password_env", "sql"),
@@ -518,3 +552,18 @@ async def test_ingest_can_read_what_it_needs_to_resume() -> None:
         )
     finally:
         await client.aclose()
+
+
+async def test_awkward_strings_round_trip_as_parameters(ch: ClickHouse) -> None:
+    awkward = ["Rock 'n' roll", "C:\\temp", "tab\there", 'say "hi"', "cr\rlf\n", "nul\0"]
+    result = await ch.query(
+        "SELECT {titles:Array(String)} AS titles, {one:String} AS one;",
+        params={"titles": awkward, "one": awkward[1]},
+    )
+    assert result.rows == [{"titles": awkward, "one": awkward[1]}]
+
+
+async def test_an_insert_with_an_unknown_column_fails(ch: ClickHouse) -> None:
+    row = rows(1)[0] | {"titel": "typo"}
+    with pytest.raises(ClickHouseError):
+        await ch.insert("wiki_edits", [row])

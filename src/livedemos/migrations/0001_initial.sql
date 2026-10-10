@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS {database}.wiki_edits_per_minute
     bot_edits  UInt64
 )
 ENGINE = SummingMergeTree
+-- Monthly, not daily: 90 daily partitions would mean many tiny parts for a few thousand rows
+-- a day. TTL rewrites a part to expire rows, which at this size costs next to nothing.
 PARTITION BY toYYYYMM(minute)
 ORDER BY (lang, minute)
 TTL minute + INTERVAL 90 DAY

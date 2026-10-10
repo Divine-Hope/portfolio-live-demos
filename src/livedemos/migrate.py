@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
 
-from livedemos.clickhouse import ClickHouse, ClickHouseError
+from livedemos.clickhouse import ClickHouse, ClickHouseError, quote
 from livedemos.config import archive_settings, clickhouse_settings
 from livedemos.logs import setup_logging
 
@@ -182,7 +182,7 @@ async def _lock(ch: ClickHouse) -> None:
     try:
         # No IF NOT EXISTS: if the table is there, someone else holds the lock.
         await ch.execute(
-            f"CREATE TABLE {ch.database}.{_LOCK} (x UInt8) ENGINE = Memory COMMENT {_quote(holder)}"
+            f"CREATE TABLE {ch.database}.{_LOCK} (x UInt8) ENGINE = Memory COMMENT {quote(holder)}"
         )
     except ClickHouseError as exc:
         if "TABLE_ALREADY_EXISTS" not in str(exc) and "already exists" not in str(exc):
@@ -207,10 +207,6 @@ async def _applied(ch: ClickHouse) -> dict[int, tuple[str, str]]:
             raise MigrationError(f"migration {version} is recorded twice in schema_migrations")
         out[version] = (str(row["name"]), str(row["checksum"]))
     return out
-
-
-def _quote(text: str) -> str:
-    return "'" + text.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 async def _restore(ch: ClickHouse) -> None:
