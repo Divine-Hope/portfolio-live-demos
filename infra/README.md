@@ -7,7 +7,7 @@ Everything in AWS is Terraform, apart from the one-time account setup below. Two
 | `bootstrap/` | The S3 bucket that holds Terraform state for `live/` | Local file, gitignored |
 | `live/` | Everything else (below) | In the S3 bucket |
 
-Region `eu-west-1`. Every resource is tagged `project=livedemos`.
+Region `eu-west-1`. Every resource is tagged `project=livedemos` and `stack` (`bootstrap` or `live`). Terraform's version is pinned in `.terraform-version`; CI uses it too.
 
 `live/` holds:
 
@@ -22,6 +22,15 @@ Region `eu-west-1`. Every resource is tagged `project=livedemos`.
 | `storage.tf` | Private buckets for the fallback snapshot and the archive |
 | `cdn.tf` | CloudFront: 1 s cache on `live.json`, S3 failover, a secret header the api checks |
 | `deploy.tf` | GitHub OIDC and a deploy role that can only run the deploy script on this one host |
+
+Two modules, in `modules/`:
+
+| Module | What |
+|---|---|
+| `private-bucket` | A private, encrypted S3 bucket that refuses plain HTTP, with optional versioning and lifecycle rules |
+| `github-oidc-role` | A role only the given GitHub Actions subjects can assume, with an OIDC token. The plan, apply and deploy roles |
+
+CI runs `terraform fmt`, `validate`, `tflint` (AWS ruleset) and `trivy config`. A trivy finding that's a cost choice is skipped where it fires, with the reason.
 
 Operating it (shell, deploys, rotating secrets, resizing): [`docs/runbook.md`](../docs/runbook.md).
 

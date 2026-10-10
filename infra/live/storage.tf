@@ -1,5 +1,5 @@
 locals {
-  bucket_suffix = "${data.aws_caller_identity.current.account_id}-${var.region}"
+  bucket_suffix = "${local.account_id}-${var.region}"
 }
 
 # The last good live.json, written by the api every 60 s. CloudFront serves it when
@@ -29,46 +29,30 @@ data "aws_iam_policy_document" "snapshots_cloudfront" {
   }
 }
 
-# Hourly Parquet files. Older files move to cheaper storage classes on their own.
+# Hourly Parquet files. Older files move to cheaper storage classes on their own. A
+# rewrite replaces an hour's object, and S3 keeps the last write. Versioning keeps the one
+# it replaced, for 30 days, so a bad rewrite can be undone.
 module "archive" {
-  source = "../modules/private-bucket"
-  name   = "${var.project}-archive-${local.bucket_suffix}"
+  source     = "../modules/private-bucket"
+  name       = "${var.project}-archive-${local.bucket_suffix}"
+  versioning = true
+  lifecycle_rules = [{
+    id = "cheaper-with-age"
+    transitions = [
+      { days = 30, storage_class = "STANDARD_IA" },
+      { days = 180, storage_class = "GLACIER_IR" },
+    ]
+    noncurrent_version_expiration_days     = 30
+    abort_incomplete_multipart_upload_days = 7
+  }]
 }
 
-# A rewrite replaces an hour's object, and S3 keeps the last write. Versioning keeps the
-# one it replaced, for 30 days, so a bad rewrite can be undone.
-resource "aws_s3_bucket_versioning" "archive" {
-  bucket = module.archive.id
-  versioning_configuration {
-    status = "Enabled"
-  }
+moved {
+  from = aws_s3_bucket_versioning.archive
+  to   = module.archive.aws_s3_bucket_versioning.this[0]
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "archive" {
-  bucket     = module.archive.id
-  depends_on = [aws_s3_bucket_versioning.archive]
-
-  rule {
-    id     = "cheaper-with-age"
-    status = "Enabled"
-    filter {}
-
-    transition {
-      days          = 30
-      storage_class = "STANDARD_IA"
-    }
-
-    transition {
-      days          = 180
-      storage_class = "GLACIER_IR"
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = 30
-    }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-  }
+moved {
+  from = aws_s3_bucket_lifecycle_configuration.archive
+  to   = module.archive.aws_s3_bucket_lifecycle_configuration.this[0]
 }

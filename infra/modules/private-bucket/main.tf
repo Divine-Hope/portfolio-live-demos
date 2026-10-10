@@ -1,25 +1,9 @@
 # A private, encrypted S3 bucket that refuses plain HTTP. Extra policy statements
 # (e.g. CloudFront read access) come in through `policy_documents`.
 
-terraform {
-  required_providers {
-    aws = {
-      source = "hashicorp/aws"
-    }
-  }
-}
-
-variable "name" {
-  description = "Bucket name (global)."
-  type        = string
-}
-
-variable "policy_documents" {
-  description = "Extra IAM policy documents (JSON) merged into the bucket policy."
-  type        = list(string)
-  default     = []
-}
-
+# Versioning is per bucket (var.versioning): on for the archive, off for
+# the snapshot, which is rewritten every minute.
+# trivy:ignore:AVD-AWS-0090
 resource "aws_s3_bucket" "this" {
   bucket = var.name
 }
@@ -39,6 +23,8 @@ resource "aws_s3_bucket_public_access_block" "this" {
   restrict_public_buckets = true
 }
 
+# SSE-S3: no KMS key to pay for, and no KMS request charges.
+# trivy:ignore:AVD-AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
   bucket = aws_s3_bucket.this.id
   rule {
@@ -77,14 +63,49 @@ resource "aws_s3_bucket_policy" "this" {
   depends_on = [aws_s3_bucket_public_access_block.this]
 }
 
-output "id" {
-  value = aws_s3_bucket.this.id
+resource "aws_s3_bucket_versioning" "this" {
+  count  = var.versioning ? 1 : 0
+  bucket = aws_s3_bucket.this.id
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 
-output "arn" {
-  value = aws_s3_bucket.this.arn
-}
+resource "aws_s3_bucket_lifecycle_configuration" "this" {
+  count  = length(var.lifecycle_rules) > 0 ? 1 : 0
+  bucket = aws_s3_bucket.this.id
 
-output "regional_domain_name" {
-  value = aws_s3_bucket.this.bucket_regional_domain_name
+  # A rule on noncurrent versions applied before versioning is on would do nothing.
+  depends_on = [aws_s3_bucket_versioning.this]
+
+  dynamic "rule" {
+    for_each = var.lifecycle_rules
+    content {
+      id     = rule.value.id
+      status = "Enabled"
+      filter {}
+
+      dynamic "transition" {
+        for_each = rule.value.transitions
+        content {
+          days          = transition.value.days
+          storage_class = transition.value.storage_class
+        }
+      }
+
+      dynamic "noncurrent_version_expiration" {
+        for_each = rule.value.noncurrent_version_expiration_days == null ? [] : [rule.value.noncurrent_version_expiration_days]
+        content {
+          noncurrent_days = noncurrent_version_expiration.value
+        }
+      }
+
+      dynamic "abort_incomplete_multipart_upload" {
+        for_each = rule.value.abort_incomplete_multipart_upload_days == null ? [] : [rule.value.abort_incomplete_multipart_upload_days]
+        content {
+          days_after_initiation = abort_incomplete_multipart_upload.value
+        }
+      }
+    }
+  }
 }

@@ -26,34 +26,24 @@ data "aws_cloudfront_cache_policy" "disabled" {
   name = "Managed-CachingDisabled"
 }
 
-# Follows the api's own Cache-Control (max-age=1), within these bounds.
-resource "aws_cloudfront_cache_policy" "live" {
-  name        = "${var.project}-live"
-  min_ttl     = 0
-  default_ttl = 1
-  max_ttl     = 2
-
-  parameters_in_cache_key_and_forwarded_to_origin {
-    enable_accept_encoding_gzip   = true
-    enable_accept_encoding_brotli = true
-
-    cookies_config {
-      cookie_behavior = "none"
-    }
-    headers_config {
-      header_behavior = "none"
-    }
-    query_strings_config {
-      query_string_behavior = "none"
-    }
+# Each follows the api's own Cache-Control, within these bounds.
+#   live      max-age=1
+#   activity  10 s, keyed on the query
+#   ops       rebuilt once a minute by the api, so cached for that minute here
+locals {
+  cache_policies = {
+    live     = { default_ttl = 1, max_ttl = 2, query_strings = [] }
+    activity = { default_ttl = 10, max_ttl = 10, query_strings = ["lang", "window"] }
+    ops      = { default_ttl = 60, max_ttl = 60, query_strings = [] }
   }
 }
 
-resource "aws_cloudfront_cache_policy" "activity" {
-  name        = "${var.project}-activity"
+resource "aws_cloudfront_cache_policy" "api" {
+  for_each    = local.cache_policies
+  name        = "${var.project}-${each.key}"
   min_ttl     = 0
-  default_ttl = 10
-  max_ttl     = 10
+  default_ttl = each.value.default_ttl
+  max_ttl     = each.value.max_ttl
 
   parameters_in_cache_key_and_forwarded_to_origin {
     enable_accept_encoding_gzip   = true
@@ -66,35 +56,30 @@ resource "aws_cloudfront_cache_policy" "activity" {
       header_behavior = "none"
     }
     query_strings_config {
-      query_string_behavior = "whitelist"
-      query_strings {
-        items = ["lang", "window"]
+      query_string_behavior = length(each.value.query_strings) > 0 ? "whitelist" : "none"
+      dynamic "query_strings" {
+        for_each = length(each.value.query_strings) > 0 ? [each.value.query_strings] : []
+        content {
+          items = query_strings.value
+        }
       }
     }
   }
 }
 
-# The Ops tab: rebuilt once a minute by the api, so cached for that minute here.
-resource "aws_cloudfront_cache_policy" "ops" {
-  name        = "${var.project}-ops"
-  min_ttl     = 0
-  default_ttl = 60
-  max_ttl     = 60
+moved {
+  from = aws_cloudfront_cache_policy.live
+  to   = aws_cloudfront_cache_policy.api["live"]
+}
 
-  parameters_in_cache_key_and_forwarded_to_origin {
-    enable_accept_encoding_gzip   = true
-    enable_accept_encoding_brotli = true
+moved {
+  from = aws_cloudfront_cache_policy.activity
+  to   = aws_cloudfront_cache_policy.api["activity"]
+}
 
-    cookies_config {
-      cookie_behavior = "none"
-    }
-    headers_config {
-      header_behavior = "none"
-    }
-    query_strings_config {
-      query_string_behavior = "none"
-    }
-  }
+moved {
+  from = aws_cloudfront_cache_policy.ops
+  to   = aws_cloudfront_cache_policy.api["ops"]
 }
 
 # The api sends CORS headers itself; the S3 fallback doesn't. This adds them to both,
@@ -122,6 +107,11 @@ resource "aws_cloudfront_response_headers_policy" "cors" {
   }
 }
 
+# A web ACL alone is billed monthly, past the budget. Every route is a
+# cached, read-only GET, and the origin only answers requests that carry the origin secret.
+# Access logs aren't read by anything; Grafana has the API's metrics.
+# trivy:ignore:AVD-AWS-0011
+# trivy:ignore:AVD-AWS-0010
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
   comment         = "${var.project} data API"
@@ -135,6 +125,9 @@ resource "aws_cloudfront_distribution" "api" {
     connection_attempts = 1
     connection_timeout  = 2
 
+    # HTTP on purpose: the host has no certificate, its security group only lets CloudFront
+    # in, and the header below proves the request came through this distribution. The
+    # provider requires https_port and origin_ssl_protocols; under http-only they're unused.
     custom_origin_config {
       http_port                = 80
       https_port               = 443
@@ -173,37 +166,23 @@ resource "aws_cloudfront_distribution" "api" {
     }
   }
 
-  ordered_cache_behavior {
-    path_pattern               = "/v1/*/live.json"
-    target_origin_id           = local.live_origin
-    viewer_protocol_policy     = "redirect-to-https"
-    allowed_methods            = ["GET", "HEAD", "OPTIONS"]
-    cached_methods             = ["GET", "HEAD"]
-    cache_policy_id            = aws_cloudfront_cache_policy.live.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.cors.id
-    compress                   = true
-  }
-
-  ordered_cache_behavior {
-    path_pattern               = "/v1/*/activity"
-    target_origin_id           = local.host_origin
-    viewer_protocol_policy     = "redirect-to-https"
-    allowed_methods            = ["GET", "HEAD", "OPTIONS"]
-    cached_methods             = ["GET", "HEAD"]
-    cache_policy_id            = aws_cloudfront_cache_policy.activity.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.cors.id
-    compress                   = true
-  }
-
-  ordered_cache_behavior {
-    path_pattern               = "/v1/ops.json"
-    target_origin_id           = local.host_origin
-    viewer_protocol_policy     = "redirect-to-https"
-    allowed_methods            = ["GET", "HEAD", "OPTIONS"]
-    cached_methods             = ["GET", "HEAD"]
-    cache_policy_id            = aws_cloudfront_cache_policy.ops.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.cors.id
-    compress                   = true
+  # In this order: CloudFront matches the first pattern that fits.
+  dynamic "ordered_cache_behavior" {
+    for_each = [
+      { path = "/v1/*/live.json", origin = local.live_origin, policy = "live" },
+      { path = "/v1/*/activity", origin = local.host_origin, policy = "activity" },
+      { path = "/v1/ops.json", origin = local.host_origin, policy = "ops" },
+    ]
+    content {
+      path_pattern               = ordered_cache_behavior.value.path
+      target_origin_id           = ordered_cache_behavior.value.origin
+      viewer_protocol_policy     = "redirect-to-https"
+      allowed_methods            = ["GET", "HEAD", "OPTIONS"]
+      cached_methods             = ["GET", "HEAD"]
+      cache_policy_id            = aws_cloudfront_cache_policy.api[ordered_cache_behavior.value.policy].id
+      response_headers_policy_id = aws_cloudfront_response_headers_policy.cors.id
+      compress                   = true
+    }
   }
 
   dynamic "ordered_cache_behavior" {

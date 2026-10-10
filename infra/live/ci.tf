@@ -4,47 +4,26 @@
 #   merge to main -> plan, then apply in the `infra` environment, which needs your
 #                    approval and only runs from main. Then the app deploy.
 #
-# Two roles because the two jobs need very different power. Plan can read everything,
-# including Terraform state, which holds the generated secrets; only this repo's own
-# workflows can assume it (GitHub never gives OIDC tokens to pull requests from forks).
-# Apply manages IAM, so it is effectively admin; its trust is the guard: only the
-# `infra` environment, which is restricted to main and protected by a required reviewer.
+# Two roles because the two jobs need very different power. Apply manages IAM, so it is
+# effectively admin; its trust is the guard: only the `infra` environment, which is
+# restricted to main and protected by a required reviewer.
+#
+# Plan keeps ReadOnlyAccess on purpose, though that can read Terraform state and the
+# generated secrets in it. Plan has to read state, so no narrower policy would keep them
+# from it. The guard is the trust instead: only this repo's own workflows can assume the
+# role (GitHub never gives OIDC tokens to pull requests from forks).
 
-data "aws_iam_policy_document" "tf_plan_trust" {
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "${local.github_sub}:pull_request",
-        "${local.github_sub}:environment:infra-plan",
-      ]
-    }
-  }
-}
-
-resource "aws_iam_role" "tf_plan" {
-  name                 = "${var.project}-tf-plan"
-  assume_role_policy   = data.aws_iam_policy_document.tf_plan_trust.json
-  max_session_duration = 3600
-}
-
-resource "aws_iam_role_policy_attachment" "tf_plan_read_only" {
-  role       = aws_iam_role.tf_plan.name
-  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+module "tf_plan_role" {
+  source            = "../modules/github-oidc-role"
+  name              = "${var.project}-tf-plan"
+  oidc_provider_arn = aws_iam_openid_connect_provider.github.arn
+  subjects = [
+    "${local.github_sub}:pull_request",
+    "${local.github_sub}:environment:infra-plan",
+  ]
+  managed_policy_arns = ["arn:${local.partition}:iam::aws:policy/ReadOnlyAccess"]
+  inline_policy_name  = "terraform-state-lock"
+  inline_policy_json  = data.aws_iam_policy_document.tf_plan_lock.json
 }
 
 # ReadOnlyAccess can read the state but not take Terraform's lock. Plans on main take it,
@@ -53,56 +32,49 @@ data "aws_iam_policy_document" "tf_plan_lock" {
   statement {
     sid       = "StateLock"
     actions   = ["s3:PutObject", "s3:DeleteObject"]
-    resources = ["arn:aws:s3:::${var.state_bucket}/live/terraform.tfstate.tflock"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}/live/terraform.tfstate.tflock"]
   }
 }
 
-resource "aws_iam_role_policy" "tf_plan_lock" {
-  name   = "terraform-state-lock"
-  role   = aws_iam_role.tf_plan.id
-  policy = data.aws_iam_policy_document.tf_plan_lock.json
+module "tf_apply_role" {
+  source              = "../modules/github-oidc-role"
+  name                = "${var.project}-tf-apply"
+  oidc_provider_arn   = aws_iam_openid_connect_provider.github.arn
+  subjects            = ["${local.github_sub}:environment:infra"]
+  managed_policy_arns = ["arn:${local.partition}:iam::aws:policy/AdministratorAccess"]
 }
 
-data "aws_iam_policy_document" "tf_apply_trust" {
-  statement {
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${local.github_sub}:environment:infra"]
-    }
-  }
+moved {
+  from = aws_iam_role.tf_plan
+  to   = module.tf_plan_role.aws_iam_role.this
 }
 
-resource "aws_iam_role" "tf_apply" {
-  name                 = "${var.project}-tf-apply"
-  assume_role_policy   = data.aws_iam_policy_document.tf_apply_trust.json
-  max_session_duration = 3600
+moved {
+  from = aws_iam_role_policy_attachment.tf_plan_read_only
+  to   = module.tf_plan_role.aws_iam_role_policy_attachment.this["arn:aws:iam::aws:policy/ReadOnlyAccess"]
 }
 
-resource "aws_iam_role_policy_attachment" "tf_apply_admin" {
-  role       = aws_iam_role.tf_apply.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+moved {
+  from = aws_iam_role_policy.tf_plan_lock
+  to   = module.tf_plan_role.aws_iam_role_policy.this[0]
+}
+
+moved {
+  from = aws_iam_role.tf_apply
+  to   = module.tf_apply_role.aws_iam_role.this
+}
+
+moved {
+  from = aws_iam_role_policy_attachment.tf_apply_admin
+  to   = module.tf_apply_role.aws_iam_role_policy_attachment.this["arn:aws:iam::aws:policy/AdministratorAccess"]
 }
 
 output "tf_plan_role_arn" {
   description = "Set as the AWS_TF_PLAN_ROLE_ARN repository secret."
-  value       = aws_iam_role.tf_plan.arn
+  value       = module.tf_plan_role.arn
 }
 
 output "tf_apply_role_arn" {
   description = "Set as the AWS_TF_APPLY_ROLE_ARN secret on the GitHub infra environment."
-  value       = aws_iam_role.tf_apply.arn
+  value       = module.tf_apply_role.arn
 }

@@ -20,5 +20,5 @@ output "snapshots_bucket" {
 
 output "deploy_role_arn" {
   description = "Set as the AWS_DEPLOY_ROLE_ARN secret on the GitHub production environment."
-  value       = aws_iam_role.deploy.arn
+  value       = module.deploy_role.arn
 }

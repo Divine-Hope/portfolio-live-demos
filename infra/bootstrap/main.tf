@@ -38,6 +38,8 @@ locals {
   state_bucket = "${var.project}-tfstate-${data.aws_caller_identity.current.account_id}-${var.region}"
 }
 
+# The same settings as modules/private-bucket, written out here because a module can't
+# take prevent_destroy as an input.
 resource "aws_s3_bucket" "state" {
   bucket = local.state_bucket
 
@@ -70,6 +72,8 @@ resource "aws_s3_bucket_versioning" "state" {
   }
 }
 
+# SSE-S3: no KMS key to pay for, and no KMS request charges.
+# trivy:ignore:AVD-AWS-0132
 resource "aws_s3_bucket_server_side_encryption_configuration" "state" {
   bucket = aws_s3_bucket.state.id
   rule {

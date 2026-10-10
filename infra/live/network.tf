@@ -2,6 +2,8 @@
 # would cost more than the whole stack. The host reaches the internet through its public
 # IP. Three zones, so the Auto Scaling Group can find Spot capacity in any of them.
 
+# Flow logs bill CloudWatch Logs ingestion; the $10 budget can't carry it.
+# trivy:ignore:AVD-AWS-0178
 resource "aws_vpc" "main" {
   cidr_block           = "10.20.0.0/16"
   enable_dns_support   = true
@@ -68,20 +70,12 @@ resource "aws_vpc_security_group_ingress_rule" "from_cloudfront" {
   prefix_list_id    = data.aws_ec2_managed_prefix_list.cloudfront.id
 }
 
+# Wikimedia, GHCR, SSM and S3 have no fixed ranges, and a NAT or proxy
+# to pin them would cost more than the host.
+# trivy:ignore:AVD-AWS-0104
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.host.id
   description       = "Wikimedia stream, image pulls, SSM, S3"
   ip_protocol       = "-1"
   cidr_ipv4         = "0.0.0.0/0"
-}
-
-# The single host's subnet and its route, kept as the first zone's.
-moved {
-  from = aws_subnet.public
-  to   = aws_subnet.public["eu-west-1a"]
-}
-
-moved {
-  from = aws_route_table_association.public
-  to   = aws_route_table_association.public["eu-west-1a"]
 }

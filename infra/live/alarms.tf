@@ -3,6 +3,9 @@
 # silent. The group's EC2 health check replaces a broken host, which is what the old
 # recover and reboot alarms did for a single instance. Grafana Cloud watches the app.
 
+# It carries launch and termination notices only. The AWS-managed SNS
+# key can't be used by Auto Scaling, and a customer key costs a dollar a month.
+# trivy:ignore:AVD-AWS-0095
 resource "aws_sns_topic" "host_alarms" {
   name = "${var.project}-host-alarms"
 }
