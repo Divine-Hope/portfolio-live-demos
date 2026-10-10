@@ -150,7 +150,7 @@ async def _main(args: argparse.Namespace) -> int:
         try:
             rebuilt = await repair(ch, found)
         except (IngestRunning, LockHeld) as exc:
-            log.error("not repaired", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
+            log.error("not repaired", extra={"reason": str(exc)})
             return 1
         left = await find_mismatches(ch, now=datetime.now(UTC), settle=settle)
         log.info("repaired", extra={"minutes": rebuilt, "still_mismatched": len(left)})

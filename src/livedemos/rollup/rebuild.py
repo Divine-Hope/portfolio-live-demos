@@ -183,7 +183,7 @@ async def _main(args: argparse.Namespace) -> int:
                 ch, archive_settings(), args.first, args.end, allow_missing=args.allow_missing
             )
         except (IngestRunning, ArchiveIncomplete, LockHeld) as exc:
-            log.error("not rebuilt", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
+            log.error("not rebuilt", extra={"reason": str(exc)})
             return 1
     log.info("rollup rebuilt from the archive", extra={"rollup_rows": rows})
     return 0

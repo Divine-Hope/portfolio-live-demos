@@ -11,7 +11,7 @@ CH_TEST_ENV := CLICKHOUSE_URL=http://localhost:8123 CLICKHOUSE_USER=admin CLICKH
 
 .PHONY: help
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .env:
 	@cp .env.example .env
@@ -114,31 +114,38 @@ e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWS
 # Credentials come from your SSO profile: run `aws sso login` for your SSO session first.
 TF_PROFILE ?= livedemos
 TF := AWS_PROFILE=$(TF_PROFILE) terraform
+AWS_REGION ?= eu-west-1
+
+# CI runs the version in .terraform-version; a different one locally can rewrite the lock files.
+.PHONY: tf-version
+tf-version:
+	@want=$$(cat .terraform-version); have=$$(terraform version -json | jq -r .terraform_version); \
+	[ "$$want" = "$$have" ] || { echo "terraform $$have, but .terraform-version says $$want"; exit 1; }
 
 .PHONY: tf-bootstrap
-tf-bootstrap: ## AWS: create the Terraform state bucket (once per account)
+tf-bootstrap: tf-version ## AWS: create the Terraform state bucket (once per account)
 	$(TF) -chdir=infra/bootstrap init -input=false
 	$(TF) -chdir=infra/bootstrap apply
 
 .PHONY: tf-init
-tf-init: ## AWS: connect infra/live to the state bucket
+tf-init: tf-version ## AWS: connect infra/live to the state bucket
 	$(TF) -chdir=infra/live init -input=false -backend-config=backend.hcl
 
 .PHONY: host-id
 host-id: ## AWS: the live host's instance id: whichever holds the Elastic IP
-	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-addresses --region eu-west-1 \
+	@AWS_PROFILE=$(TF_PROFILE) aws ec2 describe-addresses --region $(AWS_REGION) \
 		--filters Name=tag:Name,Values=livedemos-host --query 'Addresses[0].InstanceId' --output text
 
 .PHONY: tf-plan
-tf-plan: ## AWS: show what infra/live would change, and save the plan
+tf-plan: tf-version ## AWS: show what infra/live would change, and save the plan
 	$(TF) -chdir=infra/live plan -input=false -out=tfplan
 
 .PHONY: tf-apply
-tf-apply: ## AWS: apply exactly the plan saved by tf-plan
+tf-apply: tf-version ## AWS: apply exactly the plan saved by tf-plan
 	$(TF) -chdir=infra/live apply -input=false tfplan
 
 .PHONY: tf-lock
-tf-lock: ## AWS: record provider checksums for macOS and Linux (commit the lock files)
+tf-lock: tf-version ## AWS: record provider checksums for macOS and Linux (commit the lock files)
 	for stack in infra/bootstrap infra/live; do \
 		terraform -chdir=$$stack providers lock -platform=darwin_arm64 -platform=linux_amd64 -platform=linux_arm64; \
 	done

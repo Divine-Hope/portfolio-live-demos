@@ -1,7 +1,6 @@
 # Email for the host's lifecycle: the Auto Scaling Group reports every launch and
 # termination here (host.tf), so a Spot reclaim or a health-check replacement is never
-# silent. The group's EC2 health check replaces a broken host, which is what the old
-# recover and reboot alarms did for a single instance. Grafana Cloud watches the app.
+# silent. The group's EC2 health check replaces a broken host. Grafana Cloud watches the app.
 
 # It carries launch and termination notices only. The AWS-managed SNS
 # key can't be used by Auto Scaling, and a customer key costs a dollar a month.
