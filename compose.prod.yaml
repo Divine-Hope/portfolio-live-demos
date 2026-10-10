@@ -71,7 +71,7 @@ services:
         condition: service_completed_successfully
     logging: *logging
 
-  # Metrics and logs to Grafana Cloud (deploy/alloy/config.alloy, ADR 0008). Production
+  # Metrics and logs to Grafana Cloud (deploy/alloy/config.alloy). Production
   # only: locally there's nowhere to send them. It reads the host's /proc and /sys, and
   # the Docker socket for container logs and memory. The socket is root-equivalent, read-
   # only or not, so the image is pinned by digest: it's trusted like the host itself.

@@ -1,4 +1,4 @@
-// Grafana Alloy on the production host: metrics and logs to Grafana Cloud (ADR 0008).
+// Grafana Alloy on the production host: metrics and logs to Grafana Cloud.
 //
 // Settings come from the environment (the host's .env, written from SSM):
 //   GRAFANA_PROM_URL, GRAFANA_PROM_USER   hosted Prometheus remote-write endpoint and user
@@ -9,7 +9,6 @@
 // a minute, and every alert here works on 5-minute windows. Labels stay bounded: services,
 // routes, outcomes and a short list of ClickHouse and host metrics, never titles or IPs.
 
-// ---- Where it goes ----------------------------------------------------------------------
 
 prometheus.remote_write "cloud" {
 	endpoint {
@@ -39,7 +38,6 @@ loki.write "cloud" {
 	}
 }
 
-// ---- The app ----------------------------------------------------------------------------
 
 prometheus.scrape "app" {
 	targets = [
@@ -61,7 +59,7 @@ prometheus.relabel "app" {
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
 
-// ---- ClickHouse: about 3,000 series exposed, about 40 kept ------------------------------
+// ClickHouse exposes about 3,000 series; these keep about 40.
 
 prometheus.scrape "clickhouse" {
 	targets         = [{"__address__" = "clickhouse:9363", "job" = "clickhouse"}]
@@ -78,7 +76,6 @@ prometheus.relabel "clickhouse" {
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
 
-// ---- The host ---------------------------------------------------------------------------
 // Disk use comes from ClickHouse (FilesystemMainPath*, above): its data is on the root
 // disk, so the host's / isn't mounted into Alloy at all.
 
@@ -117,7 +114,6 @@ prometheus.relabel "host" {
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
 
-// ---- Memory and CPU per container -------------------------------------------------------
 
 prometheus.exporter.cadvisor "containers" {
 	docker_host                  = "unix:///var/run/docker.sock"
@@ -159,7 +155,6 @@ prometheus.relabel "containers" {
 	forward_to = [prometheus.remote_write.cloud.receiver]
 }
 
-// ---- Logs -------------------------------------------------------------------------------
 
 discovery.docker "containers" {
 	host = "unix:///var/run/docker.sock"

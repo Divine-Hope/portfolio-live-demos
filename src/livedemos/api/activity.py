@@ -5,11 +5,11 @@ CloudFront caches them again in front. Visitors can't make ClickHouse do anythin
 we haven't already decided it should do, or make it do it more often than we allow:
 
 - one query per cache key at a time; concurrent misses wait for the same result,
-- at most `max_concurrency` queries run at once, and at most `max_pending` are admitted
-  (running or queued); a miss beyond that gets a 503 straight away,
-- no request waits longer than `wait_s`. Its query keeps running for the others waiting
-  on it, and to fill the cache, so it still counts against `max_pending` until it ends,
-- a failed query is remembered for `error_cooldown_s`, so a struggling ClickHouse
+- at most `activity_max_concurrency` queries run at once, and `activity_max_pending` are
+  admitted (running or queued); a miss beyond that gets a 503 straight away,
+- no request waits longer than `activity_wait_s`. Its query keeps running for the others
+  waiting on it, and to fill the cache, so it still counts as admitted until it ends,
+- a failed query is remembered for `activity_error_cooldown_s`, so a struggling ClickHouse
   isn't retried by every visitor.
 """
 

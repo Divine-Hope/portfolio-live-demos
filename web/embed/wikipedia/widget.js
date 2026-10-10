@@ -31,7 +31,6 @@
   const $ = (id) => document.getElementById(id);
   setTheme(params.get("theme"));
 
-  // Language pills ------------------------------------------------------------------
   document.querySelectorAll(".pill").forEach((pill) => {
     pill.addEventListener("click", () => {
       state.lang = pill.dataset.lang;
@@ -40,7 +39,7 @@
     });
   });
 
-  // Definitions: one disclosure for all of them, keyboard friendly -------------------
+  // One disclosure for every definition, keyboard friendly.
   $("defs-toggle").addEventListener("click", (event) => {
     const button = event.currentTarget;
     const open = button.getAttribute("aria-expanded") === "true";
@@ -58,7 +57,6 @@
     document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
   }
 
-  // Polling ---------------------------------------------------------------------------
   async function poll() {
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -111,7 +109,6 @@
     return state.ageAtReceipt + (performance.now() - state.receivedAt) / 1000;
   }
 
-  // Rendering -------------------------------------------------------------------------
   function render() {
     // The API decides which languages exist (its `langs`); a pill for one it doesn't
     // serve is hidden, and a selection it doesn't serve falls back to "all".

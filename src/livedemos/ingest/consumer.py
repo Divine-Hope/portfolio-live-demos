@@ -1,13 +1,7 @@
 """Consume Wikimedia EventStreams over SSE and write edits to ClickHouse.
 
-The loop in one paragraph: connect with the last committed bookmark (or `since` on
-first boot), parse each event, drop what we don't keep, add the rest to a batch, and
-flush every second. The bookmark only moves after an insert commits. A stream failure
-(network, idle socket) throws the unflushed batch away and reconnects from the last
-committed bookmark: the stream is the buffer. A failed insert is different, because it
-may have committed anyway: that batch is kept, sealed, and retried with the same rows and
-the same deduplication token until ClickHouse confirms it, so either attempt can land and
-only one copy is kept. Only then does the bookmark move and the stream reconnect.
+The bookmark only moves after an insert commits; a failed insert is retried unchanged with
+the same token. How and why: docs/architecture.md, "ingest".
 """
 
 from __future__ import annotations

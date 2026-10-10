@@ -110,7 +110,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # Every finished hour of raw edits, as one Parquet file in S3 (ADR 0004).
+  # Every finished hour of raw edits, as one Parquet file in S3.
   archive:
     <<: *app
     command: ["livedemos-archive"]

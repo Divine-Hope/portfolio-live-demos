@@ -1,4 +1,4 @@
-# 2026-10-06. ClickHouse refused work at its memory ceiling while using under half of it
+# ClickHouse refused work at its memory ceiling while using under half of it
 
 Status: Final
 

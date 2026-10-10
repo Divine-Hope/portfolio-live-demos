@@ -50,20 +50,12 @@ install -m 644 /opt/livedemos/deploy/host/livedemos.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now livedemos.service
 
-# Take the Elastic IP, and with it CloudFront's traffic, once this host's data is live:
-# restored from the archive and caught up with the stream (newest event under a minute
-# old). The stack must answer within 10 minutes or the launch is abandoned. Catching up
-# replays an hour or more of the stream, which Wikimedia serves at about 4 times real time,
-# so it can take 20 minutes. While another host holds the Elastic IP (a planned
-# replacement, or a Spot warning), keep waiting for fresh data, up to 70 minutes: that
-# host is serving. If nobody holds it (the old host is gone), take it after 15 minutes
-# anyway, data behind or not (the page says how old it is), so an outage at Wikimedia
-# can't keep the site on its fallback. The hook allows 2 hours for all of this (host.tf).
-# "Answers": the API built a snapshot in the last 10 seconds, so it and ClickHouse are up.
-# (/metrics, not /readyz: that one wants CloudFront's secret header.)
+# Take the Elastic IP once this host's data is live. The timings, and why: docs/runbook.md,
+# "How a new host goes live".
+# /metrics, not /readyz: that one wants CloudFront's secret header.
 metric() { curl -fsS localhost/metrics 2>/dev/null | awk -v m="$1" '$1 == m {print $2}' || true; }
 ready=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 60); do   # the API built a snapshot in the last 10 s; 10 minutes at most
   built=$(metric api_last_snapshot_timestamp_seconds)
   if [ -n "$built" ] && awk -v b="$built" -v now="$(date +%s)" 'BEGIN{exit !(now - b < 10)}'; then
     ready=1
@@ -76,7 +68,7 @@ holder() {
   aws ec2 describe-addresses --region "${region}" --allocation-ids "${eip_allocation}" \
     --query 'Addresses[0].InstanceId' --output text 2>/dev/null || echo unknown
 }
-for i in $(seq 1 420); do   # 10 s each: 70 minutes at most
+for i in $(seq 1 420); do   # caught up with the stream; 70 minutes at most
   age=$(metric api_last_event_age_seconds)   # NaN while there's no data at all
   if [ -n "$age" ] && [ "$age" != NaN ] && awk -v a="$age" 'BEGIN{exit !(a < 60)}'; then break; fi
   if [ "$i" -ge 90 ] && [ "$(holder)" = None ]; then break; fi   # 15 minutes, nobody serving

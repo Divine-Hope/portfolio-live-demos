@@ -1,20 +1,9 @@
-"""Month-to-date AWS cost, from Cost Explorer, at most once a day.
+"""Month-to-date AWS cost, from Cost Explorer, at most once a UTC day.
 
-Cost Explorer charges $0.01 a request and its numbers move once a day or so, so the archive
-service (the one process that runs only on the live host) asks once per UTC day and keeps
-the answer in ClickHouse (`aws_cost`, migration 0005) for the API to serve.
-
-"Once a day" has to hold across crashes and host replacements, and while two hosts overlap,
-so it isn't decided by ClickHouse (each host has its own) or by memory. Before asking, the
-fetcher claims the day in the archive bucket with a conditional write that only one caller
-can win: `<claims>/YYYY-MM-DD.json`. The winner asks, then writes the answer into the same
-object. Everyone else, and a new host later that day, copies the answer from there. A claim
-with no answer (the winner died mid-way) means no new number that day, never a second call.
-An answer that couldn't be saved yet is kept in memory and saved on the next runs.
-
-The host's role may call `ce:GetCostAndUsage` and nothing else in Cost Explorer, and may
-read and write only the claims prefix (infra/live/host.tf). The filter is the `project` tag
-every resource carries.
+Each request costs $0.01, so "once a day" must hold across crashes, replacements and two
+overlapping hosts. The day is claimed first in the archive bucket with a conditional write
+only one caller can win; everyone else copies the winner's answer. A claim with no answer
+means no new number that day, never a second call.
 """
 
 from __future__ import annotations

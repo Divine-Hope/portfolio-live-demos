@@ -36,15 +36,7 @@ Operating it (shell, deploys, rotating secrets, resizing): [`docs/runbook.md`](.
 
 ## What it costs
 
-| Item | Monthly |
-|---|---|
-| t4g.small, on demand | Free trial until 31 Dec 2026, then $13.43 on demand, or $6.06 to $11.17 on Spot by type |
-| 16 GB gp3 disk | $1.41 |
-| Elastic IP (public IPv4) | $3.65 |
-| CloudFront, SSM parameters, Session Manager | Free tier |
-| S3 | Cents |
-
-No NAT gateway, no load balancer, no KMS keys, no DynamoDB.
+The cost table, with sources and dates, is in [docs/architecture.md](../docs/architecture.md#cost). No NAT gateway, no load balancer, no KMS keys, no DynamoDB.
 
 ## Access: SSO, no access keys
 

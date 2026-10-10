@@ -152,7 +152,7 @@ class OpsSettings(BaseSettings):
     ops_cache_ttl_s: Annotated[int, Field(ge=1)] = 60
     # A failed build is remembered this long, so ClickHouse isn't asked by every viewer.
     ops_error_cooldown_s: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 5.0
-    # The freshness SLO (requirements N2): this share of minutes over this many days with
+    # The freshness SLO: this share of minutes over this many days with
     # the newest event younger than the threshold. 99.9% is the floor; more is better.
     slo_target: Annotated[float, Field(ge=0.999, lt=1)] = 0.999
     slo_threshold_s: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60.0
@@ -160,7 +160,7 @@ class OpsSettings(BaseSettings):
 
 
 class ArchiveSettings(BaseSettings):
-    """Settings for the hourly Parquet archive (ADR 0004)."""
+    """Settings for the hourly Parquet archive."""
 
     model_config = SettingsConfigDict(env_prefix="ARCHIVE_", extra="ignore")
 

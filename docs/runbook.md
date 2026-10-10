@@ -1,7 +1,6 @@
 # Runbook
 
-Day-to-day operations for the production host. Everything here uses your SSO profile:
-`aws sso login --sso-session <your session>`, then `export AWS_PROFILE=livedemos`.
+Day-to-day operations for the production host. Everything here uses your SSO profile: `aws sso login --sso-session <your session>`, then `export AWS_PROFILE=livedemos`.
 
 ## Get a shell on the host
 
@@ -16,62 +15,40 @@ docker compose -f compose.yaml -f compose.prod.yaml ps
 
 ## Deploy
 
-Push to `main`. When CI passes, `.github/workflows/deploy.yml` builds the arm64 image,
-pushes it to GHCR tagged with the commit SHA, records the tag in SSM, runs
-`deploy/host/deploy.sh <sha>` on the host through SSM Run Command, and waits for
-`/readyz` through CloudFront. It fails loudly if that isn't green within 2 minutes.
+Push to `main`. When CI passes, `.github/workflows/deploy.yml` builds the arm64 image, pushes it to GHCR tagged with the commit SHA, records the tag in SSM, runs `deploy/host/deploy.sh <sha>` on the host through SSM Run Command, and waits for `/readyz` through CloudFront. It fails loudly if that isn't green within 2 minutes.
 
-To roll back, run the workflow by hand (Actions > deploy > Run workflow) with an
-earlier commit SHA. Every run is listed under the repo's Deployments. A rollback past a
-schema migration fails at the `migrate` step, on purpose: undo it with a new migration
-instead.
+To roll back, run the workflow by hand (Actions > deploy > Run workflow) with an earlier commit SHA. Every run is listed under the repo's Deployments. A rollback past a schema migration fails at the `migrate` step, on purpose: undo it with a new migration instead.
 
-GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token for the
-`livedemos-deploy` role, which only trusts this repo's `production` environment.
+GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token for the `livedemos-deploy` role, which only trusts this repo's `production` environment.
 
 ### First deploy (once)
 
 1. `make tf-plan tf-apply`, then `terraform -chdir=infra/live output deploy_role_arn`.
-2. GitHub > Settings > Environments > `production`: add the secret
-   `AWS_DEPLOY_ROLE_ARN` with that value, and limit deployment branches to `main`.
-3. Run the deploy workflow. The first image push creates the GHCR package as private,
-   so this first deploy fails at the pull.
-4. GitHub > Packages > `portfolio-live-demos` > Package settings: make it public. The
-   host pulls without credentials. Re-run the deploy.
+2. GitHub > Settings > Environments > `production`: add the secret `AWS_DEPLOY_ROLE_ARN` with that value, and limit deployment branches to `main`.
+3. Run the deploy workflow. The first image push creates the GHCR package as private, so this first deploy fails at the pull.
+4. GitHub > Packages > `portfolio-live-demos` > Package settings: make it public. The host pulls without credentials. Re-run the deploy.
 
 ## Infrastructure changes
 
 Terraform runs in the same pipeline as the app (`infra/live/ci.tf`, `.github/workflows/`):
 
-- **Pull request:** `terraform plan` with a read-only role. The job summary lists what it
-  would change (resource addresses and actions, never values: the repo is public).
-- **Merge to `main`:** plan again; if it changes anything, the `infra` environment waits
-  for your approval, then applies, then the app deploys. A plan that deletes or replaces
-  a resource fails instead: do those by hand with `make tf-plan tf-apply`.
+- **Pull request:** `terraform plan` with a read-only role. The job summary lists what it would change (resource addresses and actions, never values: the repo is public).
+- **Merge to `main`:** plan again; if it changes anything, the `infra` environment waits for your approval, then applies, then the app deploys. A plan that deletes or replaces a resource fails instead: do those by hand with `make tf-plan tf-apply`.
 - **Manual runs** (rollbacks) deploy the app only and never touch infrastructure.
 
-The plan file is never uploaded (it holds secrets; the repo is public). The apply job
-plans again and refuses if that plan changes anything other than what you approved.
+The plan file is never uploaded (it holds secrets; the repo is public). The apply job plans again and refuses if that plan changes anything other than what you approved.
 
 ### Set up the pipeline (once)
 
 1. `make tf-init`, then `make tf-plan tf-apply`. This creates the two CI roles.
 2. In GitHub > Settings > Environments, create:
    - `infra-plan`: deployment branches `main` only.
-   - `infra`: deployment branches `main` only, required reviewer: you. Add the secret
-     `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
-3. Repository secrets: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`),
-   `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`) and
-   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`). They're secrets, not
-   variables, because they hold the account ID or your email and GitHub prints variables in
-   public job logs. Then the repository variable `TF_GRAFANA_CLOUD`
-   (the `grafana_cloud` from `terraform.tfvars`, on one line:
-   `{prom_url="https://.../api/prom/push",prom_user="123",loki_url="https://.../loki/api/v1/push",loki_user="456"}`).
+   - `infra`: deployment branches `main` only, required reviewer: you. Add the secret `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
+3. Repository secrets: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`), `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`) and `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`). They're secrets, not variables, because they hold the account ID or your email and GitHub prints variables in public job logs. Then the repository variable `TF_GRAFANA_CLOUD` (the `grafana_cloud` from `terraform.tfvars`, on one line: `{prom_url="https://.../api/prom/push",prom_user="123",loki_url="https://.../loki/api/v1/push",loki_user="456"}`).
 
 ## Rotate a secret
 
-Secrets are generated by Terraform and stored in SSM Parameter Store. The host rewrites
-its `.env` from SSM on every deploy and every boot, so rotation is two steps:
+Secrets are generated by Terraform and stored in SSM Parameter Store. The host rewrites its `.env` from SSM on every deploy and every boot, so rotation is two steps:
 
 ```
 terraform -chdir=infra/live apply -replace='random_password.secret["clickhouse-api-password"]'
@@ -79,27 +56,25 @@ terraform -chdir=infra/live apply -replace='random_password.secret["clickhouse-a
 /opt/livedemos/deploy/host/deploy.sh "$(git -C /opt/livedemos rev-parse HEAD)"
 ```
 
-Compose recreates every container whose settings changed. The origin secret works the
-same way; CloudFront picks up the new value in the same apply.
+Compose recreates every container whose settings changed. The origin secret works the same way; CloudFront picks up the new value in the same apply.
 
 ## The host and its Auto Scaling Group
 
-The host is the only instance of the Auto Scaling Group `livedemos-host` ([ADR
-0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). If it's reclaimed (Spot) or fails
-its EC2 health check, the group launches a replacement in any of three zones. A launch
-hook (`live`) keeps it out of service while it restores itself (below); it takes the
-Elastic IP once its data is live, then completes the hook. A host whose stack doesn't start
-abandons the hook and the group tries again. Every launch and termination is emailed.
-`make host-id` is whichever host holds the Elastic IP. A new host's progress is in
-`/var/log/cloud-init-output.log`.
+The host is the only instance of the Auto Scaling Group `livedemos-host` ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). If it's reclaimed (Spot) or fails its EC2 health check, the group launches a replacement in any of three zones. A launch hook (`live`) keeps it out of service while it restores itself (below); it takes the Elastic IP once its data is live, then completes the hook. A host whose stack doesn't start abandons the hook and the group tries again. Every launch and termination is emailed. `make host-id` is whichever host holds the Elastic IP. A new host's progress is in `/var/log/cloud-init-output.log`.
 
-- **On demand or Spot:** `on_demand` in `terraform.tfvars` (true until the t4g.small free
-  trial ends on 2026-12-31, then false), `make tf-plan tf-apply`, then an instance refresh
-  (below): the running host only changes when it's replaced.
-- **Which types:** `instance_types`, all Graviton with 2 GB or more. On demand uses the
-  first; Spot picks by price and spare capacity.
-- **Roll out a new launch template** (user data, disk size, types for on demand):
-  `aws autoscaling start-instance-refresh --auto-scaling-group-name livedemos-host`.
+### How a new host goes live
+
+User data (`infra/live/user-data.sh.tftpl`) waits for three things, then takes the Elastic IP and completes the launch hook:
+
+1. **The stack answers**: the API built a snapshot in the last 10 seconds, so it and ClickHouse are up. Up to 10 minutes, or the launch is abandoned and the group tries again.
+2. **The data is live**: restored from the archive and caught up with the stream (newest event under a minute old). Catching up replays an hour or more of the stream, which Wikimedia serves at about 4 times real time, so it can take 20 minutes. While another host holds the Elastic IP (a planned replacement, or a Spot warning), it keeps waiting, up to 70 minutes: that host is serving. If nobody holds it, it takes it after 15 minutes anyway, behind or not (the page says how old the data is), so an outage at Wikimedia can't keep the site on its fallback.
+3. **IAM has reached the new host**: associating the address is retried for 3 minutes.
+
+The hook allows 2 hours for all of this: install, a 30-minute restore and these waits, with room. A host that never answers is abandoned and replaced.
+
+- **On demand or Spot:** `on_demand` in `terraform.tfvars` (true until the t4g.small free trial ends on 2026-12-31, then false), `make tf-plan tf-apply`, then an instance refresh (below): the running host only changes when it's replaced.
+- **Which types:** `instance_types`, all Graviton with 2 GB or more. On demand uses the first; Spot picks by price and spare capacity.
+- **Roll out a new launch template** (user data, disk size, types for on demand): `aws autoscaling start-instance-refresh --auto-scaling-group-name livedemos-host`.
 
 ## Rebuild the host from scratch
 
@@ -110,14 +85,7 @@ aws autoscaling terminate-instance-in-auto-scaling-group --no-should-decrement-d
 
 The group launches a replacement, exactly as after a Spot reclaim.
 
-No data steps. User data installs Docker, checks out the repo, applies host upkeep
-(`deploy/host/harden.sh`) and starts the stack with the image tag in SSM. ClickHouse starts
-empty, so before ingest starts `migrate` restores from the archive bucket: the newest two
-archived days back into the raw table, older days (up to 90) into the per-minute rollup.
-Ingest then replays the outage from Wikimedia (it keeps 7 days), starting 30 minutes before
-the newest archived event and skipping the events it restored. The archive service finds
-its predecessor's files and leaves them. The chart is continuous, or shows a labelled gap
-if the outage outlived the stream's retention.
+No data steps. User data installs Docker, checks out the repo, applies host upkeep (`deploy/host/harden.sh`) and starts the stack with the image tag in SSM. ClickHouse starts empty, so before ingest starts `migrate` restores from the archive bucket: the newest two archived days back into the raw table, older days (up to 90) into the per-minute rollup. Ingest then replays the outage from Wikimedia (it keeps 7 days), starting 30 minutes before the newest archived event and skipping the events it restored. The archive service finds its predecessor's files and leaves them. The chart is continuous, or shows a labelled gap if the outage outlived the stream's retention.
 
 **Drill, 2026-10-10 11:28 UTC** (the command above, on demand t4g.small, 85 archived hours):
 
@@ -129,45 +97,25 @@ if the outage outlived the stream's retention.
 | Ingest replaying the stream from 10:30 | 2 min 24 s |
 | Caught up: takes the Elastic IP, live through CloudFront | 7 min 26 s |
 
-The chart afterwards: the 50 minutes it shared with a copy taken just before the drill
-matched exactly in every language, and the 8 minutes of the outage were filled by the
-replay at normal levels. No gap, no dip, nothing counted twice.
+The chart afterwards: the 50 minutes it shared with a copy taken just before the drill matched exactly in every language, and the 8 minutes of the outage were filled by the replay at normal levels. No gap, no dip, nothing counted twice.
 
-If `migrate` fails on the restore (the archive can't be read), nothing else starts. Fix
-the cause, or start without it and rebuild later:
-`ARCHIVE_RESTORE=false docker compose -f compose.yaml -f compose.prod.yaml up -d`.
+If `migrate` fails on the restore (the archive can't be read), nothing else starts. Fix the cause, or start without it and rebuild later: `ARCHIVE_RESTORE=false docker compose -f compose.yaml -f compose.prod.yaml up -d`.
 
 ## Security updates and reboots
 
-`deploy/host/harden.sh` runs at first boot and on every deploy. Security updates install
-daily (`dnf-automatic.timer`, from the latest Amazon Linux release). On Sundays at 04:00
-UTC the host reboots if an update needs it (`reboot-if-needed.timer`); the live page shows
-the fallback for a minute or two. To see what happened: `journalctl -u dnf-automatic -u
-reboot-if-needed --since -7d`. To skip this week's reboot: `systemctl stop
-reboot-if-needed.timer` (the next deploy turns it back on).
+`deploy/host/harden.sh` runs at first boot and on every deploy. Security updates install daily (`dnf-automatic.timer`, from the latest Amazon Linux release). On Sundays at 04:00 UTC the host reboots if an update needs it (`reboot-if-needed.timer`); the live page shows the fallback for a minute or two. To see what happened: `journalctl -u dnf-automatic -u reboot-if-needed --since -7d`. To skip this week's reboot: `systemctl stop reboot-if-needed.timer` (the next deploy turns it back on).
 
 ## Host replacements
 
-The Auto Scaling Group emails the budget address (confirm the subscription once) on every
-launch and termination, and when either fails. A termination you didn't start is a Spot
-reclaim or a failed health check: the group is already launching a replacement.
+The Auto Scaling Group emails the budget address (confirm the subscription once) on every launch and termination, and when either fails. A termination you didn't start is a Spot reclaim or a failed health check: the group is already launching a replacement.
 
-1. `aws autoscaling describe-scaling-activities --auto-scaling-group-name livedemos-host
-   --max-items 5`: why it happened.
-2. The replacement takes about 8 minutes to be live (the drill above); meanwhile CloudFront
-   serves the fallback copy, unless the old host is still up and serving.
-3. A failed launch (no Spot capacity in any zone, for every type): set `on_demand = true`
-   and apply, or add a type to `instance_types`.
+1. `aws autoscaling describe-scaling-activities --auto-scaling-group-name livedemos-host --max-items 5`: why it happened.
+2. The replacement takes about 8 minutes to be live (the drill above); meanwhile CloudFront serves the fallback copy, unless the old host is still up and serving.
+3. A failed launch (no Spot capacity in any zone, for every type): set `on_demand = true` and apply, or add a type to `instance_types`.
 
 ## Schema changes
 
-Add a numbered file to `src/livedemos/db/migrations/` ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)).
-Every deploy runs the `migrate` job before ingest and the API start; it applies pending
-files in order and records them. Never edit an applied migration: `migrate` refuses, and
-nothing else starts. If it reports another run holding the lock and none is running (a
-deploy was interrupted), clear it with
-`docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate livedemos-migrate --unlock`. Before the first deploy that adds a secret (such as
-`clickhouse-migrator-password`), run `make tf-plan tf-apply` so SSM has it.
+Add a numbered file to `src/livedemos/db/migrations/` ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)). Every deploy runs the `migrate` job before ingest and the API start; it applies pending files in order and records them. Never edit an applied migration: `migrate` refuses, and nothing else starts. If it reports another run holding the lock and none is running (a deploy was interrupted), clear it with `docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate livedemos-migrate --unlock`. Before the first deploy that adds a secret (such as `clickhouse-migrator-password`), run `make tf-plan tf-apply` so SSM has it.
 
 ## Check the rollup against raw rows
 
@@ -175,20 +123,13 @@ deploy was interrupted), clear it with
 docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate livedemos-reconcile
 ```
 
-Exit 0: every (minute, language) older than 15 minutes matches. Exit 1: the mismatches are
-logged. To rebuild them, stop ingest first (repair refuses while an ingest insert is
-running or rows are still arriving, and fails if either happens during it), then add `--repair`, then start ingest; it resumes
-from its bookmark. Locally, `make reconcile REPAIR=1` does all three.
+Exit 0: every (minute, language) older than 15 minutes matches. Exit 1: the mismatches are logged. To rebuild them, stop ingest first (repair refuses while an ingest insert is running or rows are still arriving, and fails if either happens during it), then add `--repair`, then start ingest; it resumes from its bookmark. Locally, `make reconcile REPAIR=1` does all three.
 
 ## The Parquet archive
 
-The `archive` service writes each finished hour to S3 within about 5 minutes of ingest
-passing it, logs every file, and rewrites an hour whose raw rows grow later. Healthy:
-`archive_hours_behind` is 0 and `archive_newest_hour_timestamp_seconds` trails the clock
-by one to two hours.
+The `archive` service writes each finished hour to S3 within about 5 minutes of ingest passing it, logs every file, and rewrites an hour whose raw rows grow later. Healthy: `archive_hours_behind` is 0 and `archive_newest_hour_timestamp_seconds` trails the clock by one to two hours.
 
-- **Rewrite an hour** (a file that can't be read, or one you want rebuilt from what
-  ClickHouse has now). Stop the service first so the two don't write the same file:
+- **Rewrite an hour** (a file that can't be read, or one you want rebuilt from what ClickHouse has now). Stop the service first so the two don't write the same file:
 
   ```
   docker compose -f compose.yaml -f compose.prod.yaml stop archive
@@ -196,10 +137,8 @@ by one to two hours.
   docker compose -f compose.yaml -f compose.prod.yaml start archive
   ```
 
-  It refuses an hour ClickHouse has no rows for (exit 2). The replaced version stays in
-  the bucket for 30 days. Locally: `make archive-hour HOUR=...`.
-- **Rebuild the rollup from the archive**, for whole UTC days, up to 31 at a time, `--to`
-  exclusive. Stop ingest first:
+  It refuses an hour ClickHouse has no rows for (exit 2). The replaced version stays in the bucket for 30 days. Locally: `make archive-hour HOUR=...`.
+- **Rebuild the rollup from the archive**, for whole UTC days, up to 31 at a time, `--to` exclusive. Stop ingest first:
 
   ```
   docker compose -f compose.yaml -f compose.prod.yaml stop ingest
@@ -208,19 +147,9 @@ by one to two hours.
   docker compose -f compose.yaml -f compose.prod.yaml start ingest
   ```
 
-  It refuses while rows are arriving, and if any hour in the range has no file. An hour
-  with no file is either an outage or an hour that never got archived. Check
-  `ingest_gaps`. If they're outages, or a partial first hour, add `--allow-missing`: it
-  rebuilds the hours that have files and leaves the others as they are.
-  The live rollup only changes once every file has been read into a staging table, and
-  then a whole month at a time, atomically. It holds the maintenance lock; if it reports
-  the lock held and nothing is running, clear it with `livedemos-migrate --unlock`
-  (see Schema changes).
-  Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days,
-  `reconcile` (below) then confirms the rollup matches raw again.
+  It refuses while rows are arriving, and if any hour in the range has no file. An hour with no file is either an outage or an hour that never got archived. Check `ingest_gaps`. If they're outages, or a partial first hour, add `--allow-missing`: it rebuilds the hours that have files and leaves the others as they are. The live rollup only changes once every file has been read into a staging table, and then a whole month at a time, atomically. It holds the maintenance lock; if it reports the lock held and nothing is running, clear it with `livedemos-migrate --unlock` (see Schema changes). Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days, `reconcile` (below) then confirms the rollup matches raw again.
 
-- **Undo a bad rewrite** (within 30 days; replaced versions expire after that). From
-  your laptop, with the `livedemos` profile, since the host can't read old versions:
+- **Undo a bad rewrite** (within 30 days; replaced versions expire after that). From your laptop, with the `livedemos` profile, since the host can't read old versions:
 
   ```
   aws s3api list-object-versions --bucket <archive-bucket> --prefix wikipedia/edits/dt=2026-10-06/hour=09.parquet
@@ -228,74 +157,46 @@ by one to two hours.
     --copy-source "<archive-bucket>/wikipedia/edits/dt=2026-10-06/hour=09.parquet?versionId=<VersionId>"
   ```
 
-  The copy becomes the current version. With the archive service stopped, record what it
-  holds, or the service compares against the bad rewrite's count: run
-  `livedemos-archive --once` as above after deleting that hour's rows from
-  `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'
-  SETTINGS mutations_sync = 1`, as admin, so it's gone before the run); it then finds the
-  file and records it. Start the service again.
+  The copy becomes the current version. With the archive service stopped, record what it holds, or the service compares against the bad rewrite's count: run `livedemos-archive --once` as above after deleting that hour's rows from `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00' SETTINGS mutations_sync = 1`, as admin, so it's gone before the run); it then finds the file and records it. Start the service again.
 
 ## Grafana Cloud
 
-Alloy (`deploy/alloy/config.alloy`) sends metrics and logs to the stack. Its endpoints
-and user ids are Terraform settings (`grafana_cloud` in `terraform.tfvars`, and the
-`TF_GRAFANA_CLOUD` repository variable for the pipeline). The token isn't: create it in
-Grafana Cloud (Administration > Cloud access policies, scopes `metrics:write` and
-`logs:write`), copy it, then without it touching your shell history:
+Alloy (`deploy/alloy/config.alloy`) sends metrics and logs to the stack. Its endpoints and user ids are Terraform settings (`grafana_cloud` in `terraform.tfvars`, and the `TF_GRAFANA_CLOUD` repository variable for the pipeline). The token isn't: create it in Grafana Cloud (Administration > Cloud access policies, scopes `metrics:write` and `logs:write`), copy it, then without it touching your shell history:
 
 ```
 aws ssm put-parameter --profile livedemos --region eu-west-1 --overwrite \
   --name /livedemos/grafana-cloud-token --type SecureString --value "$(pbpaste)"
 ```
 
-The next deploy (or re-running the last one) puts it in the host's `.env`. To rotate it,
-do the same with a new token, then delete the old one in Grafana Cloud.
+The next deploy (or re-running the last one) puts it in the host's `.env`. To rotate it, do the same with a new token, then delete the old one in Grafana Cloud.
 
-**Dashboard and alert rules:** "Live demos: pipeline" and the rule group `livedemos` are
-code. Change `deploy/grafana/build_dashboard.py` or `build_alerts.py`, run it, commit both
-files, then load them with a service account token (Editor role, made for the occasion):
-`GRAFANA_URL=https://<stack>.grafana.net GRAFANA_TOKEN=... uv run python deploy/grafana/load.py`.
+**Dashboard and alert rules:** "Live demos: pipeline" and the rule group `livedemos` are code. Change `deploy/grafana/build_dashboard.py` or `build_alerts.py`, run it, commit both files, then load them with a service account token (Editor role, made for the occasion): `GRAFANA_URL=https://<stack>.grafana.net GRAFANA_TOKEN=... uv run python deploy/grafana/load.py`.
 
-Set once by hand, in Alerting: the email contact point `livedemos-email` (the budget
-address; kept out of this repo) and a notification policy route `project = livedemos` to
-it, grouped by `alertname`, repeating every 4 hours.
+Set once by hand, in Alerting: the email contact point `livedemos-email` (the budget address; kept out of this repo) and a notification policy route `project = livedemos` to it, grouped by `alertname`, repeating every 4 hours.
 
-**Outside-in check:** Testing & synthetics > Synthetics, `livedemos-live-json`, as in
-`deploy/grafana/synthetic-check.json`: once a minute from London, failing unless
-`live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure.
-About 44,000 runs a month, inside the free tier's 100,000.
+**Outside-in check:** Testing & synthetics > Synthetics, `livedemos-live-json`, as in `deploy/grafana/synthetic-check.json`: once a minute from London, failing unless `live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure. About 44,000 runs a month, inside the free tier's 100,000.
 
-**Logs:** Explore, Loki, `{host="livedemos", service="ingest"}`; add `| json` to filter on
-fields, such as `| json | level="error"`.
+**Logs:** Explore, Loki, `{host="livedemos", service="ingest"}`; add `| json` to filter on fields, such as `| json | level="error"`.
 
-**Is Alloy healthy?** `docker compose -f compose.yaml -f compose.prod.yaml logs --tail 50 alloy`.
-A 401 means the token is wrong or missing.
+**Is Alloy healthy?** `docker compose -f compose.yaml -f compose.prod.yaml logs --tail 50 alloy`. A 401 means the token is wrong or missing.
 
 ## Alerts
 
-Grafana alert rules, emailed to the budget address. They're code:
-`deploy/grafana/build_alerts.py` writes `alerts.json` (rule group `livedemos`); load it as
-the "Grafana Cloud" section says. Each one resolves by itself when the cause is fixed. Shell
-commands below run on the host, in `/opt/livedemos`, with
-`dc="docker compose -f compose.yaml -f compose.prod.yaml"`.
+Grafana alert rules, emailed to the budget address. They're code: `deploy/grafana/build_alerts.py` writes `alerts.json` (rule group `livedemos`); load it as the "Grafana Cloud" section says. Each one resolves by itself when the cause is fixed. Shell commands below run on the host, in `/opt/livedemos`, with `dc="docker compose -f compose.yaml -f compose.prod.yaml"`.
 
 ### Ingest stalled
 
-The newest committed event was over 60 s old for 5 minutes (or ingest's metrics stopped).
-The live page says Paused.
+The newest committed event was over 60 s old for 5 minutes (or ingest's metrics stopped). The live page says Paused.
 
-1. `$dc logs --tail 50 ingest`: reconnecting (the stream), insert errors (ClickHouse), or
-   waiting for an earlier insert.
+1. `$dc logs --tail 50 ingest`: reconnecting (the stream), insert errors (ClickHouse), or waiting for an earlier insert.
 2. `curl -s localhost:9101/metrics | grep -E 'ingest_(connected|reconnects|batches)'`.
 3. `$dc ps`: is ClickHouse healthy? If not, see its logs; ingest resumes by itself.
 
 ### No data from a service
 
-A scrape of ingest, the API, the archive or ClickHouse failed for 5 minutes, or nothing
-arrived at all, meaning Alloy or the host is down.
+A scrape of ingest, the API, the archive or ClickHouse failed for 5 minutes, or nothing arrived at all, meaning Alloy or the host is down.
 
-1. Several services at once: is the host up? `/readyz` through CloudFront, the EC2 console,
-   the Auto Scaling Group's activity (a replacement in progress).
+1. Several services at once: is the host up? `/readyz` through CloudFront, the EC2 console, the Auto Scaling Group's activity (a replacement in progress).
 2. One service: `$dc ps` and `$dc logs --tail 50 <service>`.
 3. Everything but the host is fine: `$dc logs --tail 50 alloy` (a 401 is the token).
 
@@ -304,30 +205,24 @@ arrived at all, meaning Alloy or the host is down.
 A container used over 85% of its `mem_limit` for 5 minutes.
 
 1. The dashboard's memory panel: a step (a deploy, a backfill) or a slow climb (a leak)?
-2. ClickHouse: `MemoryTracking` against its 900 MiB server cap; merges or a heavy query in
-   `system.processes`.
-3. If it's steady and real, raise the limit in `compose.yaml`, keeping the host's total
-   under its 2 GB.
+2. ClickHouse: `MemoryTracking` against its 900 MiB server cap; merges or a heavy query in `system.processes`.
+3. If it's steady and real, raise the limit in `compose.yaml`, keeping the host's total under its 2 GB.
 
 ### OOM kill
 
 The kernel killed a process for memory in the last 10 minutes.
 
-1. `dmesg -T | grep -i -A2 oom`: which process, and whether a container limit or the host
-   ran out.
-2. `$dc ps`: did the container restart? Ingest resumes from its bookmark; the archive
-   catches up on its next run.
+1. `dmesg -T | grep -i -A2 oom`: which process, and whether a container limit or the host ran out.
+2. `$dc ps`: did the container restart? Ingest resumes from its bookmark; the archive catches up on its next run.
 3. Then as for "Container near its memory limit".
 
 ### Host swapping in
 
-Over 100 pages a second read back from swap for 10 minutes: the host itself is short of
-memory, and everything slows down.
+Over 100 pages a second read back from swap for 10 minutes: the host itself is short of memory, and everything slows down.
 
 1. `free -m` and the dashboard's host memory panel.
 2. `docker stats --no-stream`: which container grew.
-3. A lasting need: put `t4g.medium` first in `instance_types` ("The host and its Auto
-   Scaling Group", above).
+3. A lasting need: put `t4g.medium` first in `instance_types` ("The host and its Auto Scaling Group", above).
 
 ### Disk over 80%
 
@@ -335,13 +230,11 @@ The root disk, which holds ClickHouse's data, is over 80% full.
 
 1. `df -h /` and `du -sh /var/lib/docker/*`.
 2. `docker system df`: old images (deploys prune those older than a week) and logs.
-3. ClickHouse: `SELECT table, formatReadableSize(sum(bytes_on_disk)) FROM system.parts
-   WHERE active GROUP BY table`. Raw rows should expire after 7 days.
+3. ClickHouse: `SELECT table, formatReadableSize(sum(bytes_on_disk)) FROM system.parts WHERE active GROUP BY table`. Raw rows should expire after 7 days.
 
 ### API 5xx over 1%
 
-Over 1% of the API's responses at the origin were errors for 10 minutes. CloudFront serves
-its fallback copy meanwhile, so the page says Paused rather than breaking.
+Over 1% of the API's responses at the origin were errors for 10 minutes. CloudFront serves its fallback copy meanwhile, so the page says Paused rather than breaking.
 
 1. Is it the fire drill switch? `aws ssm get-parameter --name /livedemos/api-drill-5xx`.
 2. `$dc logs --tail 50 api`: snapshot failures mean ClickHouse.
@@ -352,17 +245,14 @@ its fallback copy meanwhile, so the page says Paused rather than breaking.
 No new hour archived for three hours.
 
 1. `$dc logs --tail 50 archive`.
-2. S3: credentials (the instance role) or the bucket policy. The archive section above has
-   the details.
+2. S3: credentials (the instance role) or the bucket policy. The archive section above has the details.
 3. Is ingest past the hour? An hour waits until ingest is 5 minutes past its end.
 
 ### live.json check failing
 
-Grafana's outside-in check of the public `live.json` failed (an error, or a payload that
-isn't `live`) on every probe for 3 minutes.
+Grafana's outside-in check of the public `live.json` failed (an error, or a payload that isn't `live`) on every probe for 3 minutes.
 
-1. `curl -sI https://<api_domain>/v1/wikipedia/live.json`: an error from CloudFront, or the
-   fallback copy (`"status": "fallback"`)?
+1. `curl -sI https://<api_domain>/v1/wikipedia/live.json`: an error from CloudFront, or the fallback copy (`"status": "fallback"`)?
 2. Fallback: the origin is down or erroring; see the other alerts.
 3. A CloudFront error with the origin healthy: the distribution or its certificate.
 
@@ -388,21 +278,14 @@ Each alert, triggered on purpose:
 | drill switch on at 12:51 | live.json check | 12:54 | 13:05 |
 | | API 5xx over 1% | 13:03 | 13:08 |
 
-The live.json check fired 3 to 4 minutes after the page stopped being live. Losing
-Alloy takes about 10 minutes to alert: a series counts as gone 5 minutes after its last
-sample, then the rule waits 5 more.
+The live.json check fired 3 to 4 minutes after the page stopped being live. Losing Alloy takes about 10 minutes to alert: a series counts as gone 5 minutes after its last sample, then the rule waits 5 more.
 
 ## The Ops tab's cost figure
 
 The archive service asks Cost Explorer once a UTC day (docs/architecture.md, "Ops numbers").
 
-- **Prerequisite:** `project` must be an active cost allocation tag in the management
-  account's Billing console, or the tag filter returns nothing. Checked active on
-  2026-10-08: the filter returned $0.20 for October.
-- **No figure today?** Look at the day's claim: `aws s3 cp s3://<archive bucket>/ops/cost/$(date -u +%F).json -`.
-  No object: the service hasn't tried yet (logs: `cost`). An object with no `result`: the
-  caller died mid-way, and there'll be no figure until tomorrow. A `result` with `ok: false`:
-  its `error` says why (often a permission).
+- **Prerequisite:** `project` must be an active cost allocation tag in the management account's Billing console, or the tag filter returns nothing. Checked active on 2026-10-08: the filter returned $0.20 for October.
+- **No figure today?** Look at the day's claim: `aws s3 cp s3://<archive bucket>/ops/cost/$(date -u +%F).json -`. No object: the service hasn't tried yet (logs: `cost`). An object with no `result`: the caller died mid-way, and there'll be no figure until tomorrow. A `result` with `ok: false`: its `error` says why (often a permission).
 - It isn't asked again the same day, by design. Fix the cause; tomorrow's run picks it up.
 
 ## Other signals
@@ -425,5 +308,4 @@ Worth a look on the dashboard or in Explore; not alerts.
 | `archive_hours_behind > 0 and time() - archive_oldest_behind_hour_timestamp_seconds > 5 * 86400` | An hour has been behind for 5 days; its raw rows expire after 7. (The timestamp is 0 when nothing is behind, so it needs the first half.) |
 | `ClickHouse MemoryTrackingUncorrected - MemoryTracking` growing | The memory count is drifting. The memory worker corrects it; if this keeps growing, that correction is off. |
 
-For a slow query or a merge backlog, `system.query_log` (slow application queries) and
-`system.part_log` keep 3 days.
+For a slow query or a merge backlog, `system.query_log` (slow application queries) and `system.part_log` keep 3 days.

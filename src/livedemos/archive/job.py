@@ -1,31 +1,8 @@
 """Write each finished hour of raw edits to one Parquet file on S3, and keep it complete.
 
-    <url>/dt=YYYY-MM-DD/hour=HH.parquet
-
-ClickHouse does the work: one `INSERT INTO FUNCTION s3(...) SELECT ...` per hour, signed
-with the host's instance role, so no credentials pass through Python.
-
-Which hours: every hour inside the lookback that has finished, that ingest has passed by
-`settle_s`, and whose raw rows outnumber what its file holds. `archive_hours` records what
-each file holds, counted from the file itself after writing it. So:
-
-- a new hour is written once ingest has passed it;
-- an hour that gains rows later (a late event, a replay after an outage) is written
-  again, for as long as its raw rows are kept;
-- a file that didn't match its raw rows when written is fixed on the next run;
-- a file is never replaced by one with fewer rows. A host rebuilt from scratch has fewer
-  raw rows than its predecessor wrote; it finds those files (they aren't in its new
-  `archive_hours`), records what they hold, and leaves them alone.
-
-"Passed" uses the newest committed event, not the clock: after an outage, ingest replays
-the stream oldest first, and an hour waits for the replay to pass it.
-
-Only whole hours: one that started before the first raw row (first boot, a rebuilt host)
-or before the retention cutoff (raw rows expire part by part, so its start may be gone)
-is never archived as if it were complete.
-
-An hour with no raw rows gets no file. Rewriting an hour by hand, whatever it holds, is
-`livedemos-archive --hour ...` (stop the service first).
+ClickHouse does the work, one `INSERT INTO FUNCTION s3(...)` per hour, signed with the
+instance role. Which hours, and why a file is never replaced by one with fewer rows:
+docs/architecture.md, "archive". Rewriting an hour by hand: `livedemos-archive --hour`.
 """
 
 from __future__ import annotations

@@ -2,22 +2,10 @@
 
     livedemos-rebuild --from 2026-10-01 --to 2026-10-03   # [from, to)
 
-For when the rollup is lost or wrong and the raw rows are gone (older than 7 days, or a
-host rebuilt from scratch). The live rollup is never half-rebuilt:
-
-1. Every hour in the range must have a file. An hour without one is either a real outage
-   (nothing was ingested) or an hour that never got archived, and the files can't tell
-   which. Check `ingest_gaps`, then pass `--allow-missing` to rebuild the hours that have
-   files and leave the others as they are in the live rollup.
-2. Count the files into `wiki_edits_per_minute_staging`, one day per query, and check
-   every file produced rows, and as many as `archive_hours` recorded for it.
-3. With ingest stopped, copy each affected month's other minutes into staging, so it
-   holds complete replacement months, then swap each month in with REPLACE PARTITION.
-   Each swap is atomic: a month is either all old or all new, never empty.
-
-It holds the maintenance lock (`rollup/lock.py`) throughout, so it never
-overlaps a migration, a reconcile repair or another rebuild. It needs ingest stopped
-(`make rebuild-rollups` does that), and runs as `migrator`.
+Every hour needs a file (or `--allow-missing`), ingest must be stopped (`make
+rebuild-rollups` does that), and each month is swapped in whole, so the live rollup is
+never half-rebuilt. Runs as `migrator`, under the maintenance lock. docs/architecture.md,
+"archive".
 """
 
 from __future__ import annotations

@@ -17,12 +17,14 @@ Goals, in order:
 
 ## Words used here
 
-- **Bookmark:** the stream position ingest resumes from. Wikimedia sends one with every event; we store it on the row ([ADR 0006](adr/0006-bookmark-stored-with-rows.md)).
-- **Seam:** where a resumed stream overlaps what was already stored. Events there are matched by id, so none is lost or counted twice.
-- **Rollup:** edits per minute per language (`wiki_edits_per_minute`), kept 90 days, written by a materialized view as raw rows arrive.
-- **Page sets:** the exact set of pages edited in each minute (`wiki_pages_per_minute`), so "pages edited" over days doesn't need millions of raw rows.
-- **Query it:** the page's panel that runs a real, allowlisted query and shows ClickHouse's own timing.
-- **Drill:** breaking something on purpose in production to prove an alert or a recovery works.
+| Word | Meaning |
+|---|---|
+| Bookmark | The stream position ingest resumes from. Wikimedia sends one with every event; we store it on the row ([ADR 0006](adr/0006-bookmark-stored-with-rows.md)). |
+| Seam | Where a resumed stream overlaps what was already stored. Events there are matched by id, so none is lost or counted twice. |
+| Rollup | Edits per minute per language (`wiki_edits_per_minute`), kept 90 days, written by a materialized view as raw rows arrive. |
+| Page sets | The exact set of pages edited in each minute (`wiki_pages_per_minute`), so "pages edited" over days doesn't need millions of raw rows. |
+| Query it | The page's panel that runs a real, allowlisted query and shows ClickHouse's own timing. |
+| Drill | Breaking something on purpose in production to prove an alert or a recovery works. |
 
 ## The core idea: compute once, let the CDN fan out
 
@@ -84,19 +86,24 @@ What runs in AWS today: the same containers under Docker Compose on one EC2 host
 
 Consumes `recentchange` from Wikimedia EventStreams over Server-Sent Events.
 
-- **Keeps** edits and new pages on `enwiki`, `ptwiki` and `dewiki`. Drops canary (test) events, other wikis and other change types. Every outcome is counted in metrics.
-- **Batches** rows and flushes every second, or at 5,000 rows while catching up. One batch is one ClickHouse INSERT. A batch never spans two UTC days, because an INSERT is only atomic within one partition.
-- **Resumes** from a bookmark stored on every row ([ADR 0006](adr/0006-bookmark-stored-with-rows.md)). The bookmark only moves after an insert commits. On restart: newest row's SSE id goes back as `Last-Event-ID`.
-- **Dedupes the seam.** Wikimedia resumes by timestamp, so a few events at the cut can arrive twice. The ids of the last 20,000 events ingested are checked before insert. Ingest order, not event time, because the real stream delivers late and interleaved events (checked 2026-10-04).
-- **Retries safely.** Each batch carries an insert deduplication token built from its event ids, so retrying the same batch is a no-op in ClickHouse and in the rollup.
-- **Retries a failed insert unchanged.** An insert can commit, or still be running, and report failure. That batch is sealed and resent with the same token and query id until ClickHouse confirms it, so a late copy is dropped. On start, ingest waits for inserts a killed predecessor left running before reading the bookmark.
-- **Parses defensively.** Every field is type-checked; valid JSON of the wrong shape is counted as malformed and skipped, never raised. Parsing happens in the reader task, so only kept rows wait in the bounded queue.
-- **Ignores events from the future.** Anything dated more than 5 minutes ahead is skipped, so one bad timestamp can't pin every window.
-- **Backpressure by disconnecting.** If ClickHouse is down, ingest closes the stream and waits. Wikimedia keeps the events; nothing piles up in memory.
-- **Idle watchdog.** `recentchange` never goes quiet. 30 seconds of silence means a half-open socket, so it reconnects.
-- **First boot** subscribes with `?since=` one hour back, so charts are full from minute one. A bookmark older than the source's retention, at start or before any reconnect, records a gap from the start of its minute instead of pretending.
-- **After a restore from the archive** (a host rebuilt from scratch): the newest raw rows have no bookmark. It replays from 30 minutes before the newest archived event and skips the restored ids, so anything the old host ingested after its last archive run comes back, and nothing is counted twice. Events older than the restored raw rows are dropped: their minutes were rebuilt into the rollup.
-- **No raw rows, but the rollup has minutes** (an outage outlived raw retention): replays what the source still has after the rollup's last minute, and records a gap from that minute, which may be partial.
+It keeps edits and new pages on `enwiki`, `ptwiki` and `dewiki`, and drops canary (test) events, other wikis and other change types. Every field is type-checked: valid JSON of the wrong shape is counted as malformed and skipped, never raised. Anything dated more than 5 minutes ahead is skipped, so one bad timestamp can't pin every window. Every outcome is counted in metrics. Parsing happens in a reader task, so only kept rows wait in the bounded queue.
+
+Rows are flushed every second, or at 5,000 rows while catching up. One batch is one ClickHouse INSERT, and never spans two UTC days, because an INSERT is only atomic within one partition. Each batch carries a deduplication token built from its event ids, so retrying it is a no-op in ClickHouse and in the rollup. An insert can commit, or still be running, and report failure: that batch is sealed and resent with the same token and query id until ClickHouse confirms it, so a late copy is dropped.
+
+The resume bookmark is stored on every row ([ADR 0006](adr/0006-bookmark-stored-with-rows.md)), and only moves after an insert commits. On restart, ingest waits for any insert a killed predecessor left running, then sends the newest row's SSE id back as `Last-Event-ID`. Wikimedia resumes by timestamp, so a few events at the cut can arrive twice: the ids of the last 20,000 events ingested are checked first. That's by ingest order, not event time, because the real stream delivers late and interleaved events (checked 2026-10-04).
+
+The bookmark is read in bounded queries (migration 0002): the newest event time from part metadata, the highest `ingest_seq` from an aggregate projection (one row per part), then the last 20,000 rows by `ingest_seq` from a projection sorted by it. ClickHouse only uses that projection for a range on its key, so the read starts an hour of sequence below the newest and doubles the range until it holds 20,000 rows. The range bounds the read, never which rows count, so a clock jump can't split the seam (`test_the_seam_is_the_last_rows_even_across_a_clock_jump`). At 7 days of data that's a few hundred rows, then about 41,000 ([benchmarks](benchmarks.md)).
+
+Some starts have no usable bookmark:
+
+| Start | What ingest does |
+|---|---|
+| First boot | Subscribes with `?since=` one hour back, so charts are full from minute one. |
+| Bookmark older than the source's retention (at start, or before a reconnect) | Records a gap from the start of its minute instead of pretending. |
+| After a restore from the archive (a host rebuilt from scratch) | The newest raw rows have no bookmark. It replays from 30 minutes before the newest archived event and skips the restored ids, so whatever the old host ingested after its last archive run comes back, and nothing is counted twice. Events older than the restored raw rows are dropped: their minutes were rebuilt into the rollup. |
+| No raw rows, but the rollup has minutes (an outage outlived raw retention) | Replays what the source still has after the rollup's last minute, and records a gap from that minute, which may be partial. |
+
+If ClickHouse is down, ingest closes the stream and waits: Wikimedia keeps the events, so nothing piles up in memory. `recentchange` never goes quiet, so 30 seconds of silence means a half-open socket, and it reconnects.
 
 ### ClickHouse (`src/livedemos/db/migrations/`, `clickhouse/`)
 
@@ -118,8 +125,9 @@ The per-minute rollup is fed by a materialized view in the same INSERT, but not 
 
 #### Query it
 
-- **Windows.** `5m`, `1h` and `24h` count raw rows. `3d` and `7d` read per-minute tables instead: edits from the rollup, and distinct pages by merging each minute's exact set of pages edited (`wiki_pages_per_minute`, migration 0004). That's about 10,000 rows a language a week instead of millions, and it's complete after a host rebuild, which restores only 2 days of raw rows.
-- **Load shedding.** Concurrent misses for one key share one query. At most 2 queries run and 4 are admitted at once. Nobody waits more than 5 s, and a failure is remembered for 5 s. Past any of those, the answer is a 503 with `Retry-After`.
+`5m`, `1h` and `24h` count raw rows. `3d` and `7d` read per-minute tables instead: edits from the rollup, and distinct pages by merging each minute's exact set of pages edited (`wiki_pages_per_minute`, migration 0004). That's about 10,000 rows a language a week instead of millions, and it's complete after a host rebuild, which restores only 2 days of raw rows.
+
+It sheds load rather than queue it. Concurrent misses for one key share one query. At most 2 queries run and 4 are admitted at once. Nobody waits more than 5 s, and a failure is remembered for 5 s. Past any of those, the answer is a 503 with `Retry-After`.
 
 Every window is anchored to the newest event, not the wall clock, and bounded above by it; the chart takes completed minutes from the rollup and the current minute from raw rows, so it's bounded too. If ingest stalls, numbers freeze at the last thing we saw and the widget says "Paused". Nothing decays to a fake zero. The snapshot's queries run concurrently, so a late event inserted between them can show in one and not another; the next snapshot agrees again.
 
@@ -129,11 +137,15 @@ The payload carries `stale_after_s`, so the API and the widget can't disagree ab
 
 Every number on the Ops tab comes from ClickHouse at request time, none from copy.
 
-- **Freshness SLO** (requirement N2). ClickHouse samples the newest event's age once a minute by itself, with a refreshable materialized view (`freshness_samples`, migration 0005), so a sample doesn't depend on ingest or the API. A minute is fresh if every sample in it was under 60 s, stale if not, and unmeasured if it has no sample (ClickHouse down, host being replaced). Unmeasured minutes count against the SLO. The window is the last 30 days of whole minutes, starting no earlier than the first whole minute measured; `full_window` says whether it covers all 30 days. The maths is `ops/slo.py`, tested in `tests/unit/test_slo.py`.
-- **Ingest lag** covers every row stored in the last hour, replays of old events included: after an outage, that's when lag matters. A minmax index on `ingested_at` keeps it from reading the week.
-- **Reconnects.** Ingest records each one in `ingest_reconnects`, from a task of its own with a 2 s timeout, so a slow write never holds up a batch. Rows are sealed with a token and retried unchanged, so a write that landed but timed out isn't counted twice. While ClickHouse is down they wait in memory; if ingest restarts before ClickHouse is back, those are lost.
-- **Cost.** The archive service, which runs only on the host holding the Elastic IP, calls Cost Explorer's `GetCostAndUsage` once per UTC day for the month so far, filtered by the `project=livedemos` tag. "Once" has to survive crashes, a replacement host and two hosts overlapping, so before asking it claims the day with a conditional write to the archive bucket (`ops/cost/YYYY-MM-DD.json`, `If-None-Match: *`): only one caller can create it. The winner asks and writes the answer into the same object; anyone else, or a new host later that day, copies it from there. A claim with no answer means no new figure that day, never a second call; so does a claim that spans midnight UTC. An answer that couldn't be saved is kept in memory and saved on later runs. Only this month's figure is served, with the date fetched and the currency AWS reports. The host role allows that one Cost Explorer action, and reads and writes under `ops/cost/` only.
-- **Lost on a host rebuild.** The samples and reconnects live on the host's disk and aren't archived, so a rebuilt host starts them again, and `full_window` goes back to false until 30 days have passed.
+The freshness SLO is measured by ClickHouse itself: a refreshable materialized view samples the newest event's age once a minute (`freshness_samples`, migration 0005), so a sample doesn't depend on ingest or the API. A minute is fresh if every sample in it was under 60 s, stale if not, and unmeasured if it has no sample (ClickHouse down, host being replaced). Unmeasured minutes count against the SLO. The window is the last 30 days of whole minutes, starting no earlier than the first whole minute measured; `full_window` says whether it covers all 30 days. The maths is `ops/slo.py`, tested in `tests/unit/test_slo.py`.
+
+Ingest lag covers every row stored in the last hour, replays of old events included: after an outage, that's when lag matters. A minmax index on `ingested_at` keeps it from reading the week.
+
+Ingest records each reconnect in `ingest_reconnects`, from a task of its own with a 2 s timeout, so a slow write never holds up a batch. Rows are sealed with a token and retried unchanged, so a write that landed but timed out isn't counted twice. While ClickHouse is down they wait in memory; if ingest restarts before ClickHouse is back, those are lost.
+
+The cost is asked of Cost Explorer (`GetCostAndUsage`) once per UTC day for the month so far, filtered by the `project=livedemos` tag, by the archive service, which runs only on the host holding the Elastic IP. "Once" has to survive crashes, a replacement host and two hosts overlapping, so before asking it claims the day with a conditional write to the archive bucket (`ops/cost/YYYY-MM-DD.json`, `If-None-Match: *`): only one caller can create it. The winner asks and writes the answer into the same object; anyone else, or a new host later that day, copies it from there. A claim with no answer means no new figure that day, never a second call; so does a claim that spans midnight UTC. An answer that couldn't be saved is kept in memory and saved on later runs. Only this month's figure is served, with the date fetched and the currency AWS reports. The host role allows that one Cost Explorer action, and reads and writes under `ops/cost/` only.
+
+The samples and reconnects live on the host's disk and aren't archived, so a rebuilt host starts them again, and `full_window` goes back to false until 30 days have passed.
 
 ### Widget (`web/embed/wikipedia/`)
 
@@ -155,14 +167,19 @@ A static page with no framework and no build step. It polls `live.json` every 2 
 
 Every finished hour of raw edits becomes one Parquet file, `wikipedia/edits/dt=YYYY-MM-DD/hour=HH.parquet`, in the archive bucket ([ADR 0004](adr/0004-parquet-archive-not-iceberg.md)). ClickHouse writes it with one `INSERT INTO FUNCTION s3(...)`, signed by the instance role, so the archive service holds no AWS credentials. It's its own small service, not part of the API: archiving needs a ClickHouse user that can write to S3, and the API is public and read-only.
 
-- **Every hour complete, for as long as raw rows exist.** Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every whole hour of the last 7 days that ingest has passed by 5 minutes, it compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay. "Whole" means it started after the first raw row and after the retention cutoff: raw rows expire part by part, so the hour the cutoff falls in may be missing its start.
-- **Never fewer rows.** A scheduled write goes ahead only if ClickHouse has more rows than the file, checked again just before writing. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, checks each one's events fall inside its hour, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
-- **One writer.** In production the service archives only while its host holds the Elastic IP, so while the Auto Scaling Group overlaps two hosts only the live one writes ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). Before replacing a file it also reads the file itself, not only its own record of it.
-- **Recoverable.** The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone. The host can put, get and list under `wikipedia/`, never delete.
-- **Rebuilds the rollup without risking it.** `livedemos-rebuild` needs a file for every hour in the range, or `--allow-missing` to rebuild the hours that have one and leave the rest as they are. It counts the files into a staging table a day at a time and checks every file produced as many rows as `archive_hours` recorded for it. Then, with ingest stopped, it adds the rest of each affected month and swaps whole months into the live rollup with `REPLACE PARTITION`: each month is all old or all new, never empty. It holds the same lock as migrations and reconcile repairs, so none of them overlap.
-- **Completes the page sets.** `wiki_pages_per_minute` is filled by its view on every insert, and every hour is completed once it's final: from raw rows when the hour is archived, and from Parquet on `migrate` for any archived hour of the last 14 days not yet recorded as filled (`wiki_pages_filled`; a rebuilt host's older days). Rollup rebuilds and reconcile repairs top them up too. Sets only add, so none of this can count a page twice; a correction that removes a page isn't supported, and raw rows are never corrected that way.
-- **Restores itself.** After migrating, `migrate` checks for raw rows. With none (a host rebuilt from scratch), before ingest starts, it puts the newest two archived days back into the raw table (the rollup fills through its view, and the archive service finds rows matching its files) and rebuilds older days, up to 90 days back, straight into the rollup. If that stopped part way (an insert over many files isn't atomic), the next run finds raw rows that don't match the files and does the raw days again. With rows ingest wrote itself, it does nothing.
-- **Least privilege.** `archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at archive-bucket URLs (`livedemos-archive-*`); any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it. The pattern can't name the exact bucket: its name holds the account id, which stays out of this public repo. The S3 permissions themselves belong to the instance role, which every container on the host can reach; isolating that per container would cost more than this project's budget.
+Every hour stays complete for as long as raw rows exist. Each file is read back after writing, and `archive_hours` records how many rows it holds. Every 5 minutes, for every whole hour of the last 7 days that ingest has passed by 5 minutes, the service compares ClickHouse's count with the file's and writes the hour again if ClickHouse has more: a late event, a replay after an outage, or a write that didn't match. "Passed" means the newest committed event, not the clock, so an hour waits for a replay. "Whole" means it started after the first raw row and after the retention cutoff: raw rows expire part by part, so the hour the cutoff falls in may be missing its start.
+
+A file is never replaced by one with fewer rows. A scheduled write goes ahead only if ClickHouse has more rows than the file, checked again just before writing. A host rebuilt from scratch has thinner raw data and an empty `archive_hours`: it finds its predecessor's files, checks each one's events fall inside its hour, records what they hold, and leaves them. A file it can't read is reported, not overwritten. Rewriting an hour regardless is a manual `--hour`.
+
+There's one writer. In production the service archives only while its host holds the Elastic IP, so while the Auto Scaling Group overlaps two hosts only the live one writes ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)). Before replacing a file it also reads the file itself, not only its own record of it. The bucket keeps replaced versions for 30 days, so a bad rewrite can be undone, and the host can put, get and list under `wikipedia/`, never delete.
+
+`livedemos-rebuild` rebuilds the rollup without risking it. It needs a file for every hour in the range, or `--allow-missing` to rebuild the hours that have one and leave the rest as they are. It counts the files into a staging table a day at a time and checks every file produced as many rows as `archive_hours` recorded for it. Then, with ingest stopped, it adds the rest of each affected month and swaps whole months into the live rollup with `REPLACE PARTITION`: each month is all old or all new, never empty. It holds the same lock as migrations and reconcile repairs, so none of them overlap.
+
+`wiki_pages_per_minute` is filled by its view on every insert, and every hour is completed once it's final: from raw rows when the hour is archived, and from Parquet on `migrate` for any archived hour of the last 14 days not yet recorded as filled (`wiki_pages_filled`; a rebuilt host's older days). Rollup rebuilds and reconcile repairs top them up too. Sets only add, so none of this can count a page twice; a correction that removes a page isn't supported, and raw rows are never corrected that way.
+
+A host restores itself. After migrating, `migrate` checks for raw rows. With none (a host rebuilt from scratch), before ingest starts, it puts the newest two archived days back into the raw table (the rollup fills through its view, and the archive service finds rows matching its files) and rebuilds older days, up to 90 days back, straight into the rollup. If that stopped part way (an insert over many files isn't atomic), the next run finds raw rows that don't match the files and does the raw days again. With rows ingest wrote itself, it does nothing.
+
+`archiver` can read `wiki_edits`, write `archive_hours`, and read and write S3 only at archive-bucket URLs (`livedemos-archive-*`); any other URL is refused, so it can't copy data elsewhere. `migrator` can read the archive, not write it. The pattern can't name the exact bucket: its name holds the account id, which stays out of this public repo. The S3 permissions themselves belong to the instance role, which every container on the host can reach; isolating that per container would cost more than this project's budget.
 
 ### alloy (`deploy/alloy/`, production only)
 
@@ -242,10 +259,16 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 | CloudFront, Grafana Cloud, Cloudflare Pages | free tiers |
 | S3: fallback snapshot and Parquet archive | about 1 cent at first, about 7 cents after a year (below) |
 
-About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on
-demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on
-2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md).
-Month-to-date cost, as Cost Explorer reports it for the `project=livedemos` tag, is on the Ops tab (`/v1/ops.json`).
+Spot prices by type, eu-west-1, 2026-10-07 (AWS Pricing API and Spot price history), for 730 hours:
+
+| Type | Per hour | Per month |
+|---|---|---|
+| t4g.small on demand | $0.0184 | $13.43, free until 31 Dec 2026 (free trial) |
+| t4g.small Spot | $0.0083 to $0.0088 | $6.06 to $6.42 |
+| c6g.medium Spot (1 vCPU, 2 GB, not burstable) | $0.0098 to $0.0119 | $7.15 to $8.69 |
+| c7g.medium Spot | $0.0153 | $11.17 |
+
+About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on 2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md). Month-to-date cost, as Cost Explorer reports it for the `project=livedemos` tag, is on the Ops tab (`/v1/ops.json`).
 
 **The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Its first 30 archive files held 270,562 edits in 13.3 MB: 49 bytes an edit with zstd. That's about 0.46 MB an hour, 11 MB a day, 0.33 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 

@@ -101,7 +101,6 @@ class FakeStream:
         if self.seed is not None:
             self._rng.seed(self.seed)
 
-    # generation -----------------------------------------------------------------
     def make_event(self) -> Stored:
         topic = TOPICS[0] if self._rng.random() < 0.8 else TOPICS[1]
         last = self._positions.get(topic, 0)
@@ -189,7 +188,6 @@ class FakeStream:
                     del self.seqs[:keep]
                 self._cond.notify_all()
 
-    # serving ----------------------------------------------------------------------
     def cursor(self, last_event_id: str | None, since: str | None) -> Cursor:
         tail = self._next_seq
         from_ms: dict[str, int | None] = dict.fromkeys(TOPICS)

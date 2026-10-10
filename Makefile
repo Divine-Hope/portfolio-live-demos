@@ -111,7 +111,6 @@ e2e: ## Browser tests for the widget (start the stack first; LIVEDEMOS_E2E_BROWS
 	uv run --group e2e playwright install $${LIVEDEMOS_E2E_BROWSER:-chromium}
 	uv run --group e2e pytest -m e2e -v
 
-# AWS -----------------------------------------------------------------------------------
 # Credentials come from your SSO profile: run `aws sso login` for your SSO session first.
 TF_PROFILE ?= livedemos
 TF := AWS_PROFILE=$(TF_PROFILE) terraform
