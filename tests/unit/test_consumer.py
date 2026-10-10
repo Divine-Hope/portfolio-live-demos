@@ -1,11 +1,13 @@
 """The consumer's failure handling, against a stub database (no network, no ClickHouse)."""
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from httpx_sse import ServerSentEvent
 
@@ -248,3 +250,57 @@ async def test_reconnects_are_flushed_once_more_on_shutdown() -> None:
     consumer._load_state = no_state  # type: ignore[method-assign]
     await consumer.run(asyncio.Event())
     assert [table for table, *_ in db.inserts] == ["ingest_reconnects"]
+
+
+INCOMPLETE = (
+    "peer closed connection without sending complete message body (incomplete chunked read)"
+)
+
+
+class ClosingSource:
+    """A stream that was up (headers accepted), then ends with `error`."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.response = httpx.Response(200, request=httpx.Request("GET", "https://stream.test"))
+
+    async def aiter_sse(self) -> AsyncIterator[ServerSentEvent]:
+        raise self.error
+        yield
+
+
+def stream(
+    monkeypatch: pytest.MonkeyPatch, *, error: Exception, lasted_s: float, up: bool = True
+) -> None:
+    clock = iter([1_000.0, 1_000.0 + lasted_s])
+    monkeypatch.setattr("livedemos.ingest.consumer._monotonic", lambda: next(clock))
+
+    @contextlib.asynccontextmanager
+    async def connect(*args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        if not up:  # nothing came back: no headers, no stream
+            raise error
+        yield ClosingSource(error)
+
+    monkeypatch.setattr("livedemos.ingest.consumer.aconnect_sse", connect)
+
+
+async def test_wikimedias_15_minute_close_is_routine(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream(monkeypatch, error=httpx.RemoteProtocolError(INCOMPLETE), lasted_s=900.4)
+    assert await Consumer(SETTINGS, StubDatabase())._stream_once(asyncio.Event()) == "source_closed"
+
+
+@pytest.mark.parametrize(
+    ("error", "lasted_s", "up"),
+    [
+        (httpx.RemoteProtocolError(INCOMPLETE), 60.0, True),  # cut off early: a fault
+        (httpx.RemoteProtocolError(INCOMPLETE), 1_900.0, True),  # not the 15-minute limit
+        (httpx.RemoteProtocolError("malformed chunk header"), 900.0, True),
+        (httpx.RemoteProtocolError("Server disconnected without sending a response."), 0.0, False),
+        (httpx.ConnectError("connection refused"), 0.0, False),
+    ],
+)
+async def test_anything_else_stays_network(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, lasted_s: float, up: bool
+) -> None:
+    stream(monkeypatch, error=error, lasted_s=lasted_s, up=up)
+    assert await Consumer(SETTINGS, StubDatabase())._stream_once(asyncio.Event()) == "network"
