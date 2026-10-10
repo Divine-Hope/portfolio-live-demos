@@ -1,8 +1,3 @@
-output "account_id" {
-  description = "The AWS account this stack runs in. Should be the livedemos account."
-  value       = data.aws_caller_identity.current.account_id
-}
-
 output "api_domain" {
   description = "CloudFront domain serving the data API."
   value       = aws_cloudfront_distribution.api.domain_name
@@ -24,6 +19,6 @@ output "snapshots_bucket" {
 }
 
 output "deploy_role_arn" {
-  description = "Set as the AWS_DEPLOY_ROLE_ARN variable on the GitHub production environment."
+  description = "Set as the AWS_DEPLOY_ROLE_ARN secret on the GitHub production environment."
   value       = aws_iam_role.deploy.arn
 }

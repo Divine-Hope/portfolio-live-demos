@@ -18,9 +18,9 @@ First up: what's being edited on English, Portuguese and German Wikipedia, right
 
 - **Kill ingest mid-insert and nothing is lost or counted twice.** [`make proof`](tests/integration/test_resume_proof.py) SIGKILLs it while an insert is running, restarts it, and checks every event against the source. How, and the limits: [ADR 0006](docs/adr/0006-bookmark-stored-with-rows.md).
 - **Query costs measured at full size.** Every API query runs against 7 days of synthetic data at twice the live rate, under the API user's limits, on a laptop ([benchmarks](docs/benchmarks.md)).
-- **Database work doesn't grow with viewers.** One snapshot a second, cached for a second at the edge. Measured: 1,000 simulated viewers on CloudFront sent the API one request a second ([architecture](docs/architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out)).
+- **Database work doesn't grow with viewers.** One snapshot a second, cached for a second at the edge. Measured on CloudFront: 1,000 simulated viewers (as many as one laptop could drive) sent the API one request a second ([architecture](docs/architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out)).
 - **It's honest when it's stale.** If the stream stops, the widget says "Paused" and the numbers freeze. Missing minutes show as gaps, not zeros ([tests](tests/e2e/test_widget.py)).
-- **One host, but it heals itself.** No broker, no semantic layer, no lakehouse format, each with a written reason ([decisions](docs/adr/README.md)). A lost host is replaced and restores itself from the Parquet archive with no manual steps: 7 min 50 s in a drill ([ADR 0010](docs/adr/0010-spot-host-in-an-auto-scaling-group.md)).
+- **One host, but it heals itself.** No broker, no semantic layer, no lakehouse format, each with a written reason ([decisions](docs/adr/README.md)). A lost host is replaced and restores itself from the Parquet archive with no manual steps: live again 7 min 26 s after the host was terminated, in a drill on 10 October 2026 ([ADR 0010](docs/adr/0010-spot-host-in-an-auto-scaling-group.md)).
 
 ## Architecture
 
@@ -124,6 +124,7 @@ Python 3.12, asyncio, httpx, FastAPI. ClickHouse 26.8 LTS. Plain HTML, CSS and J
 - **A second dataset**, Bitcoin from mempool.space, on the same platform. It tests whether the platform is general or just shaped around Wikipedia.
 - **Keep the Ops history across a host rebuild.** The freshness samples and reconnects live on the host's disk; archiving them like the edits would make the 30-day SLO survive a replacement.
 - **TLS from CloudFront to the host.** Today that hop is plain HTTP, guarded by a secret header and CloudFront-only firewall rules ([why](docs/architecture.md#security)).
+- **A month of production numbers.** Freshness over 30 days, "Query it" latency on the host, merges through a TTL drop, and the first full AWS bill, in place of the laptop benchmarks and price-list estimates.
 - **Signed embeds.** The language filter isn't tenant isolation. A real product would sign each customer's context and enforce it in the API.
 
 ## License

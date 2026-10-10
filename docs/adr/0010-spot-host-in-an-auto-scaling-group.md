@@ -42,7 +42,8 @@ under 5% for c6g.medium, c7g.medium and m6g.medium.
 
 A Spot host can be taken away. Losing the host used to mean a manual rebuild; since the self-restore work
 it doesn't. A new host restores itself from the Parquet archive and the stream with no
-manual steps, in 7 min 50 s in the drill, with the chart continuous afterwards.
+manual steps. Terminating the group's host on 2026-10-10, the replacement was live 7 min
+26 s later, with the chart continuous (runbook, "Rebuild the host from scratch").
 
 ## Decision
 
@@ -78,8 +79,31 @@ manual steps, in 7 min 50 s in the drill, with the chart continuous afterwards.
 - The per-instance CloudWatch recover and reboot alarms go: the group's health check
   replaces a broken host instead.
 - Deploys go to every host the group has put in service.
-- The measured week shrinks to what only time can show: freshness over a week, "Query it"
-  latency on the host, origin requests against page views, and the real bill. They're
-  collected by Grafana and Cost Explorer as the system runs, not by holding deploys.
+- What only time can show (freshness over a week, "Query it" latency on the host, origin
+  requests against page views, the real bill) is collected by Grafana and Cost Explorer as
+  the system runs, not by holding deploys.
 - Revisit if interruptions are frequent enough to show on the freshness SLO, or if the
   Spot price for 2 GB Graviton rises above about $0.015 an hour.
+
+## How the move went
+
+The move kept the old single instance running until the group's first host was live:
+
+1. Apply with a temporary `legacy-host.tf` in place: it adds the group and keeps the old
+   host. The group's first host restores, goes live and takes the Elastic IP; the old one
+   stops getting traffic.
+2. Check: `make -s host-id` is the group's host, `/readyz` through CloudFront, and
+   `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names livedemos-host`
+   shows it `InService`.
+3. Delete `legacy-host.tf` and the `instance-id` deploy parameter, then `make tf-plan
+   tf-apply` by hand: it destroys the old host and its two alarms.
+
+What happened, 2026-10-07 to 08 (UTC): The group's first host launched at 23:26, restored 409,510
+raw rows and 13 rollup hours from the archive in 5 seconds, and replayed the stream from
+22:30. Replay runs at about 4 times real time, so it hadn't caught up by its 15-minute
+cap, and it took the Elastic IP stale at 23:43 while the old host was still live; it was
+live itself at 23:47. Since then a new host keeps waiting (up to 70 minutes) while another
+host holds the Elastic IP. The chart stayed continuous: 23:00 to 23:25 held 2,888 edits on
+the new host against 2,919 ingested by the old one (Grafana), within the edge effects of
+event time against ingest time. The old host, which had no public IP of its own, lost
+its internet access with the Elastic IP, so it stopped serving and archiving at once.

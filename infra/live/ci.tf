@@ -98,11 +98,11 @@ resource "aws_iam_role_policy_attachment" "tf_apply_admin" {
 }
 
 output "tf_plan_role_arn" {
-  description = "Set as the AWS_TF_PLAN_ROLE_ARN repository variable."
+  description = "Set as the AWS_TF_PLAN_ROLE_ARN repository secret."
   value       = aws_iam_role.tf_plan.arn
 }
 
 output "tf_apply_role_arn" {
-  description = "Set as the AWS_TF_APPLY_ROLE_ARN variable on the GitHub infra environment."
+  description = "Set as the AWS_TF_APPLY_ROLE_ARN secret on the GitHub infra environment."
   value       = aws_iam_role.tf_apply.arn
 }

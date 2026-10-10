@@ -1,6 +1,6 @@
 # Architecture
 
-Status: v1, running in AWS since 2026-10-05, with Grafana Cloud monitoring and alerts. What's next is in the build order at the end.
+Status: v1, running in AWS since 2026-10-05, with Grafana Cloud monitoring and alerts. What's next is in the [README](../README.md#what-id-do-next).
 
 ## What this is
 
@@ -245,7 +245,7 @@ These are targets. The page shows measured values (`last_event_age_s`, `ingest_l
 About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on
 demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on
 2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md).
-The real bill goes in the README once there is one. Month-to-date cost, as Cost Explorer reports it for the `project=livedemos` tag, is on the Ops tab (`/v1/ops.json`).
+Month-to-date cost, as Cost Explorer reports it for the `project=livedemos` tag, is on the Ops tab (`/v1/ops.json`).
 
 **The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Its first 30 archive files held 270,562 edits in 13.3 MB: 49 bytes an edit with zstd. That's about 0.46 MB an hour, 11 MB a day, 0.33 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 
@@ -260,15 +260,3 @@ The real bill goes in the README once there is one. Month-to-date cost, as Cost 
 
 About 7 cents a month after a year, growing under a cent a month after that. Rewrites for late events add a PUT and keep the replaced version for 30 days; even if every hour were rewritten once, that's under 2 cents more a month. Files are about 450 KB, above Standard-IA's 128 KB minimum, and they stay in each class longer than its minimum (30 and 90 days). Rebuilding a month of rollups reads 0.33 GB: under a cent in retrieval fees.
 
-## Build order
-
-The plan, with acceptance criteria, lives in a private tracker. Milestones, in order:
-
-1. Foundations and docs: done.
-2. Local pipeline: done; ingesting the real stream in production since 2026-10-05.
-3. Local widget: done; edge cache measured; browser tests (keyboard, screen reader, axe) in CI.
-4. AWS foundation: done 2026-10-05. Terraform with an approved apply on merge, keyless deploys, CloudFront with S3 failover.
-5. Observability and hardening: done. Grafana Cloud metrics, logs and alerts, fire drills, the Parquet archive, a host that replaces and restores itself.
-6. A measured week on the real instance: memory, freshness and the real bill. The sizing decision came early ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)); query costs at full volume are measured on a laptop ([benchmarks](benchmarks.md)).
-7. Launch on the site, with the Ops tab.
-8. Second dataset: Bitcoin.

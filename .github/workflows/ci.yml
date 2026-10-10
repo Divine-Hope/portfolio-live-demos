@@ -63,10 +63,10 @@ jobs:
       contents: read
       id-token: write   # read-only role; see infra/live/ci.tf
     env:
-      TF_VAR_budget_email: ${{ vars.TF_BUDGET_EMAIL }}
+      TF_VAR_budget_email: ${{ secrets.TF_BUDGET_EMAIL }}
       TF_VAR_grafana_cloud: ${{ vars.TF_GRAFANA_CLOUD }}   # endpoints and user ids, not secret
-      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}   # backend.hcl is per account, so not in git
-      TF_VAR_state_bucket: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}   # holds the account ID, so a secret: GitHub masks secrets in logs
+      TF_VAR_state_bucket: ${{ secrets.TF_STATE_BUCKET }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
@@ -75,14 +75,15 @@ jobs:
           terraform_wrapper: false
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          role-to-assume: ${{ vars.AWS_TF_PLAN_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_TF_PLAN_ROLE_ARN }}
           aws-region: eu-west-1
+          mask-aws-account-id: true
       - name: Plan, without the state lock (read-only; main's plan and apply take it)
         working-directory: infra/live
         run: |
           terraform init -input=false -backend-config="bucket=$TF_STATE_BUCKET" -backend-config="region=eu-west-1" >/dev/null
-          terraform plan -input=false -no-color -lock=false -out=tfplan >plan.txt
-          ../../deploy/ci/plan-summary.sh tfplan plan.txt >>"$GITHUB_STEP_SUMMARY"
+          terraform plan -input=false -no-color -lock=false -out=tfplan >/dev/null
+          ../../deploy/ci/plan-summary.sh tfplan >>"$GITHUB_STEP_SUMMARY"
           # The same check main runs before applying, so a destroy is caught at review.
           ../../deploy/ci/plan-digest.sh tfplan >/dev/null
 

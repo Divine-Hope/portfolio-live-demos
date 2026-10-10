@@ -32,7 +32,7 @@ GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token 
 ### First deploy (once)
 
 1. `make tf-plan tf-apply`, then `terraform -chdir=infra/live output deploy_role_arn`.
-2. GitHub > Settings > Environments > `production`: add the variable
+2. GitHub > Settings > Environments > `production`: add the secret
    `AWS_DEPLOY_ROLE_ARN` with that value, and limit deployment branches to `main`.
 3. Run the deploy workflow. The first image push creates the GHCR package as private,
    so this first deploy fails at the pull.
@@ -43,7 +43,8 @@ GitHub never holds AWS keys: the workflow swaps a short-lived GitHub OIDC token 
 
 Terraform runs in the same pipeline as the app (`infra/live/ci.tf`, `.github/workflows/`):
 
-- **Pull request:** `terraform plan` with a read-only role. The plan is in the job summary.
+- **Pull request:** `terraform plan` with a read-only role. The job summary lists what it
+  would change (resource addresses and actions, never values: the repo is public).
 - **Merge to `main`:** plan again; if it changes anything, the `infra` environment waits
   for your approval, then applies, then the app deploys. A plan that deletes or replaces
   a resource fails instead: do those by hand with `make tf-plan tf-apply`.
@@ -57,11 +58,13 @@ plans again and refuses if that plan changes anything other than what you approv
 1. `make tf-init`, then `make tf-plan tf-apply`. This creates the two CI roles.
 2. In GitHub > Settings > Environments, create:
    - `infra-plan`: deployment branches `main` only.
-   - `infra`: deployment branches `main` only, required reviewer: you. Add the variable
+   - `infra`: deployment branches `main` only, required reviewer: you. Add the secret
      `AWS_TF_APPLY_ROLE_ARN` = `terraform -chdir=infra/live output -raw tf_apply_role_arn`.
-3. Repository variables: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`),
+3. Repository secrets: `AWS_TF_PLAN_ROLE_ARN` (`output -raw tf_plan_role_arn`),
    `TF_BUDGET_EMAIL` (the `budget_email` from your local `terraform.tfvars`) and
-   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`) and `TF_GRAFANA_CLOUD`
+   `TF_STATE_BUCKET` (the `bucket` from `infra/live/backend.hcl`). They're secrets, not
+   variables, because they hold the account ID or your email and GitHub prints variables in
+   public job logs. Then the repository variable `TF_GRAFANA_CLOUD`
    (the `grafana_cloud` from `terraform.tfvars`, on one line:
    `{prom_url="https://.../api/prom/push",prom_user="123",loki_url="https://.../loki/api/v1/push",loki_user="456"}`).
 
@@ -90,27 +93,6 @@ abandons the hook and the group tries again. Every launch and termination is ema
 `make host-id` is whichever host holds the Elastic IP. A new host's progress is in
 `/var/log/cloud-init-output.log`.
 
-**Moved, 2026-10-07 to 08 (UTC).** The group's first host launched at 23:26, restored 409,510
-raw rows and 13 rollup hours from the archive in 5 seconds, and replayed the stream from
-22:30. Replay runs at about 4 times real time, so it hadn't caught up by its 15-minute
-cap, and it took the Elastic IP stale at 23:43 while the old host was still live; it was
-live itself at 23:47. Since then a new host keeps waiting (up to 70 minutes) while another
-host holds the Elastic IP. The chart stayed continuous: 23:00 to 23:25 held 2,888 edits on
-the new host against 2,919 ingested by the old one (Grafana), within the edge effects of
-event time against ingest time. The old host, which had no public IP of its own, lost
-its internet access with the Elastic IP, so it stopped serving and archiving at once.
-
-### Moving to the Auto Scaling Group (once)
-
-1. Apply with `infra/live/legacy-host.tf` in place: it adds the group and keeps the old
-   host. The group's first host restores, goes live and takes the Elastic IP; the old one
-   stops getting traffic.
-2. Check: `make -s host-id` is the group's host, `/readyz` through CloudFront, and
-   `aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names livedemos-host`
-   shows it `InService`.
-3. Delete `legacy-host.tf` and the `instance-id` deploy parameter, then `make tf-plan
-   tf-apply` by hand: it destroys the old host and its two alarms.
-
 - **On demand or Spot:** `on_demand` in `terraform.tfvars` (true until the t4g.small free
   trial ends on 2026-12-31, then false), `make tf-plan tf-apply`, then an instance refresh
   (below): the running host only changes when it's replaced.
@@ -126,8 +108,7 @@ aws autoscaling terminate-instance-in-auto-scaling-group --no-should-decrement-d
   --instance-id "$(make -s host-id)"
 ```
 
-The group launches a replacement, exactly as after a Spot reclaim. (Before the group,
-this was `terraform apply -replace=aws_instance.host`.)
+The group launches a replacement, exactly as after a Spot reclaim.
 
 No data steps. User data installs Docker, checks out the repo, applies host upkeep
 (`deploy/host/harden.sh`) and starts the stack with the image tag in SSM. ClickHouse starts
@@ -138,16 +119,17 @@ the newest archived event and skipping the events it restored. The archive servi
 its predecessor's files and leaves them. The chart is continuous, or shows a labelled gap
 if the outage outlived the stream's retention.
 
-**Drill, 2026-10-07 08:41 UTC** (`apply -replace`, image already built, 45 archived hours):
+**Drill, 2026-10-10 11:28 UTC** (the command above, on demand t4g.small, 85 archived hours):
 
-| Step | Time after the apply started |
+| Step | Time after the terminate |
 |---|---|
-| Old instance destroyed, new one created | 53 s (apply complete) |
-| CloudFront serves the fallback snapshot ("Paused") | from 66 s |
-| Stack up with the restored data, honestly "stale" (newest event 47 minutes old) | 334 s |
-| Ingest has replayed the outage: live | 470 s (7 min 50 s) |
+| CloudFront serves the fallback snapshot ("Paused") | by 8 s |
+| Replacement launched | 20 s |
+| Stack started; restored 274,645 raw rows (35 hours) and 85 rollup hours in 8 s | 2 min 21 s |
+| Ingest replaying the stream from 10:30 | 2 min 24 s |
+| Caught up: takes the Elastic IP, live through CloudFront | 7 min 26 s |
 
-The chart afterwards: the 51 minutes it shared with a copy taken just before the drill
+The chart afterwards: the 50 minutes it shared with a copy taken just before the drill
 matched exactly in every language, and the 8 minutes of the outage were filled by the
 replay at normal levels. No gap, no dip, nothing counted twice.
 

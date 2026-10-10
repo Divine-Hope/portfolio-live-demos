@@ -14,7 +14,7 @@ From ClickHouse's logs, in the day after the deploy:
 - Merges failed (4 in the last hour before the fix). Left long enough, unmerged parts pile up until ClickHouse slows and then refuses inserts.
 - Two API queries failed.
 
-[D] Whether any edits were lost or any viewer saw an error beyond those two queries wasn't recorded at the time.
+Whether any edits were lost or any viewer saw an error beyond those two queries wasn't recorded at the time.
 
 ## Timeline (UTC)
 
