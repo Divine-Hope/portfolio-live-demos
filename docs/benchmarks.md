@@ -21,7 +21,7 @@ leaves the stack's data alone.
   `system.query_log`.
 - **Machine:** an Apple Silicon laptop, ClickHouse 25.8 in Docker under the stack's 1.2 GB
   container limit and `clickhouse/config.d/low-memory.xml`. Not the production instance
-  (a t4g.small has 2 vCPUs); measuring there is part of the measured week.
+  (a t4g.small has 2 vCPUs).
 
 ### Results, 2026-10-05
 
@@ -116,5 +116,4 @@ kept edits a second during those 27 minutes; production's 24-hour average on 202
 | Memory, ClickHouse | 501 MiB (server cap 900 MiB) |
 | Memory, ingest / api / nginx | 40 / 42 / 8 MiB |
 
-Merges keep pace with one insert a second, so parts don't pile up. Measuring the same on
-the production instance, over a week and through a TTL drop, is still to do.
+Merges keep pace with one insert a second, so parts don't pile up.

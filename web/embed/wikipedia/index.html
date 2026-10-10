@@ -37,10 +37,10 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>What these numbers mean
   </button>
   <dl class="defs" id="defs" hidden>
-    <div><dt>Edits</dt><dd>Total edits and newly created pages across the selected Wikipedias during the previous five minutes, excluding Wikimedia test events.</dd></div>
-    <div><dt>Pages edited</dt><dd>Number of distinct pages receiving at least one edit during the previous five minutes.</dd></div>
-    <div><dt>Bot activity</dt><dd>Percentage of edits identified by Wikimedia as bot-generated.</dd></div>
-    <div><dt>Most edited</dt><dd>Number of edits per article in the main namespace during the previous five minutes. This represents editing activity, not page views.</dd></div>
+    <div><dt>Edits</dt><dd>Edits and new pages in the chosen Wikipedias in the last 5 minutes. Wikimedia's test events don't count.</dd></div>
+    <div><dt>Pages edited</dt><dd>Different pages edited in the last 5 minutes.</dd></div>
+    <div><dt>Bot activity</dt><dd>The share of edits Wikimedia flags as made by a bot.</dd></div>
+    <div><dt>Most edited</dt><dd>Edits per article in the last 5 minutes. Articles only, no talk or user pages. It's edits, not views.</dd></div>
   </dl>
 
   <section class="card chart-card" aria-labelledby="chart-label">
@@ -57,7 +57,7 @@
   <footer class="foot">
     <p class="status" id="status"><span class="dot" id="dot"></span><span id="status-text">Connecting…</span></p>
     <p class="sr-only" id="status-live" role="status"></p>
-    <p class="note muted">This demonstration uses a single public dataset. In a production multi-tenant environment, each customer would receive a signed identity context and the API would enforce tenant-level access so that only authorised data could be returned.</p>
+    <p class="note muted">One public dataset. A real product would sign each customer's context and the API would enforce it.</p>
   </footer>
 </main>
 <script src="./widget.js"></script>

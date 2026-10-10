@@ -14,7 +14,7 @@ Region `eu-west-1`. Every resource is tagged `project=livedemos`.
 | File | What |
 |---|---|
 | `budget.tf` | Monthly budget, emails at 80% actual and 100% forecast |
-| `network.tf` | VPC, one public subnet, no NAT gateway. Port 80 open to CloudFront's address ranges only |
+| `network.tf` | VPC, three public subnets (one per zone), no NAT gateway. Port 80 open to CloudFront's address ranges only |
 | `host.tf`, `user-data.sh.tftpl` | An Auto Scaling Group of one host (t4g.small, c6g.medium or c7g.medium: arm64, 2 GB, Amazon Linux 2023), IMDSv2 only, encrypted 16 GB disk, no SSH key. A launch hook keeps a new host out of service until it has restored itself and is live; then it takes the Elastic IP ([ADR 0010](../docs/adr/0010-spot-host-in-an-auto-scaling-group.md)) |
 | `alarms.tf` | Email for every launch and termination in the host group |
 | `ci.tf` | GitHub OIDC roles for Terraform: a read-only plan role for pull requests, and an apply role that only the protected `infra` environment can use |
@@ -35,7 +35,7 @@ Operating it (shell, deploys, rotating secrets, resizing): [`docs/runbook.md`](.
 | CloudFront, SSM parameters, Session Manager | Free tier |
 | S3 | Cents |
 
-No NAT gateway, no load balancer, no KMS keys, no DynamoDB: each would cost more than everything above.
+No NAT gateway, no load balancer, no KMS keys, no DynamoDB.
 
 ## Access: SSO, no access keys
 
