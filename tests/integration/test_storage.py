@@ -13,11 +13,13 @@ import pytest
 
 from livedemos.api.activity import ActivityService, parse_request
 from livedemos.api.snapshot import Snapshotter
-from livedemos.clickhouse import ClickHouse, ClickHouseError
+from livedemos.config import ApiSettings
+from livedemos.db.clickhouse import ClickHouse, ClickHouseError
+from livedemos.db.migrate import MigrationError, _statements, migrate
 from livedemos.ingest.resume import load_resume_state, wait_for_inflight_inserts
-from livedemos.maintenance import IngestRunning
-from livedemos.migrate import MigrationError, _statements, migrate
-from livedemos.reconcile import Mismatch, find_mismatches, repair
+from livedemos.rollup.lock import LockHeld
+from livedemos.rollup.maintenance import IngestRunning
+from livedemos.rollup.reconcile import Mismatch, find_mismatches, repair
 
 from .conftest import TEST_DB, clickhouse_test_settings, rows, user_settings
 
@@ -107,8 +109,7 @@ async def test_only_one_migrate_runs_at_a_time(ch: ClickHouse) -> None:
         await second.aclose()
     # Both may succeed one after the other (nothing left to apply for the second); what
     # must never happen is both applying, or a lock left behind.
-    refused = [r for r in results if isinstance(r, MigrationError)]
-    assert all("holds the lock" in str(r) for r in refused)
+    assert all(isinstance(r, (list, LockHeld)) for r in results), results
     applied = await ch.query("SELECT version, count() AS n FROM schema_migrations GROUP BY version")
     assert all(int(r["n"]) == 1 for r in applied.rows)
     lock = (
@@ -122,7 +123,7 @@ async def test_a_crashed_runs_lock_blocks_until_removed(ch: ClickHouse) -> None:
     await ch.execute(
         "CREATE TABLE schema_migrations_lock (x UInt8) ENGINE = Memory COMMENT 'crashed'"
     )
-    with pytest.raises(MigrationError, match="crashed"):
+    with pytest.raises(LockHeld, match="crashed"):
         await migrate(ch)
     await ch.execute("DROP TABLE schema_migrations_lock")
     assert await migrate(ch) == []
@@ -311,7 +312,7 @@ async def test_snapshot_from_real_rows(ch: ClickHouse) -> None:
 
 async def test_query_it_reports_clickhouse_timing(ch: ClickHouse) -> None:
     await ch.insert("wiki_edits", rows(200), dedup_token="x")
-    service = ActivityService(ch, ttl_s=10)
+    service = ActivityService(ch, ApiSettings())
     started = time.perf_counter()
     payload = await service.get(parse_request("en", "1h", allowed=["en", "pt", "de"]))
     assert time.perf_counter() - started < 1.0
@@ -334,7 +335,7 @@ async def test_long_windows_count_the_same_pages_as_raw_rows(ch: ClickHouse) -> 
     for i, lang in enumerate(("en", "de", "en", "de", "en")):  # the same titles, again
         start = now - timedelta(minutes=40 - i * 7)
         await ch.insert("wiki_edits", rows(90, lang=lang, start=start), dedup_token=f"p{i}")
-    service = ActivityService(ch, ttl_s=10)
+    service = ActivityService(ch, ApiSettings())
     langs = ["en", "pt", "de"]
     raw = await service.get(parse_request("en,de", "24h", allowed=langs))
     for window in ("3d", "7d"):
@@ -347,8 +348,8 @@ async def test_long_windows_count_the_same_pages_as_raw_rows(ch: ClickHouse) -> 
 async def test_a_repair_completes_a_page_set_the_view_missed(ch: ClickHouse) -> None:
     now = datetime.now(UTC) - timedelta(hours=1)
     await ch.insert("wiki_edits", rows(120, start=now), dedup_token="r")
-    service = ActivityService(ch, ttl_s=0.001)
-    before = await service.get(parse_request("en", "7d", allowed=["en", "pt", "de"]))
+    week = parse_request("en", "7d", allowed=["en", "pt", "de"])
+    before = await ActivityService(ch, ApiSettings()).get(week)
     minute = int(now.replace(second=0, microsecond=0).timestamp())
     await ch.execute(
         "ALTER TABLE wiki_pages_per_minute DELETE WHERE toUnixTimestamp(minute) >= {m:UInt32} "
@@ -360,8 +361,7 @@ async def test_a_repair_completes_a_page_set_the_view_missed(ch: ClickHouse) -> 
         for i in range(3)
     ]
     await repair(ch, missed, quiet=timedelta(0))
-    await asyncio.sleep(0.01)
-    after = await service.get(parse_request("en", "7d", allowed=["en", "pt", "de"]))
+    after = await ActivityService(ch, ApiSettings()).get(week)
     assert after["pages_edited"] == before["pages_edited"] == 3
 
 

@@ -9,7 +9,7 @@ The schema was one file of `CREATE ... IF NOT EXISTS` statements, applied by ing
 
 ## Decision
 
-- Migrations are numbered files in `src/livedemos/migrations/`, applied in order, each once, and recorded in `schema_migrations` with their name and a checksum of their statements (full-line `--` comments don't count; inline ones do). Changing an applied migration is refused; a change is a new file.
+- Migrations are numbered files in `src/livedemos/db/migrations/`, applied in order, each once, and recorded in `schema_migrations` with their name and a checksum of their statements (full-line `--` comments don't count; inline ones do). Changing an applied migration is refused; a change is a new file.
 - Before anything runs, `migrate` refuses a database that has migrations this code doesn't know (an older build over a newer schema) and a ledger with a version recorded twice.
 - One run at a time: `CREATE TABLE schema_migrations_lock`, without `IF NOT EXISTS`, is atomic, so exactly one run gets it, and it's dropped when the run ends. A crashed run leaves it, and every later run refuses until someone checks and runs `migrate --unlock`.
 - `0001_initial.sql` is the old schema, still all `IF NOT EXISTS`, so on a database from before this decision it's a no-op that records the baseline. Checked on the local stack's existing data: 1 recorded, 2 applied, rows untouched.

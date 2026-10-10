@@ -9,11 +9,12 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
-from livedemos.clickhouse import ClickHouse
 from livedemos.config import ClickHouseSettings
+from livedemos.db.clickhouse import ClickHouse
+from livedemos.db.migrate import migrate
 from livedemos.ingest.events import Edit, to_row
-from livedemos.migrate import migrate
 
 TEST_DB = "demos_test"
 
@@ -22,7 +23,7 @@ def clickhouse_test_settings() -> ClickHouseSettings:
     return ClickHouseSettings(
         url=os.environ.get("CLICKHOUSE_URL", "http://localhost:8123"),
         user=os.environ.get("CLICKHOUSE_USER", "default"),
-        password=os.environ.get("CLICKHOUSE_PASSWORD", ""),
+        password=SecretStr(os.environ.get("CLICKHOUSE_PASSWORD", "")),
         database=TEST_DB,
     )
 
@@ -86,7 +87,7 @@ def user_settings(user: str, password_env: str) -> ClickHouseSettings:
     if not password:
         pytest.skip(f"{password_env} not set")
     return clickhouse_test_settings().model_copy(
-        update={"user": user, "password": password, "database": "demos"}
+        update={"user": user, "password": SecretStr(password), "database": "demos"}
     )
 
 

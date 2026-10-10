@@ -1,7 +1,7 @@
 """Benchmark the API's and ingest's queries at full retained volume (7 days of raw rows).
 
     make bench                      # 7 days at 11 edits/s (twice the measured live rate)
-    python -m livedemos.devtools.bench --days 7 --rate 11 --runs 20
+    python -m devtools.bench --days 7 --rate 11 --runs 20
 
 Fills a separate database (`demos_bench`, dropped first) with synthetic edits generated
 server-side, then runs each query the snapshot, "Query it" and resume make, with the `api`
@@ -29,11 +29,12 @@ from typing import Any
 
 from livedemos.api import ops, queries
 from livedemos.api.snapshot import MINUTES, TOP_N, WINDOW_S, Snapshotter
-from livedemos.clickhouse import ClickHouse, QueryResult
 from livedemos.config import ClickHouseSettings
+from livedemos.db.clickhouse import ClickHouse, QueryResult
+from livedemos.db.migrate import migrate
 from livedemos.ingest import resume
 from livedemos.ingest.events import Edit, to_row
-from livedemos.migrate import migrate
+from livedemos.ops import report
 
 DATABASE = "demos_bench"
 LANGS = ["en", "pt", "de"]
@@ -183,26 +184,23 @@ def cases(newest_ms: int, last_seq: int) -> list[Case]:
             queries.WINDOW_TOTALS,
             {**window, "window_s": 7 * 86_400},
         ),
-        Case("ops: ingest lag, last hour", ops.LAG, {"window_s": ops.LAG_WINDOW_S}),
-        Case("ops: bookmark", ops.BOOKMARK, {}),
-        Case("ops: newest event and last stored", ops.HEAD, {}),
+        Case("ops: ingest lag, last hour", report.LAG, {"window_s": report.LAG_WINDOW_S}),
+        Case("ops: bookmark", report.BOOKMARK, {}),
+        Case("ops: newest event and last stored", report.HEAD, {}),
         Case(
             "ops: freshness, 30 days",
-            ops.FRESHNESS,
+            report.FRESHNESS,
             {
                 "threshold_s": 60.0,
                 "start_s": newest_ms // 60_000 * 60 - 30 * 86_400,
                 "end_s": newest_ms // 60_000 * 60,
             },
         ),
-        Case("resume: max ingest_seq", "SELECT max(ingest_seq) AS seq FROM wiki_edits", {}),
+        Case("resume: max ingest_seq", resume.MAX_SEQ, {}),
         Case(
             "resume: last 20k by ingest order",
-            """
-            SELECT toString(event_id) AS id, sse_id FROM wiki_edits
-            WHERE ingest_seq > {floor:UInt64} ORDER BY ingest_seq DESC LIMIT 20000
-            """,
-            {"floor": last_seq - resume.SEAM_WINDOW_NS},
+            resume.INGEST_TAIL,
+            {"floor": last_seq - resume.SEAM_WINDOW_NS, "limit": 20_000},
         ),
     ]
 
@@ -236,9 +234,8 @@ async def measure(ch: ClickHouse, case: Case, *, runs: int) -> Result:
 
 async def ops_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
     """The whole Ops payload, its queries at once, as the API builds it."""
-    service = ops.OpsService(
-        WithReaderLimits(ch), ttl_s=60, threshold_s=60, target=0.999, days=30, error_cooldown_s=5
-    )
+    policy = report.Policy(threshold_s=60, target=0.999, days=30, stale_after_s=60)
+    service = ops.OpsService(WithReaderLimits(ch), policy=policy, ttl_s=60, error_cooldown_s=5)
     timings = []
     for _ in range(runs):
         started = time.perf_counter()
@@ -331,7 +328,7 @@ async def run(settings: ClickHouseSettings, *, days: int, rate: int, runs: int) 
         newest = queries.newest_ms((await ch.query(queries.NEWEST)).rows)
         if newest is None:
             raise SystemExit("no rows were generated")
-        head = await ch.query("SELECT max(ingest_seq) AS seq FROM wiki_edits")
+        head = await ch.query(resume.MAX_SEQ)
         last_seq = int(head.rows[0]["seq"])
 
         print("\n| Query | p50 ms | p95 ms | Rows read | Peak memory |")

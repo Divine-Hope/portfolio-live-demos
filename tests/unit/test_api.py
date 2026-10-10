@@ -4,11 +4,18 @@ import time
 from collections.abc import Iterator
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
-from livedemos.api.app import create_app
-from livedemos.api.snapshot import Snapshot
+from livedemos.api.app import create_app, services
+from livedemos.api.snapshot import Snapshot, Snapshotter
 from livedemos.config import ApiSettings, ClickHouseSettings
+
+
+def snapshotter(client: TestClient) -> Snapshotter:
+    assert isinstance(client.app, FastAPI)
+    return services(client.app).snapshotter
 
 
 @pytest.fixture
@@ -23,7 +30,7 @@ def client() -> Iterator[TestClient]:
 
 
 def test_live_is_503_until_the_first_snapshot(client: TestClient) -> None:
-    client.app.state.snapshotter.latest = None  # type: ignore[attr-defined]
+    snapshotter(client).latest = None
     response = client.get("/v1/wikipedia/live.json")
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
@@ -31,7 +38,7 @@ def test_live_is_503_until_the_first_snapshot(client: TestClient) -> None:
 
 def test_live_serves_the_snapshot_bytes_with_a_short_cache(client: TestClient) -> None:
     body = b'{"dataset":"wikipedia","status":"live"}'
-    client.app.state.snapshotter.latest = Snapshot(  # type: ignore[attr-defined]
+    snapshotter(client).latest = Snapshot(
         body=body, built_at=time.monotonic(), last_event_age_s=1.0
     )
     response = client.get("/v1/wikipedia/live.json")  # no Origin header, like a CDN probe
@@ -45,7 +52,7 @@ def test_live_serves_the_snapshot_bytes_with_a_short_cache(client: TestClient) -
 
 def test_live_refuses_to_serve_a_stale_snapshot(client: TestClient) -> None:
     # The tick loop stopped (ClickHouse down): serving the old bytes would look live forever.
-    client.app.state.snapshotter.latest = Snapshot(  # type: ignore[attr-defined]
+    snapshotter(client).latest = Snapshot(
         body=b"{}", built_at=time.monotonic() - 60, last_event_age_s=1.0
     )
     response = client.get("/v1/wikipedia/live.json")
@@ -74,7 +81,7 @@ def test_health_and_metrics(client: TestClient) -> None:
 @pytest.fixture
 def guarded_client() -> Iterator[TestClient]:
     app = create_app(
-        ApiSettings(tick_interval_s=3_600, origin_secret="s3cret"),
+        ApiSettings(tick_interval_s=3_600, origin_secret=SecretStr("s3cret")),
         ClickHouseSettings(url="http://127.0.0.1:9", timeout_s=0.2),
     )
     with TestClient(app) as test_client:

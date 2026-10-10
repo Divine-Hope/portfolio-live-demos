@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,11 +11,12 @@ import httpx
 import pytest
 from httpx_sse import ServerSentEvent
 
-from livedemos.clickhouse import ClickHouseError, QueryResult, QueryStats
 from livedemos.config import IngestSettings
+from livedemos.db.clickhouse import ClickHouseError, QueryResult, QueryStats
 from livedemos.ingest.batch import Batch
 from livedemos.ingest.consumer import _EOF, Consumer, _read_into
 from livedemos.ingest.events import Edit
+from tests.stubs import StubClickHouse
 
 SETTINGS = IngestSettings(backoff_initial_s=0.001, backoff_max_s=0.002)
 
@@ -37,32 +38,7 @@ def valid_event(n: int) -> str:
     )
 
 
-class StubDatabase:
-    def __init__(self, *, fail_inserts: int = 0) -> None:
-        self.fail_inserts = fail_inserts
-        self.inserts: list[tuple[str, str | None, str | None, int]] = []
-
-    async def query(
-        self,
-        sql: str,
-        *,
-        params: Mapping[str, Any] | None = None,
-        settings: Mapping[str, str] | None = None,
-    ) -> QueryResult:
-        return QueryResult([], QueryStats(0.0, 0, 0))
-
-    async def insert(
-        self,
-        table: str,
-        rows: Sequence[Mapping[str, Any]],
-        *,
-        dedup_token: str | None = None,
-        query_id: str | None = None,
-    ) -> None:
-        self.inserts.append((table, dedup_token, query_id, len(rows)))
-        if self.fail_inserts:
-            self.fail_inserts -= 1
-            raise ClickHouseError("read timeout (did it commit? nobody knows)")
+StubDatabase = StubClickHouse
 
 
 class FakeSource:
@@ -120,8 +96,9 @@ async def test_a_failed_insert_is_retried_unchanged_before_the_bookmark_moves() 
     assert consumer._pending is None
     # Every attempt sent the same rows, with the same token and query id.
     assert len(db.inserts) == 3
-    assert len({(token, qid, n) for _, token, qid, n in db.inserts}) == 1
-    _, token, query_id, rows = db.inserts[0]
+    assert len({(token, qid, len(rows)) for _, rows, token, qid in db.inserts}) == 1
+    _, inserted, token, query_id = db.inserts[0]
+    rows = len(inserted)
     assert query_id == f"ingest-{token}"
     assert rows == 3
 
@@ -198,21 +175,21 @@ async def test_start_reads_no_state_while_an_earlier_insert_runs() -> None:
 async def test_reconnects_are_retried_unchanged_so_a_lost_reply_cant_double_them() -> None:
     db = StubDatabase(fail_inserts=1)  # landed or not, the reply never came
     consumer = Consumer(SETTINGS, db)
-    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "clickhouse"})
-    await consumer._record_reconnects()  # fails, and doesn't raise
+    consumer._reconnects.add("clickhouse")
+    await consumer._reconnects.flush()  # fails, and doesn't raise
     # Another reconnect meanwhile waits for the next batch instead of joining this one.
-    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "idle"})
-    await consumer._record_reconnects()
-    await consumer._record_reconnects()
-    assert [(t, n) for t, _, _, n in db.inserts] == [
+    consumer._reconnects.add("idle")
+    await consumer._reconnects.flush()
+    await consumer._reconnects.flush()
+    assert [(t, len(r)) for t, r, _, _ in db.inserts] == [
         ("ingest_reconnects", 1),
         ("ingest_reconnects", 1),  # the retry: same row, same token
         ("ingest_reconnects", 1),  # then the new one, under its own token
     ]
-    assert db.inserts[0][1] == db.inserts[1][1] != db.inserts[2][1]
-    assert db.inserts[0][2] == db.inserts[0][1]  # query id too, so a retry can't overlap
-    assert not consumer._reconnects
-    assert consumer._reconnects_sealed is None
+    assert db.inserts[0][2] == db.inserts[1][2] != db.inserts[2][2]
+    assert db.inserts[0][3] == db.inserts[0][2]  # query id too, so a retry can't overlap
+    assert not consumer._reconnects._waiting
+    assert consumer._reconnects._sealed is None
 
 
 async def test_a_slow_reconnect_write_gives_up_quickly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -222,15 +199,15 @@ async def test_a_slow_reconnect_write_gives_up_quickly(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("livedemos.ingest.consumer._RECORD_RECONNECTS_TIMEOUT_S", 0.01)
     consumer = Consumer(SETTINGS, SlowDatabase())
-    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "network"})
-    await asyncio.wait_for(consumer._record_reconnects(), timeout=1)
-    assert consumer._reconnects_sealed is not None  # kept for the next try
+    consumer._reconnects.add("network")
+    await asyncio.wait_for(consumer._reconnects.flush(), timeout=1)
+    assert consumer._reconnects._sealed is not None  # kept for the next try
 
 
 async def test_committing_a_batch_never_waits_for_reconnects() -> None:
     db = StubDatabase()
     consumer = Consumer(SETTINGS, db)
-    consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "eof"})
+    consumer._reconnects.add("eof")
     batch = Batch(max_rows=10, interval_s=1.0)
     edit = consumer._parse(valid_event(1), "sse-1")
     assert edit is not None
@@ -244,7 +221,7 @@ async def test_reconnects_are_flushed_once_more_on_shutdown() -> None:
     consumer = Consumer(SETTINGS, db)
 
     async def no_state(stop: asyncio.Event) -> None:
-        consumer._reconnects.append({"at": datetime.now(UTC).isoformat(), "reason": "eof"})
+        consumer._reconnects.add("eof")
         stop.set()
 
     consumer._load_state = no_state  # type: ignore[method-assign]

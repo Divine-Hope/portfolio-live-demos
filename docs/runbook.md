@@ -161,18 +161,18 @@ reclaim or a failed health check: the group is already launching a replacement.
 
 ## Schema changes
 
-Add a numbered file to `src/livedemos/migrations/` ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)).
+Add a numbered file to `src/livedemos/db/migrations/` ([ADR 0009](adr/0009-versioned-migrations-separate-user.md)).
 Every deploy runs the `migrate` job before ingest and the API start; it applies pending
 files in order and records them. Never edit an applied migration: `migrate` refuses, and
 nothing else starts. If it reports another run holding the lock and none is running (a
 deploy was interrupted), clear it with
-`docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.migrate --unlock`. Before the first deploy that adds a secret (such as
+`docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate livedemos-migrate --unlock`. Before the first deploy that adds a secret (such as
 `clickhouse-migrator-password`), run `make tf-plan tf-apply` so SSM has it.
 
 ## Check the rollup against raw rows
 
 ```
-docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.reconcile
+docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate livedemos-reconcile
 ```
 
 Exit 0: every (minute, language) older than 15 minutes matches. Exit 1: the mismatches are
@@ -192,7 +192,7 @@ by one to two hours.
 
   ```
   docker compose -f compose.yaml -f compose.prod.yaml stop archive
-  docker compose -f compose.yaml -f compose.prod.yaml run --rm archive python -m livedemos.archive --hour 2026-10-06T09
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm archive livedemos-archive --hour 2026-10-06T09
   docker compose -f compose.yaml -f compose.prod.yaml start archive
   ```
 
@@ -204,7 +204,7 @@ by one to two hours.
   ```
   docker compose -f compose.yaml -f compose.prod.yaml stop ingest
   sleep 30
-  docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate python -m livedemos.archive.rebuild --from 2026-10-01 --to 2026-10-03
+  docker compose -f compose.yaml -f compose.prod.yaml run --rm migrate livedemos-rebuild --from 2026-10-01 --to 2026-10-03
   docker compose -f compose.yaml -f compose.prod.yaml start ingest
   ```
 
@@ -214,7 +214,7 @@ by one to two hours.
   rebuilds the hours that have files and leaves the others as they are.
   The live rollup only changes once every file has been read into a staging table, and
   then a whole month at a time, atomically. It holds the maintenance lock; if it reports
-  the lock held and nothing is running, clear it with `python -m livedemos.migrate --unlock`
+  the lock held and nothing is running, clear it with `livedemos-migrate --unlock`
   (see Schema changes).
   Locally: `make rebuild-rollups FROM=2026-10-01 TO=2026-10-03`. Within the last 7 days,
   `reconcile` (below) then confirms the rollup matches raw again.
@@ -230,7 +230,7 @@ by one to two hours.
 
   The copy becomes the current version. With the archive service stopped, record what it
   holds, or the service compares against the bad rewrite's count: run
-  `python -m livedemos.archive --once` as above after deleting that hour's rows from
+  `livedemos-archive --once` as above after deleting that hour's rows from
   `archive_hours` (`DELETE FROM demos.archive_hours WHERE hour = '2026-10-06 09:00:00'
   SETTINGS mutations_sync = 1`, as admin, so it's gone before the run); it then finds the
   file and records it. Start the service again.

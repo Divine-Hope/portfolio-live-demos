@@ -3,8 +3,8 @@ import json
 import httpx
 import pytest
 
-from livedemos.clickhouse import ClickHouse, ClickHouseError, _bind, quote
 from livedemos.config import ClickHouseSettings
+from livedemos.db.clickhouse import ClickHouse, ClickHouseError, _bind, quote
 
 
 def client(handler: httpx.MockTransport) -> ClickHouse:

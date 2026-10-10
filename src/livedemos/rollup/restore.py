@@ -1,6 +1,6 @@
 """Bring a host that has lost its data back from the archive, before ingest starts.
 
-`python -m livedemos.migrate` runs this after the migrations, so on every boot and deploy.
+`livedemos-migrate` runs this after the migrations, so on every boot and deploy.
 It does nothing unless the raw table is empty: a host rebuilt from scratch, or one that was
 down longer than raw retention. Then, for every archived hour newer than the rollup's last
 minute (up to 90 days back):
@@ -25,16 +25,18 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
-from livedemos.archive import pages
-from livedemos.archive.job import HOUR_S, S3_SETTINGS, Archiver, days_glob, s3_function
-from livedemos.archive.rebuild import rebuild
-from livedemos.clickhouse import ClickHouse
+from livedemos.archive.job import Archiver
+from livedemos.archive.s3 import HOUR_S, S3_SETTINGS, days_glob, s3_function
 from livedemos.config import ArchiveSettings
-from livedemos.maintenance import (
+from livedemos.dates import day_start
+from livedemos.db.clickhouse import ClickHouse
+from livedemos.rollup import pages
+from livedemos.rollup.maintenance import (
     REBUILD_INSERT_SETTINGS,
     require_ingest_still_stopped,
     require_ingest_stopped,
 )
+from livedemos.rollup.rebuild import rebuild
 
 log = logging.getLogger(__name__)
 
@@ -55,16 +57,16 @@ _RESTORE_SCHEMA = (
 )
 
 
+class RestoreFailed(RuntimeError):
+    """The restore can't vouch for what it wrote. Nothing else should start on it."""
+
+
 @dataclass(frozen=True, slots=True)
 class Restored:
     rollup_hours: list[int] = field(default_factory=list)  # rebuilt into the rollup
     raw_hours: list[int] = field(default_factory=list)  # back in the raw table
     raw_rows: int = 0
     pages_hours: list[int] = field(default_factory=list)  # page sets added from the archive
-
-
-def _day_start(day: date) -> int:
-    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
 
 
 def _day(seconds: int) -> date:
@@ -105,7 +107,7 @@ async def _restore(ch: ClickHouse, settings: ArchiveSettings, *, now: datetime) 
     if not missing:
         return Restored()
 
-    raw_from_s = _day_start(_raw_from(missing[-1], now))
+    raw_from_s = day_start(_raw_from(missing[-1], now))
     to_rollup = [h for h in missing if h < raw_from_s]
     to_raw = [h for h in missing if h >= raw_from_s]
     log.info(
@@ -141,7 +143,7 @@ async def _archived(
     ch: ClickHouse, settings: ArchiveSettings, first_day: date, now: datetime
 ) -> set[int]:
     days = (now.date() - first_day).days + 1
-    start = _day_start(first_day)
+    start = day_start(first_day)
     return await Archiver(settings, ch).existing_hours(
         list(range(start, start + days * 24 * HOUR_S, HOUR_S))
     )
@@ -156,7 +158,7 @@ async def _finish_raw(ch: ClickHouse, settings: ArchiveSettings, *, now: datetim
     archived = await _archived(ch, settings, (now - ROLLUP_RETENTION).date(), now)
     if not archived:
         return Restored()
-    raw_from_s = _day_start(_raw_from(max(archived), now))
+    raw_from_s = day_start(_raw_from(max(archived), now))
     hours = sorted(h for h in archived if h >= raw_from_s)
     expected = await _file_rows(ch, settings, hours)
     rows = int((await ch.query(_RAW_ROWS)).rows[0]["n"])
@@ -195,7 +197,7 @@ async def _restore_raw(ch: ClickHouse, settings: ArchiveSettings, hours: list[in
     """
     await require_ingest_stopped(ch, quiet=timedelta(0))
     if int((await ch.query(_RAW_ROWS)).rows[0]["n"]):
-        raise RuntimeError("raw rows appeared during the restore; is ingest running?")
+        raise RestoreFailed("raw rows appeared during the restore; is ingest running?")
     expected = await _file_rows(ch, settings, hours)
     await ch.execute(
         f"""
@@ -213,5 +215,5 @@ async def _restore_raw(ch: ClickHouse, settings: ArchiveSettings, hours: list[in
     # Raw was empty and ingest isn't running, so everything there now is ours.
     rows = int((await ch.query(_RAW_ROWS)).rows[0]["n"])
     if rows != expected:
-        raise RuntimeError(f"restored {rows} raw rows, the files hold {expected}")
+        raise RestoreFailed(f"restored {rows} raw rows, the files hold {expected}")
     return rows

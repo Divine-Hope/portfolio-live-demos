@@ -10,12 +10,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 PROM = {"type": "prometheus", "uid": "${prometheus}"}
 LOKI = {"type": "loki", "uid": "${loki}"}
 
 
-def panel(title, exprs, *, unit="short", x=0, y=0, w=12, h=8, kind="timeseries", desc=""):
+def panel(
+    title: str,
+    exprs: list[tuple[str, str]],
+    *,
+    unit: str = "short",
+    x: int = 0,
+    y: int = 0,
+    w: int = 12,
+    h: int = 8,
+    kind: str = "timeseries",
+    desc: str = "",
+) -> dict[str, Any]:
     return {
         "type": kind,
         "title": title,

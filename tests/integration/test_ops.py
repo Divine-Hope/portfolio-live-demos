@@ -1,11 +1,12 @@
-"""The Ops queries against a real ClickHouse (api/ops.py, migration 0005)."""
+"""The Ops queries against a real ClickHouse (ops/report.py, migration 0005)."""
 
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from livedemos.api import ops
-from livedemos.clickhouse import ClickHouse
+from livedemos.db.clickhouse import ClickHouse
+from livedemos.ops import report
 from tests.integration.conftest import rows
 
 pytestmark = pytest.mark.integration
@@ -32,7 +33,7 @@ async def test_freshness_counts_each_minute_once_and_conservatively(ch: ClickHou
     )
     start = int(BASE.timestamp())
     result = await ch.query(
-        ops.FRESHNESS, params={"threshold_s": 60.0, "start_s": start, "end_s": start + 6 * 60}
+        report.FRESHNESS, params={"threshold_s": 60.0, "start_s": start, "end_s": start + 6 * 60}
     )
     assert result.rows == [{"sampled": 5, "fresh": 2}]
 
@@ -48,7 +49,7 @@ async def test_clickhouse_samples_freshness_by_itself(ch: ClickHouse) -> None:
 async def test_lag_counts_a_replay_of_old_events_stored_just_now(ch: ClickHouse) -> None:
     # After a two-day outage, ingest replays two-day-old events: their lag is the point.
     await ch.insert("wiki_edits", rows(10, start=datetime.now(UTC) - timedelta(days=2)))
-    result = await ch.query(ops.LAG, params={"window_s": ops.LAG_WINDOW_S})
+    result = await ch.query(report.LAG, params={"window_s": report.LAG_WINDOW_S})
     assert result.rows[0]["events"] == 10
     assert result.rows[0]["p50_ms"] > 86_400_000
 
@@ -107,9 +108,8 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
             },
         ],
     )
-    payload = await ops.OpsService(
-        ch, ttl_s=60, threshold_s=60, target=0.99, days=30, error_cooldown_s=5
-    ).build()
+    policy = report.Policy(threshold_s=60, target=0.99, days=30, stale_after_s=60)
+    payload = await ops.OpsService(ch, policy=policy, ttl_s=60, error_cooldown_s=5).build()
     assert payload["ingest"]["lag_ms"]["events"] == 30
     assert payload["ingest"]["lag_ms"]["p95"] is not None
     assert payload["ingest"]["reconnects"]["by_reason"] == {"idle": 2}
@@ -124,8 +124,11 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
     assert payload["ingest"]["newest_event_at"] is not None
 
 
+POLICY = report.Policy(threshold_s=60, target=0.999, days=30, stale_after_s=60)
+
+
 def service(ch: ClickHouse) -> ops.OpsService:
-    return ops.OpsService(ch, ttl_s=60, threshold_s=60, target=0.999, days=30, error_cooldown_s=5)
+    return ops.OpsService(ch, policy=POLICY, ttl_s=60, error_cooldown_s=5)
 
 
 def cost_row(*, at: datetime, ok: bool, start: str) -> dict[str, object]:

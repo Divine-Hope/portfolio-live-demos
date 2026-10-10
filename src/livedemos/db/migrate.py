@@ -1,44 +1,24 @@
-"""Versioned schema migrations: `python -m livedemos.migrate`.
+"""Versioned schema migrations.
 
 Each file in `migrations/` is applied once, in order, and recorded in `schema_migrations`
-with its name and a checksum of its statements (full-line comments excluded). Refused,
-before anything runs:
-
-- a migration edited after it was applied (write a new one instead),
-- a database ahead of this code (an older build deployed over a newer schema),
-- a second `migrate` running at the same time: `CREATE TABLE schema_migrations_lock` is
-  atomic, so exactly one run gets it. A run that crashed leaves it behind; check nothing
-  else is migrating, then `python -m livedemos.migrate --unlock`. Rollup repairs and
-  rebuilds take the same lock (`exclusive`), so none of them overlap.
+with a checksum of its statements (full-line comments excluded). Refused before anything
+runs: a migration edited after it was applied, a database ahead of this code, and a second
+run at the same time (the maintenance lock, rollup/lock.py).
 
 ClickHouse has no transactional DDL, so a migration that fails halfway is retried from the
-top on the next run. Write each statement so running it twice is harmless (IF NOT EXISTS,
-MATERIALIZE, and so on).
-
-Runs as the `migrator` user, the only one allowed to change the schema. Ingest and the API
-only read and write rows.
-
-After migrating, the command line also restores a host that has lost its raw rows from the
-Parquet archive (archive/restore.py).
+top. Write each statement so running it twice is harmless (IF NOT EXISTS, and so on).
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
 import hashlib
 import logging
 import re
-import socket
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from importlib.resources import files
 
-from livedemos.clickhouse import ClickHouse, ClickHouseError, quote
-from livedemos.config import archive_settings, clickhouse_settings
-from livedemos.logs import setup_logging
+from livedemos.db.clickhouse import ClickHouse
+from livedemos.rollup.lock import exclusive
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +37,6 @@ CREATE TABLE IF NOT EXISTS {database}.schema_migrations
 ENGINE = MergeTree
 ORDER BY version
 """
-
-
-_LOCK = "schema_migrations_lock"
 
 
 class MigrationError(RuntimeError):
@@ -83,7 +60,7 @@ def load(database: str) -> list[Migration]:
     if not _IDENTIFIER.match(database):
         raise ValueError(f"invalid database name: {database!r}")
     out = []
-    for path in files("livedemos").joinpath("migrations").iterdir():
+    for path in files("livedemos.db").joinpath("migrations").iterdir():
         match = _FILENAME.match(path.name)
         if not match:
             continue
@@ -119,16 +96,6 @@ async def migrate(ch: ClickHouse, *, upto: int | None = None) -> list[int]:
     async with exclusive(ch):
         await ch.execute(_LEDGER.replace("{database}", db))
         return await _apply(ch, known, upto=upto)
-
-
-@asynccontextmanager
-async def exclusive(ch: ClickHouse) -> AsyncIterator[None]:
-    """Hold the maintenance lock: one migration, repair or rebuild at a time."""
-    await _lock(ch)
-    try:
-        yield
-    finally:
-        await ch.execute(f"DROP TABLE IF EXISTS {ch.database}.{_LOCK}")
 
 
 async def _apply(ch: ClickHouse, known: list[Migration], *, upto: int | None) -> list[int]:
@@ -177,27 +144,6 @@ async def _apply(ch: ClickHouse, known: list[Migration], *, upto: int | None) ->
     return done
 
 
-async def _lock(ch: ClickHouse) -> None:
-    holder = f"{socket.gethostname()} at {datetime.now(UTC).isoformat(timespec='seconds')}"
-    try:
-        # No IF NOT EXISTS: if the table is there, someone else holds the lock.
-        await ch.execute(
-            f"CREATE TABLE {ch.database}.{_LOCK} (x UInt8) ENGINE = Memory COMMENT {quote(holder)}"
-        )
-    except ClickHouseError as exc:
-        if "TABLE_ALREADY_EXISTS" not in str(exc) and "already exists" not in str(exc):
-            raise
-        held = await ch.query(
-            "SELECT comment FROM system.tables WHERE database = {db:String} AND name = {t:String}",
-            params={"db": ch.database, "t": _LOCK},
-        )
-        by = held.rows[0]["comment"] if held.rows else "unknown"
-        raise MigrationError(
-            f"another migration, repair or rebuild holds the lock ({by}). If none is "
-            "running, a previous run crashed: python -m livedemos.migrate --unlock"
-        ) from exc
-
-
 async def _applied(ch: ClickHouse) -> dict[int, tuple[str, str]]:
     result = await ch.query("SELECT version, name, checksum FROM schema_migrations")
     out: dict[int, tuple[str, str]] = {}
@@ -207,44 +153,3 @@ async def _applied(ch: ClickHouse) -> dict[int, tuple[str, str]]:
             raise MigrationError(f"migration {version} is recorded twice in schema_migrations")
         out[version] = (str(row["name"]), str(row["checksum"]))
     return out
-
-
-async def _restore(ch: ClickHouse) -> None:
-    # Imported here: the restore uses this module's lock.
-    from livedemos.archive.restore import restore
-
-    settings = archive_settings()
-    if not settings.restore:
-        log.warning("restoring from the archive is off (ARCHIVE_RESTORE=false)")
-        return
-    done = await restore(ch, settings, now=datetime.now(UTC))
-    if done.rollup_hours or done.raw_hours or done.pages_hours:
-        log.info(
-            "restored from the archive",
-            extra={
-                "rollup_hours": len(done.rollup_hours),
-                "raw_hours": len(done.raw_hours),
-                "raw_rows": done.raw_rows,
-                "pages_hours": len(done.pages_hours),
-            },
-        )
-
-
-async def _main(unlock: bool) -> None:
-    setup_logging()
-    ch = ClickHouse(clickhouse_settings())
-    try:
-        if unlock:
-            await ch.execute(f"DROP TABLE IF EXISTS {ch.database}.{_LOCK}")
-            log.info("lock removed")
-        else:
-            await migrate(ch)
-            await _restore(ch)
-    finally:
-        await ch.aclose()
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Apply pending schema migrations.")
-    parser.add_argument("--unlock", action="store_true", help="remove a crashed run's lock")
-    asyncio.run(_main(parser.parse_args().unlock))

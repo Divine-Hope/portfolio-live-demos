@@ -1,4 +1,4 @@
-"""The Ops payload (api/ops.py): shortening the bookmark, assembling, caching."""
+"""The Ops payload (ops/report.py, api/ops.py): the bookmark, assembling, caching."""
 
 import json
 from collections.abc import Mapping
@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from livedemos.api import ops
-from livedemos.clickhouse import ClickHouseError, QueryResult, QueryStats
-from livedemos.ops import slo
+from livedemos.db.clickhouse import QueryResult, QueryStats
+from livedemos.ops import report, slo
+from tests.stubs import StubClickHouse
 
 REAL_ID = (
     '[{"topic":"eqiad.mediawiki.recentchange","partition":0,"timestamp":1791498391744},'
@@ -17,7 +18,7 @@ REAL_ID = (
 
 
 def test_the_bookmark_is_shortened_to_each_streams_position() -> None:
-    bookmark = ops.shorten_bookmark(REAL_ID)
+    bookmark = report.shorten_bookmark(REAL_ID)
     assert bookmark == {
         "positions": [
             {"stream": "eqiad", "at": "2026-10-08T22:26:31.744Z", "offset": None},
@@ -32,30 +33,22 @@ def test_implausible_positions_are_left_out_not_crashed_on() -> None:
         '[{"topic":"eqiad.x","timestamp":true},{"topic":"codfw.x","timestamp":99999999999999999999},'
         '{"topic":"other.x","offset":false}]'
     )
-    bookmark = ops.shorten_bookmark(sse_id)
+    bookmark = report.shorten_bookmark(sse_id)
     assert bookmark is not None
     assert [(p["at"], p["offset"]) for p in bookmark["positions"]] == [(None, None)] * 3
 
 
 @pytest.mark.parametrize("sse_id", ["not json", "{}", "[1]", '[{"partition":0}]'])
 def test_an_unexpected_bookmark_is_left_out_rather_than_guessed(sse_id: str) -> None:
-    assert ops.shorten_bookmark(sse_id) is None
+    assert report.shorten_bookmark(sse_id) is None
 
 
-def empty_assemble(**overrides: Any) -> Any:
-    args: dict[str, Any] = {
-        "now": 1_791_500_000.0,
-        "lag": {"events": 0, "p50_ms": 0, "p95_ms": 0},
-        "sse_id": None,
-        "reconnects": [],
-        "freshness": None,
-        "threshold_s": 60.0,
-        "target": 0.99,
-        "days": 30,
-        "gaps": [],
-        "cost": None,
-    }
-    return ops.assemble(**{**args, **overrides})
+POLICY = report.Policy(threshold_s=60.0, target=0.99, days=30, stale_after_s=60.0)
+
+
+def empty_assemble(now: float = 1_791_500_000.0, **rows: Any) -> Any:
+    lag = rows.pop("lag", {"events": 0, "p50_ms": 0, "p95_ms": 0})
+    return report.assemble(now, report.Rows(lag=lag, **rows), POLICY)
 
 
 def test_nothing_measured_yet_is_null_not_zero() -> None:
@@ -80,7 +73,6 @@ def test_paused_ingest_and_a_failed_cost_check_are_reported_with_times() -> None
         now=NOW_S,
         head={"newest_ms": 1_791_499_000_000, "stored_ms": 1_791_499_000_400, "n": 5},
         cost_check={"fetched_ms": 1_791_499_900_000, "ok": 0},
-        stale_after_s=60.0,
     )
     assert payload["ingest"]["state"] == "paused"
     assert payload["ingest"]["newest_event_at"] == "2026-10-08T22:36:40.000Z"
@@ -103,7 +95,7 @@ def test_paused_ingest_and_a_failed_cost_check_are_reported_with_times() -> None
     ],
 )
 def test_ingest_state(newest_age_s: float, stored_age_s: float, state: str) -> None:
-    got = ops.ingest_state(
+    got = report.ingest_state(
         now=NOW_S, newest_s=NOW_S - newest_age_s, stored_s=NOW_S - stored_age_s, stale_after_s=60
     )
     assert got == state
@@ -121,7 +113,7 @@ def test_ingest_state(newest_age_s: float, stored_age_s: float, state: str) -> N
     ],
 )
 def test_cost_today_judges_only_todays_attempt(latest: dict[str, int] | None, today: str) -> None:
-    assert ops.cost_today(now=NOW_S, latest=latest)["today"] == today
+    assert report.cost_today(now=NOW_S, latest=latest)["today"] == today
 
 
 def test_assemble_reports_every_number_it_was_given() -> None:
@@ -160,29 +152,18 @@ def test_assemble_reports_every_number_it_was_given() -> None:
     assert payload["cost"]["fetched_at"] == "2026-10-08T22:20:00.000Z"
 
 
-class StubDatabase:
-    def __init__(self) -> None:
-        self.queries = 0
-        self.fail = False
-
-    async def query(
-        self, sql: str, *, params: Mapping[str, Any] | None = None, **_: Any
-    ) -> QueryResult:
-        self.queries += 1
-        if self.fail:
-            raise ClickHouseError("down")
+class StubDatabase(StubClickHouse):
+    def answer(self, sql: str, params: Mapping[str, Any]) -> QueryResult:
         rows: list[dict[str, Any]] = []
-        if sql is ops.FIRST_SAMPLE:
+        if sql is report.FIRST_SAMPLE:
             rows = [{"first_ms": 0, "n": 0}]
-        elif sql is ops.LAG:
+        elif sql is report.LAG:
             rows = [{"events": 0, "p50_ms": 0, "p95_ms": 0}]
         return QueryResult(rows, QueryStats(0.0, 0, 0))
 
 
 def service(db: StubDatabase, *, ttl_s: float = 60, cooldown_s: float = 60) -> ops.OpsService:
-    return ops.OpsService(
-        db, ttl_s=ttl_s, threshold_s=60, target=0.99, days=30, error_cooldown_s=cooldown_s
-    )
+    return ops.OpsService(db, policy=POLICY, ttl_s=ttl_s, error_cooldown_s=cooldown_s)
 
 
 async def test_one_build_serves_every_request_until_it_expires() -> None:
@@ -191,23 +172,23 @@ async def test_one_build_serves_every_request_until_it_expires() -> None:
     first, age = await svc.get()
     assert age == 0
     assert json.loads(first)["freshness"]["minutes"] == 0
-    built = db.queries
+    built = len(db.queries)
     again, age = await svc.get()
     assert again == first
     assert 0 <= age < 60  # tells the route how much of the minute is left for the CDN
-    assert db.queries == built
+    assert len(db.queries) == built
 
 
 async def test_a_failure_is_remembered_for_the_cooldown() -> None:
     db = StubDatabase()
-    db.fail = True
+    db.fail_queries = True
     svc = service(db)
     with pytest.raises(ops.OpsUnavailable):
         await svc.get()
-    tried = db.queries
+    tried = len(db.queries)
     with pytest.raises(ops.OpsUnavailable):
         await svc.get()
-    assert db.queries == tried
+    assert len(db.queries) == tried
 
 
 def test_the_figure_and_the_check_come_from_the_same_read() -> None:
@@ -223,10 +204,10 @@ def test_the_figure_and_the_check_come_from_the_same_read() -> None:
         "fig_currency": "USD",
         "fig_estimated": 1,
     }
-    figure, latest = ops.split_cost(row)
+    figure, latest = report.split_cost(row)
     assert figure is not None
     assert figure["amount"] == "1.2"  # this month's newest success, not the failure after it
     assert latest == {"fetched_ms": 1_791_499_900_000, "ok": 0}
-    assert ops.split_cost({**row, "figures": 0}) == (None, latest)  # no figure this month
-    assert ops.split_cost({**row, "attempts": 0}) == (None, None)
-    assert ops.month_start(NOW_S) == "2026-10-01"
+    assert report.split_cost({**row, "figures": 0}) == (None, latest)  # no figure this month
+    assert report.split_cost({**row, "attempts": 0}) == (None, None)
+    assert report.month_start(NOW_S) == "2026-10-01"

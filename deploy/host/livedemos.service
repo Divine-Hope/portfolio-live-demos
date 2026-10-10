@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/livedemos
 ExecStart=/opt/livedemos/deploy/host/start.sh
-# A rebuilt host restores from the archive before the stack starts (archive/restore.py).
+# A rebuilt host restores from the archive before the stack starts (rollup/restore.py).
 TimeoutStartSec=1800
 
 [Install]

@@ -55,7 +55,7 @@ services:
   migrate:
     build: .
     image: livedemos:local
-    command: ["python", "-m", "livedemos.migrate"]
+    command: ["livedemos-migrate"]
     restart: "no"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -65,7 +65,7 @@ services:
       ARCHIVE_URL: http://s3:8333/archive/wikipedia/edits
       ARCHIVE_NOSIGN: "true"
       # A host that lost its raw rows refills the rollup from the archive before ingest
-      # starts (archive/restore.py). `ARCHIVE_RESTORE=false make up` skips that.
+      # starts (rollup/restore.py). `ARCHIVE_RESTORE=false make up` skips that.
       ARCHIVE_RESTORE: ${ARCHIVE_RESTORE:-true}
       CLICKHOUSE_TIMEOUT_S: "300"   # a restore reads a day of Parquet per query
     depends_on:
@@ -76,7 +76,7 @@ services:
 
   ingest:
     <<: *app
-    command: ["python", "-m", "livedemos.ingest"]
+    command: ["livedemos-ingest"]
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: ingest
@@ -88,7 +88,7 @@ services:
     mem_limit: 192m
     healthcheck:
       # Healthy means the consumer loop is alive, not just the process.
-      test: ["CMD", "python", "-m", "livedemos.ingest.health"]
+      test: ["CMD", "livedemos-ingest-health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -112,7 +112,7 @@ services:
   # Every finished hour of raw edits, as one Parquet file in S3 (ADR 0004).
   archive:
     <<: *app
-    command: ["python", "-m", "livedemos.archive"]
+    command: ["livedemos-archive"]
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: archiver
@@ -183,7 +183,9 @@ services:
     pull_policy: never
     profiles: ["offline"]
     restart: unless-stopped
-    command: ["python", "-m", "livedemos.devtools.fake_eventstreams", "--port", "8090", "--rate", "30", "--drop-after-s", "300"]
+    command: ["python", "-m", "devtools.fake_eventstreams", "--port", "8090", "--rate", "30", "--drop-after-s", "300"]
+    volumes:
+      - ./devtools:/app/devtools:ro   # dev tools aren't in the package, so not in the image
     mem_limit: 256m
 
 # Pinned, because ClickHouse lets its users connect from this range only

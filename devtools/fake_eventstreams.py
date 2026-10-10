@@ -14,7 +14,7 @@ The parts that make resuming hard are modelled on purpose:
 - Several events can share one millisecond.
 - Some events are dated earlier than their place in the stream (`--disorder-s`).
 
-    python -m livedemos.devtools.fake_eventstreams --port 8090 --rate 30
+    python -m devtools.fake_eventstreams --port 8090 --rate 30
 """
 
 from __future__ import annotations

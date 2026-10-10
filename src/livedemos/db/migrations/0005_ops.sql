@@ -1,9 +1,9 @@
--- What the Ops tab reports (GET /v1/ops.json, api/ops.py). Small tables, kept 90 days.
+-- What the Ops tab reports (GET /v1/ops.json, ops/report.py). Small tables, kept 90 days.
 
 -- One sample a minute of how old the newest event is, for the 30-day freshness SLO.
 -- ClickHouse takes it itself (a refreshable view), so a sample doesn't depend on ingest or
 -- the API being up. A minute with no sample at all (ClickHouse down, host replaced)
--- counts against the SLO too: api/ops.py counts it as unmeasured, never as fresh.
+-- counts against the SLO too: ops/report.py counts it as unmeasured, never as fresh.
 CREATE TABLE IF NOT EXISTS {database}.freshness_samples
 (
     minute      DateTime('UTC') COMMENT 'the minute the sample was taken in',

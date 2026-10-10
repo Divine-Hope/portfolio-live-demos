@@ -6,14 +6,15 @@ the process, the host, or a second host running at the same time.
 
 import io
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from livedemos.clickhouse import ClickHouseError, QueryResult, QueryStats
+from livedemos.db.clickhouse import QueryResult, QueryStats
 from livedemos.ops import cost
+from tests.stubs import StubClickHouse
 
 RESPONSE = {
     "ResultsByTime": [
@@ -34,27 +35,18 @@ def at(when: datetime) -> datetime:
     return when
 
 
-class StubDatabase:
+class StubDatabase(StubClickHouse):
     """One host's ClickHouse: `aws_cost` rows, and whether it's answering."""
 
-    def __init__(self) -> None:
-        self.rows: list[Mapping[str, Any]] = []
-        self.fail_query = False
-        self.fail_inserts = 0
+    @property
+    def rows(self) -> list[Mapping[str, Any]]:
+        assert all(table == "aws_cost" for table, *_ in self.inserts)
+        return self.committed
 
-    async def query(self, sql: str, *, params: Mapping[str, Any], **_: Any) -> QueryResult:
-        if self.fail_query:
-            raise ClickHouseError("down")
+    def answer(self, sql: str, params: Mapping[str, Any]) -> QueryResult:
         day = params["day"]
         n = sum(1 for r in self.rows if str(r["fetched_at"]).startswith(day))
         return QueryResult([{"n": n}], QueryStats(0.0, 0, 0))
-
-    async def insert(self, table: str, rows: Sequence[Mapping[str, Any]], **_: Any) -> None:
-        assert table == "aws_cost"
-        if self.fail_inserts:
-            self.fail_inserts -= 1
-            raise ClickHouseError("insert failed")
-        self.rows.extend(rows)
 
 
 class PreconditionFailed(Exception):
@@ -92,7 +84,7 @@ class StubCostExplorer:
 
 def fetcher(db: StubDatabase, s3: StubS3, ce: StubCostExplorer) -> cost.CostFetcher:
     return cost.CostFetcher(
-        db,  # type: ignore[arg-type]
+        db,
         tag="project=livedemos",
         claims="s3://archive-bucket/ops/cost",
         ce_factory=lambda: ce,
@@ -218,7 +210,7 @@ async def test_no_request_when_midnight_passes_while_claiming() -> None:
 
     db, ce = StubDatabase(), StubCostExplorer()
     f = cost.CostFetcher(
-        db,  # type: ignore[arg-type]
+        db,
         tag="project=livedemos",
         claims="s3://archive-bucket/ops/cost",
         ce_factory=lambda: ce,
@@ -231,7 +223,7 @@ async def test_no_request_when_midnight_passes_while_claiming() -> None:
 
 async def test_no_request_while_clickhouse_cant_say_whether_today_was_done() -> None:
     db, s3, ce = StubDatabase(), StubS3(), StubCostExplorer()
-    db.fail_query = True
+    db.fail_queries = True
     assert await fetcher(db, s3, ce).refresh_if_due(at(NOW)) is False
     assert ce.calls == []
     assert s3.objects == {}
@@ -244,7 +236,7 @@ async def test_no_request_when_the_claim_cant_be_written() -> None:
 
     ce = StubCostExplorer()
     f = cost.CostFetcher(
-        StubDatabase(),  # type: ignore[arg-type]
+        StubDatabase(),
         tag="project=livedemos",
         claims="s3://archive-bucket/ops/cost",
         ce_factory=lambda: ce,
@@ -262,7 +254,7 @@ async def test_no_request_when_the_claim_cant_be_written() -> None:
 def test_settings_are_checked(tag: str, claims: str) -> None:
     with pytest.raises(ValueError, match=r"tag|claims"):
         cost.CostFetcher(
-            StubDatabase(),  # type: ignore[arg-type]
+            StubDatabase(),
             tag=tag,
             claims=claims,
             ce_factory=object,
@@ -278,7 +270,7 @@ async def test_no_request_when_midnight_passes_while_the_client_is_built() -> No
         return ce
 
     f = cost.CostFetcher(
-        db,  # type: ignore[arg-type]
+        db,
         tag="project=livedemos",
         claims="s3://archive-bucket/ops/cost",
         ce_factory=slow_client,

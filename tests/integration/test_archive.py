@@ -15,21 +15,15 @@ from uuid import uuid4
 
 import pytest
 
-from livedemos.archive import pages
-from livedemos.archive.job import (
-    HOUR_S,
-    Archiver,
-    FewerRows,
-    NothingToArchive,
-    hour_url,
-    s3_function,
-)
-from livedemos.archive.rebuild import ArchiveIncomplete, rebuild
-from livedemos.archive.restore import Restored, restore
-from livedemos.clickhouse import ClickHouse, ClickHouseError
+from livedemos.archive.job import Archiver, FewerRows, NothingToArchive
+from livedemos.archive.s3 import HOUR_S, hour_url, s3_function
 from livedemos.config import ArchiveSettings
+from livedemos.db.clickhouse import ClickHouse, ClickHouseError
 from livedemos.ingest.resume import RESTORE_REPLAY_MARGIN, load_resume_state
-from livedemos.migrate import MigrationError, exclusive
+from livedemos.rollup import pages
+from livedemos.rollup.lock import LockHeld, exclusive
+from livedemos.rollup.rebuild import ArchiveIncomplete, rebuild
+from livedemos.rollup.restore import Restored, restore
 
 from .conftest import clickhouse_test_settings, rows, user_settings
 
@@ -39,7 +33,7 @@ NOW = datetime.now(UTC)
 # Three hours on one UTC day, two days ago: inside the lookback, outside any settle window.
 DAY = (NOW - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
 H0, H1, H2 = (int(DAY.timestamp()) + h * HOUR_S for h in (3, 4, 5))
-WHOLE_DAY = {"first": DAY.date(), "end": DAY.date() + timedelta(days=1)}
+WHOLE_DAY = (DAY.date(), DAY.date() + timedelta(days=1))
 OUTSIDE_DAY = f"SELECT sum(edits) FROM wiki_edits_per_minute WHERE toDate(minute) != '{DAY.date()}'"
 
 
@@ -200,9 +194,7 @@ async def test_rebuild_drill_restores_the_rollup_from_the_archive(
         params={"day": DAY.date().isoformat()},
     )
     # The test day only has three hours of edits; the other 21 have no file.
-    rollup_rows = await rebuild(
-        edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0)
-    )
+    rollup_rows = await rebuild(edits, settings, *WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
 
     assert await per_minute(edits) == before
     assert rollup_rows == len(before)
@@ -366,7 +358,7 @@ async def test_rebuild_refuses_hours_without_a_file_even_after_the_rollup_is_gon
     await Archiver(settings, edits).archive_hour(H0)  # H1 and H2 never archived
     await edits.execute("TRUNCATE TABLE wiki_edits_per_minute")
     with pytest.raises(ArchiveIncomplete, match="23 hour"):
-        await rebuild(edits, settings, **WHOLE_DAY, quiet=timedelta(0))
+        await rebuild(edits, settings, *WHOLE_DAY, quiet=timedelta(0))
 
 
 async def test_allow_missing_leaves_hours_without_a_file_as_they_are(
@@ -375,7 +367,7 @@ async def test_allow_missing_leaves_hours_without_a_file_as_they_are(
     """A partial first hour, say: no file, but the rollup has its minutes. Keep them."""
     await Archiver(settings, edits).archive_hour(H0)  # H1 and H2 have no file
     before = await per_minute(edits)
-    await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+    await rebuild(edits, settings, *WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
     assert await per_minute(edits) == before
 
 
@@ -391,7 +383,7 @@ async def test_a_rebuild_that_cant_read_the_archive_leaves_the_rollup_alone(
     )
     before = await per_minute(edits)
     with pytest.raises(ClickHouseError):
-        await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+        await rebuild(edits, settings, *WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
     assert await per_minute(edits) == before
 
 
@@ -410,7 +402,7 @@ async def test_a_rebuild_refuses_a_file_that_lost_rows(
     )
     before = await per_minute(edits)
     with pytest.raises(ArchiveIncomplete, match="don't hold the rows"):
-        await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+        await rebuild(edits, settings, *WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
     assert await per_minute(edits) == before
 
 
@@ -418,8 +410,8 @@ async def test_a_rebuild_waits_its_turn(edits: ClickHouse, settings: ArchiveSett
     """One migration, repair or rebuild at a time: they share the staging table and lock."""
     await Archiver(settings, edits).run_once(NOW)
     async with exclusive(edits):
-        with pytest.raises(MigrationError, match="holds the lock"):
-            await rebuild(edits, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+        with pytest.raises(LockHeld, match="holds the lock"):
+            await rebuild(edits, settings, *WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
 
 
 async def test_duckdb_reads_every_column(edits: ClickHouse, settings: ArchiveSettings) -> None:
@@ -484,7 +476,7 @@ async def test_a_rebuild_twice_is_still_right(edits: ClickHouse, settings: Archi
     forced = DedupEverything(clickhouse_test_settings())
     try:
         for _ in range(2):
-            await rebuild(forced, settings, **WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
+            await rebuild(forced, settings, *WHOLE_DAY, allow_missing=True, quiet=timedelta(0))
     finally:
         await forced.aclose()
     assert await per_minute(edits) == before

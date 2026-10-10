@@ -1,7 +1,7 @@
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
-from livedemos.config import ApiSettings, IngestSettings
+from livedemos.config import ApiSettings, ClickHouseSettings, IngestSettings, OpsSettings
 
 
 @pytest.mark.parametrize(
@@ -51,6 +51,20 @@ def test_defaults_are_valid() -> None:
 def test_the_slo_target_cant_go_below_the_requirement() -> None:
     # Requirement N2: 99.9% at minimum. A lower target would shrink what the page promises.
     with pytest.raises(ValidationError):
-        ApiSettings(slo_target=0.99)
-    assert ApiSettings().slo_target == 0.999
-    assert ApiSettings(slo_target=0.9999).slo_target == 0.9999
+        OpsSettings(slo_target=0.99)
+    assert OpsSettings().slo_target == 0.999
+    assert OpsSettings(slo_target=0.9999).slo_target == 0.9999
+
+
+def test_comma_lists_are_parsed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INGEST_WIKIS", "enwiki, dewiki")
+    monkeypatch.setenv("INGEST_TYPES", "edit")
+    settings = IngestSettings()
+    assert settings.wikis == frozenset({"enwiki", "dewiki"})
+    assert settings.types == frozenset({"edit"})
+
+
+def test_secrets_stay_out_of_reprs() -> None:
+    settings = ClickHouseSettings(password=SecretStr("hunter2"))
+    assert "hunter2" not in repr(settings)
+    assert settings.password.get_secret_value() == "hunter2"

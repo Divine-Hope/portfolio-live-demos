@@ -12,7 +12,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -133,7 +133,9 @@ def test_fits_phone_tablet_and_desktop(widget: Widget, width: int) -> None:
         assert box["height"] >= MIN_TAP, "tap target too small"
         tops.add(round(box["y"]))
     assert len(tops) == 1, "the language pills should sit on one row"
-    lefts = [card.bounding_box()["x"] for card in page.locator(".metric").all()]  # type: ignore[index]
+    boxes = [card.bounding_box() for card in page.locator(".metric").all()]
+    lefts = [box["x"] for box in boxes if box is not None]
+    assert len(lefts) == len(boxes)
     assert len(set(lefts)) == 3, "the three numbers should sit side by side at every width"
     for link in page.locator("#list a").all():
         box = link.bounding_box()
@@ -273,9 +275,11 @@ def test_the_s3_fallback_copy_says_paused_at_once(widget: Widget) -> None:
 
 
 @pytest.mark.parametrize(("motion", "animation"), [("reduce", "none"), ("no-preference", "pulse")])
-def test_live_dot_respects_reduced_motion(widget: Widget, motion: str, animation: str) -> None:
+def test_live_dot_respects_reduced_motion(
+    widget: Widget, motion: Literal["reduce", "no-preference"], animation: str
+) -> None:
     page = widget.page
-    page.emulate_media(reduced_motion=motion)  # type: ignore[arg-type]
+    page.emulate_media(reduced_motion=motion)
     widget.open()
     assert page.locator("#dot").evaluate("el => getComputedStyle(el).animationName") == animation
 

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from livedemos.clickhouse import ClickHouseError, Database
+from livedemos.db.clickhouse import ClickHouseError, Database
 
 log = logging.getLogger(__name__)
 
@@ -168,13 +168,13 @@ class CostFetcher:
             log.warning("the day ended before asking; not asking", extra={"day": str(today)})
             return False
         except Exception as exc:  # recorded as a failed attempt; not retried today
-            log.error("cost explorer request failed", extra={"error": repr(exc)[:300]})
+            log.exception("cost explorer request failed")
             row["ok"], row["error"] = False, repr(exc)[:300]
         else:
             try:
                 row["amount"], row["currency"], row["estimated"] = parse(response)
-            except Exception as exc:
-                log.error("unexpected cost explorer answer", extra={"error": repr(exc)[:300]})
+            except Exception as exc:  # any shape we don't expect is a failed attempt
+                log.exception("unexpected cost explorer answer")
                 row["ok"], row["error"] = False, repr(exc)[:300]
         self._done_on = today  # asked: whatever happens next, not again today
         self._unsaved = _Unsaved(key=key, body={**claim, "result": row})
@@ -226,8 +226,8 @@ class CostFetcher:
     async def _record(self, row: dict[str, Any]) -> bool:
         try:
             await self._ch.insert("aws_cost", [row])
-        except ClickHouseError as exc:
-            log.error("saving the cost failed", extra={"error": str(exc)})
+        except ClickHouseError:
+            log.exception("saving the cost failed")
             return False
         log.info("cost recorded", extra={"ok": row["ok"], "amount": row["amount"]})
         return True

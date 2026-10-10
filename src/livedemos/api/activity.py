@@ -21,8 +21,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from livedemos.api import metrics, queries
-from livedemos.api.contract import ActivityPayload, iso
-from livedemos.clickhouse import ClickHouseError, Queryable
+from livedemos.api.contract import ActivityPayload
+from livedemos.config import ApiSettings
+from livedemos.dates import iso
+from livedemos.db.clickhouse import ClickHouseError, Queryable
 
 WINDOWS = {"5m": 300, "1h": 3_600, "24h": 86_400, "3d": 259_200, "7d": 604_800}
 # Longer windows read per-minute tables instead of raw rows (queries.py), so they cover
@@ -70,27 +72,16 @@ def parse_request(
 
 
 class ActivityService:
-    def __init__(
-        self,
-        db: Queryable,
-        *,
-        ttl_s: float,
-        max_concurrency: int = 2,
-        max_pending: int = 4,
-        wait_s: float = 5.0,
-        error_cooldown_s: float = 5.0,
-    ):
+    def __init__(self, db: Queryable, settings: ApiSettings):
         self._db = db
-        self._ttl_s = ttl_s
-        self._wait_s = wait_s
-        self._error_cooldown_s = error_cooldown_s
+        self._ttl_s = settings.activity_cache_ttl_s
+        self._wait_s = settings.activity_wait_s
+        self._error_cooldown_s = settings.activity_error_cooldown_s
         self._cache: dict[str, tuple[float, ActivityPayload]] = {}
         self._failed_until: dict[str, float] = {}
         self._inflight: dict[str, asyncio.Task[ActivityPayload]] = {}
-        self._slots = asyncio.Semaphore(max_concurrency)
-        if max_pending < max_concurrency:
-            raise ValueError("max_pending must be at least max_concurrency")
-        self._max_pending = max_pending
+        self._slots = asyncio.Semaphore(settings.activity_max_concurrency)
+        self._max_pending = settings.activity_max_pending
 
     async def get(self, req: ActivityRequest) -> ActivityPayload:
         now = time.monotonic()

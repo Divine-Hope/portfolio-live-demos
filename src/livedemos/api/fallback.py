@@ -13,12 +13,12 @@ next tick.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import time
 from typing import Any, Protocol
 
+from livedemos.aio import sleep_unless_stopped
 from livedemos.api import metrics
 from livedemos.api.snapshot import Snapshot, Snapshotter
 
@@ -53,8 +53,7 @@ class FallbackWriter:
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             await self.write_once()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=self._interval_s)
+            await sleep_unless_stopped(stop, self._interval_s)
 
     async def write_once(self) -> str:
         """Write the snapshot if it's worth keeping. Returns what happened."""

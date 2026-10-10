@@ -1,7 +1,7 @@
 """Check the per-minute rollup against the raw rows, and rebuild minutes that disagree.
 
-    python -m livedemos.reconcile            # report mismatched minutes, exit 1 if any
-    python -m livedemos.reconcile --repair   # rebuild them from raw rows
+    livedemos-reconcile            # report mismatched minutes, exit 1 if any
+    livedemos-reconcile --repair   # rebuild them from raw rows
 
 Why this exists: a ClickHouse INSERT writes the raw part and then the materialized view's
 part, and the two are not one transaction. If the second write fails, the retry's
@@ -27,17 +27,17 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from livedemos.archive import pages
-from livedemos.clickhouse import ClickHouse
 from livedemos.config import clickhouse_settings
+from livedemos.db.clickhouse import ClickHouse, Queryable
 from livedemos.logs import setup_logging
-from livedemos.maintenance import (
+from livedemos.rollup import pages
+from livedemos.rollup.lock import LockHeld, exclusive
+from livedemos.rollup.maintenance import (
     REBUILD_INSERT_SETTINGS,
     IngestRunning,
     require_ingest_still_stopped,
     require_ingest_stopped,
 )
-from livedemos.migrate import MigrationError, exclusive
 
 log = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class Mismatch:
     rolled: int
 
 
-async def find_mismatches(ch: ClickHouse, *, now: datetime, settle: timedelta) -> list[Mismatch]:
+async def find_mismatches(ch: Queryable, *, now: datetime, settle: timedelta) -> list[Mismatch]:
     head = (await ch.query(_RAW_RANGE)).rows[0]
     if not int(head["n"]):
         return []
@@ -139,9 +139,8 @@ async def repair(
 
 async def _main(args: argparse.Namespace) -> int:
     setup_logging()
-    ch = ClickHouse(clickhouse_settings())
-    try:
-        settle = timedelta(minutes=args.settle_minutes)
+    settle = timedelta(minutes=args.settle_minutes)
+    async with ClickHouse(clickhouse_settings()) as ch:
         found = await find_mismatches(ch, now=datetime.now(UTC), settle=settle)
         for m in found:
             log.warning(
@@ -160,14 +159,12 @@ async def _main(args: argparse.Namespace) -> int:
             return 1
         try:
             rebuilt = await repair(ch, found)
-        except (IngestRunning, MigrationError) as exc:
-            log.error("not repaired", extra={"reason": str(exc)})
+        except (IngestRunning, LockHeld) as exc:
+            log.error("not repaired", extra={"reason": str(exc)})  # noqa: TRY400 (a refusal: the reason is the whole story)
             return 1
         left = await find_mismatches(ch, now=datetime.now(UTC), settle=settle)
         log.info("repaired", extra={"minutes": rebuilt, "still_mismatched": len(left)})
         return 1 if left else 0
-    finally:
-        await ch.aclose()
 
 
 def main() -> int:

@@ -1,4 +1,4 @@
-"""Entry point: `python -m livedemos.ingest`."""
+"""Entry point: `livedemos-ingest`."""
 
 from __future__ import annotations
 
@@ -9,15 +9,17 @@ import sys
 
 from prometheus_client import start_http_server
 
-from livedemos.clickhouse import ClickHouse
 from livedemos.config import WIKIMEDIA_STREAM_URL, clickhouse_settings, ingest_settings
+from livedemos.db.clickhouse import ClickHouse
 from livedemos.ingest.consumer import Consumer
 from livedemos.logs import setup_logging
 
 log = logging.getLogger("livedemos.ingest")
 
+_STOP_TIMEOUT_S = 8.0
 
-async def main() -> int:
+
+async def run() -> int:
     setup_logging()
     settings = ingest_settings()
     if settings.stream_url == WIKIMEDIA_STREAM_URL and not settings.contact.strip():
@@ -28,30 +30,35 @@ async def main() -> int:
         return 2
 
     start_http_server(settings.metrics_port)
-    ch = ClickHouse(clickhouse_settings())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
 
-    # The schema is the `migrate` job's (it runs first, as the only user allowed to change
-    # it). Ingest only reads and writes rows.
-    try:
+    async with ClickHouse(clickhouse_settings()) as ch:
         consumer = asyncio.create_task(Consumer(settings, ch).run(stop))
         stopper = asyncio.create_task(stop.wait())
         done, _ = await asyncio.wait({consumer, stopper}, return_when=asyncio.FIRST_COMPLETED)
-        if consumer in done and consumer.exception() is not None:
-            log.error("consumer crashed", exc_info=consumer.exception())
-            return 1
-        # Anything not yet committed is replayed from the bookmark on the next start.
-        consumer.cancel()
-        stopper.cancel()
-        await asyncio.gather(consumer, stopper, return_exceptions=True)
-    finally:
-        await ch.aclose()
+        if consumer in done:
+            stopper.cancel()
+            if consumer.exception() is not None:
+                log.error("consumer crashed", exc_info=consumer.exception())
+                return 1
+        else:
+            # The consumer sees `stop` within a flush interval and finishes the batch in
+            # hand. Docker kills after 10 s, so stop waiting before that. Anything not
+            # committed is replayed from the bookmark on the next start.
+            try:
+                await asyncio.wait_for(consumer, timeout=_STOP_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("consumer didn't stop in time; cancelled")
     log.info("stopped")
     return 0
 
 
+def main() -> int:
+    return asyncio.run(run())
+
+
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(main())

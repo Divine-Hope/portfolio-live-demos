@@ -6,16 +6,10 @@ from typing import Any
 
 import pytest
 
-from livedemos.archive.job import (
-    HOUR_S,
-    Archiver,
-    days_glob,
-    hour_of_path,
-    hour_url,
-    s3_function,
-)
-from livedemos.clickhouse import ClickHouseError, QueryResult, QueryStats
+from livedemos.archive.job import Archiver
+from livedemos.archive.s3 import HOUR_S, days_glob, hour_of_path, hour_url, s3_function
 from livedemos.config import ArchiveSettings
+from livedemos.db.clickhouse import ClickHouseError, QueryResult, QueryStats
 
 BASE = "https://bucket.s3.eu-west-1.amazonaws.com/wikipedia/edits"
 H = int(datetime(2026, 10, 6, 9, tzinfo=UTC).timestamp())

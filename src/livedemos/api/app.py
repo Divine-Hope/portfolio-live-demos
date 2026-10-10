@@ -17,6 +17,8 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import cast
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -28,19 +30,44 @@ from livedemos.api.activity import ActivityService, BadRequest, Unavailable, par
 from livedemos.api.fallback import FallbackWriter
 from livedemos.api.ops import OpsService, OpsUnavailable
 from livedemos.api.snapshot import Snapshotter
-from livedemos.clickhouse import ClickHouse
-from livedemos.config import ApiSettings, ClickHouseSettings, api_settings, clickhouse_settings
+from livedemos.config import (
+    ApiSettings,
+    ClickHouseSettings,
+    OpsSettings,
+    api_settings,
+    clickhouse_settings,
+    ops_settings,
+)
+from livedemos.db.clickhouse import ClickHouse
 from livedemos.logs import setup_logging
+from livedemos.ops import report
 
 log = logging.getLogger("livedemos.api")
+
+
+@dataclass(slots=True)
+class Services:
+    """What the routes use, created when the app starts."""
+
+    ch: ClickHouse
+    snapshotter: Snapshotter
+    activity: ActivityService
+    ops: OpsService
+
+
+def services(app: FastAPI) -> Services:
+    """The running app's services (tests reach in through this)."""
+    return cast(Services, app.state.services)
 
 
 def create_app(
     settings: ApiSettings | None = None,
     ch_settings: ClickHouseSettings | None = None,
+    ops_config: OpsSettings | None = None,
 ) -> FastAPI:
     settings = settings or api_settings()
     ch_settings = ch_settings or clickhouse_settings()
+    ops_config = ops_config or ops_settings()
     langs = settings.lang_list
 
     @asynccontextmanager
@@ -69,25 +96,23 @@ def create_app(
                 stale_after_s=settings.stale_after_s,
             )
             tasks.append(asyncio.create_task(writer.run(stop)))
-        app.state.ch = ch
-        app.state.snapshotter = snapshotter
-        activity = ActivityService(
-            ch,
-            ttl_s=settings.activity_cache_ttl_s,
-            max_concurrency=settings.activity_max_concurrency,
-            max_pending=settings.activity_max_pending,
-            wait_s=settings.activity_wait_s,
-            error_cooldown_s=settings.activity_error_cooldown_s,
-        )
-        app.state.activity = activity
-        app.state.ops = OpsService(
-            ch,
-            ttl_s=settings.ops_cache_ttl_s,
-            threshold_s=settings.slo_threshold_s,
-            target=settings.slo_target,
-            days=settings.slo_days,
-            error_cooldown_s=settings.activity_error_cooldown_s,
+        activity = ActivityService(ch, settings)
+        policy = report.Policy(
+            threshold_s=ops_config.slo_threshold_s,
+            target=ops_config.slo_target,
+            days=ops_config.slo_days,
             stale_after_s=settings.stale_after_s,
+        )
+        app.state.services = Services(
+            ch=ch,
+            snapshotter=snapshotter,
+            activity=activity,
+            ops=OpsService(
+                ch,
+                policy=policy,
+                ttl_s=ops_config.ops_cache_ttl_s,
+                error_cooldown_s=ops_config.ops_error_cooldown_s,
+            ),
         )
         log.info("api started", extra={"version": __version__, "langs": langs})
         try:
@@ -110,7 +135,7 @@ def create_app(
     # CloudFront's address ranges; this stops someone else's distribution pointing at us.
     # /healthz and /metrics stay open for the container healthcheck and a local scraper.
     open_paths = {"/healthz", "/metrics"}
-    origin_secret = settings.origin_secret.encode()
+    origin_secret = settings.origin_secret.get_secret_value().encode()
 
     @app.middleware("http")
     async def require_origin_secret(
@@ -147,8 +172,8 @@ def create_app(
         return response
 
     @app.get("/v1/wikipedia/live.json")
-    async def live(request: Request) -> Response:
-        snapshot = request.app.state.snapshotter.latest
+    async def live() -> Response:
+        snapshot = services(app).snapshotter.latest
         age = None if snapshot is None else time.monotonic() - snapshot.built_at
         if snapshot is None or (age is not None and age > settings.max_snapshot_age_s):
             # No snapshot yet, or we can't build new ones (ClickHouse down). Serving the
@@ -167,15 +192,13 @@ def create_app(
         )
 
     @app.get("/v1/wikipedia/activity")
-    async def activity(
-        request: Request, lang: str | None = None, window: str | None = None
-    ) -> Response:
+    async def activity(lang: str | None = None, window: str | None = None) -> Response:
         try:
             req = parse_request(lang, window, allowed=langs)
         except BadRequest as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         try:
-            payload = await request.app.state.activity.get(req)
+            payload = await services(app).activity.get(req)
         except Unavailable as exc:
             log.warning("activity unavailable", extra={"reason": str(exc)}, exc_info=exc.__cause__)
             return JSONResponse(
@@ -189,9 +212,9 @@ def create_app(
         )
 
     @app.get("/v1/ops.json")
-    async def ops(request: Request) -> Response:
+    async def ops() -> Response:
         try:
-            body, age = await request.app.state.ops.get()
+            body, age = await services(app).ops.get()
         except OpsUnavailable as exc:
             log.warning("ops unavailable", exc_info=exc.__cause__)
             return JSONResponse(
@@ -204,7 +227,7 @@ def create_app(
             media_type="application/json",
             # What's left of the build's minute, so a CDN copy is never older than that.
             headers={
-                "Cache-Control": f"public, max-age={max(0, int(settings.ops_cache_ttl_s - age))}"
+                "Cache-Control": f"public, max-age={max(0, int(ops_config.ops_cache_ttl_s - age))}"
             },
         )
 
@@ -213,14 +236,14 @@ def create_app(
         return {"status": "ok", "version": __version__}
 
     @app.get("/readyz")
-    async def readyz(request: Request) -> Response:
-        snapshot = request.app.state.snapshotter.latest
+    async def readyz() -> Response:
+        snapshot = services(app).snapshotter.latest
         problems: list[str] = []
         if snapshot is None:
             problems.append("no snapshot yet")
         elif time.monotonic() - snapshot.built_at > settings.max_snapshot_age_s:
             problems.append("snapshot is old")
-        if not await request.app.state.ch.ping():
+        if not await services(app).ch.ping():
             problems.append("clickhouse unreachable")
         if problems:
             return JSONResponse({"status": "not ready", "problems": problems}, status_code=503)
