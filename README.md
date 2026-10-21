@@ -22,6 +22,14 @@ First up: what's being edited on English, Portuguese and German Wikipedia, right
 - **It's honest when it's stale.** If the stream stops, the widget says "Paused" and the numbers freeze. Missing minutes show as gaps, not zeros ([tests](tests/e2e/test_widget.py)).
 - **One host, but it heals itself.** No broker, no semantic layer, no lakehouse format, each with a written reason ([decisions](docs/adr/README.md)). A lost host is replaced and restores itself from the Parquet archive with no manual steps: live again 7 min 26 s after the host was terminated, in a drill on 10 October 2026 ([ADR 0010](docs/adr/0010-spot-host-in-an-auto-scaling-group.md)).
 
+## A week in production
+
+From 14 to 20 October 2026, on one t4g.small, all 10,080 minutes were fresh (the target is 99%). There were 0 OOM kills. "Query it" over 5 minutes took 25 ms at p95 inside ClickHouse. AWS cost $0.183 a day, $5.57 for an average month, while the host is on its free trial. Details and how each was measured: [benchmarks](docs/benchmarks.md#a-week-in-production-14-to-20-october-2026).
+
+![Memory per container, hourly peak, 14 to 20 October 2026. ClickHouse rises from about 650 to 950 MiB against its 1,200 MiB limit; the others stay under theirs.](docs/img/memory-week-2026-10-14.svg)
+
+ClickHouse's memory grew about 400 MiB in 10 days, and it refused work twice. Finding out why is next.
+
 ## Architecture
 
 <picture>
@@ -122,7 +130,8 @@ Python 3.12, asyncio, httpx, FastAPI. ClickHouse 26.8 LTS. Plain HTML, CSS and J
 - **A second dataset**, Bitcoin from mempool.space, on the same platform. It tests whether the platform is general or just shaped around Wikipedia.
 - **Keep the Ops history across a host rebuild.** The freshness samples and reconnects live on the host's disk; archiving them like the edits would make the 30-day SLO survive a replacement.
 - **TLS from CloudFront to the host.** Today that hop is plain HTTP, guarded by a secret header and CloudFront-only firewall rules ([why](docs/architecture.md#security)).
-- **A month of production numbers.** Freshness over 30 days, "Query it" latency on the host, merges through a TTL drop, and the first full AWS bill, in place of the laptop benchmarks and price-list estimates.
+- **Find out why ClickHouse's memory grows**, before it reaches its limit. The week above shows the growth; it doesn't explain it.
+- **A month of production numbers.** Freshness over 30 days, merges through a TTL drop, and the first full AWS bill.
 - **Signed embeds.** The language filter isn't tenant isolation. A real product would sign each customer's context and enforce it in the API.
 
 ## License
