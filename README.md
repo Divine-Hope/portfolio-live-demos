@@ -24,11 +24,11 @@ First up: what's being edited on English, Portuguese and German Wikipedia, right
 
 ## A week in production
 
-From 14 to 20 October 2026, on one t4g.small: every minute fresh (target 99%), 0 OOM kills, "Query it" over 5 minutes at 25 ms p95 inside ClickHouse, and $0.18 a day, $5.57 for an average month, while the host is on its free trial. Details and how each was measured: [benchmarks](docs/benchmarks.md#a-week-in-production-14-to-20-october-2026).
+From 14 to 20 October 2026, on one t4g.small, all 10,080 minutes were fresh (the target is 99%). There were 0 OOM kills. "Query it" over 5 minutes took 25 ms at p95 inside ClickHouse. AWS cost $0.183 a day, $5.57 for an average month, while the host is on its free trial. Details and how each was measured: [benchmarks](docs/benchmarks.md#a-week-in-production-14-to-20-october-2026).
 
-![Memory per container, hourly peak, 14 to 20 October 2026. ClickHouse rises from about 650 to 950 MiB against its 1,200 MiB limit; the others stay flat under theirs.](docs/img/memory-week-2026-10-14.svg)
+![Memory per container, hourly peak, 14 to 20 October 2026. ClickHouse rises from about 650 to 950 MiB against its 1,200 MiB limit; the others stay under theirs.](docs/img/memory-week-2026-10-14.svg)
 
-ClickHouse's memory grows by a few hundred MiB a week, and it refused work twice. Finding out why is next.
+ClickHouse's memory grew about 400 MiB in 10 days, and it refused work twice. Finding out why is next.
 
 ## Architecture
 

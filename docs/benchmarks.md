@@ -86,13 +86,13 @@ The host is a t4g.small (2 vCPUs, 2 GB) on demand, the instance that went in ser
 
 ### Freshness
 
-Every one of the week's 10,080 minutes had a newest event under 60 s old: 100%, against a 99% target. Measured as `avg_over_time((max(api_last_event_age_seconds) < bool 60)[7d:1m])`. The API's own count, from 10 October 11:31 to 21 October 19:51, is 16,335 fresh minutes of 16,340 (99.97%), and no recorded gaps.
+Every one of the week's 10,080 minutes had a newest event under 60 s old: 100%, against a 99% target. Measured as `avg_over_time((max(api_last_event_age_seconds) < bool 60)[7d:1m])`, evaluated at 21 October 00:00 UTC. Its sample count, `count_over_time(...[7d:1m])`, is also 10,080, so no minute is missing. The API's own count, from 10 October 11:31 to 21 October 19:51, is 16,335 fresh minutes of 16,340 (99.97%), and no recorded gaps.
 
 No alert rule reached Alerting during the week. Three times one went Pending and cleared on its own: the `live.json` check for a minute on 15 October (no data), and during the reboot the `live.json` check for a minute and the archive for five.
 
 ### "Query it" on the host
 
-Nobody used "Query it" during the week, so there's no visitor traffic to read a p95 from. Instead, on 21 October I ran 140 requests through CloudFront: every language set for every window, 4 rounds, 11 s apart so none hit the cache. Times are ClickHouse's own (`query.elapsed_ms`); "through CloudFront" is the whole request, timed from my laptop.
+Nobody used "Query it" during the week, so there's no visitor traffic to read a p95 from. Instead, on 21 October I ran 140 requests through CloudFront. That's every language set for every window, 4 rounds, 11 s apart so none hit the cache. Times are ClickHouse's own (`query.elapsed_ms`). "Through CloudFront" is the whole request, timed from my laptop.
 
 | Window | Requests | p50 ms | p95 ms | Through CloudFront, p95 ms | Rows read, at most |
 |---|---:|---:|---:|---:|---:|
@@ -106,11 +106,11 @@ The 5-minute target was under 100 ms; it's 25 ms. The laptop benchmark above put
 
 ### Viewers and origin requests
 
-CloudFront counted about 1,445 requests a day and the API about 1,440 `live.json` requests a day: one a minute from the synthetic check, and almost nothing else. PostHog counted 4 views of the live demos page all week. With at most one viewer at a time, every request misses the 1 s cache, so origin requests equal viewer requests. Real traffic can't show the fan-out yet. The claim rests on the load test in [architecture.md](architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out).
+CloudFront counted about 1,445 requests a day and the API about 1,440 `live.json` requests a day: one a minute from the synthetic check, and almost nothing else. PostHog counted 4 views of the live demos page all week. Edge and origin counts were nearly equal, and there wasn't enough traffic to show any fan-out. The claim rests on the load test in [architecture.md](architecture.md#the-core-idea-compute-once-let-the-cdn-fan-out).
 
 ### Memory
 
-![Memory per container, hourly peak, 14 to 20 October 2026. ClickHouse rises from about 650 to 950 MiB against its 1,200 MiB limit; the others stay flat under theirs.](img/memory-week-2026-10-14.svg)
+![Memory per container, hourly peak, 14 to 20 October 2026. ClickHouse rises from about 650 to 950 MiB against its 1,200 MiB limit; the others stay under theirs.](img/memory-week-2026-10-14.svg)
 
 | Container | Limit, MiB | p95, MiB | Peak, MiB |
 |---|---:|---:|---:|
@@ -127,18 +127,18 @@ Container memory is the working set (`container_memory_working_set_bytes`). Over
 - **Swap:** the 1 GiB swap file sat at 512 MiB used for most of the week, and filled back to it within a day of the reboot. About 6.7 million pages (26 GiB) were swapped in, about 45 KB a second on average.
 - **ClickHouse refused work twice:** 2 `MEMORY_LIMIT_EXCEEDED`, both on 18 October between 01:00 and 02:00 UTC.
 
-ClickHouse grows. Its daily peak went from 555 MiB on 10 October to 959 MiB on 20 October, and the reboot only set it back a day. Its own corrected count (`MemoryTracking`) peaked at 333 MB on 10 October and 538 MB in the day to 21 October. In BPL-68's four hours on 7 October it peaked at 466 MB, the figure the 2 GB decision in [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md) rests on. Why it grows isn't known yet.
+ClickHouse grows. Its daily peak went from 555 MiB on 10 October to 959 MiB on 20 October, and the reboot only set it back a day. Its own corrected count (`MemoryTracking`) peaked at 333 MB on 10 October and 538 MB in the day to 21 October. In four hours measured on 7 October it peaked at 466 MB, the figure the 2 GB decision in [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md) rests on. Why it grows isn't known yet.
 
 ### Cost
 
-The AWS bill for the `livedemos` account, from Cost Explorer, was $0.18 a day every day of the week, $1.28 in all:
+The AWS bill for the `livedemos` account, from Cost Explorer, was $0.183 a day every day of the week, $1.28 in all:
 
 | Service | Per day |
 |---|---:|
-| Public IPv4 address (VPC) | $0.120 |
-| EBS volume (EC2 - Other) | $0.045 |
-| Cost Explorer, the Ops tab's one daily call | $0.010 |
-| S3, nearly all PUT requests: 1,512 a day, 1,440 of them the fallback snapshot | $0.008 |
+| Public IPv4 address (VPC) | $0.1200 |
+| EBS volume (EC2 - Other) | $0.0454 |
+| Cost Explorer, the Ops tab's one daily call | $0.0100 |
+| S3, nearly all PUT requests: 1,512 a day, 1,440 of them the fallback snapshot | $0.0077 |
 | EC2 compute | $0 (t4g.small free trial until 31 December) |
 
 That's $5.57 for an average month (30.4 days). CloudFront stayed inside its free tier. From January the host is billed too ([ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md)).
