@@ -270,6 +270,8 @@ Spot prices by type, eu-west-1, 2026-10-07 (AWS Pricing API and Spot price histo
 
 About $5 a month until the end of 2026, then $11.12 to $16.23 on Spot, against $18.50 on demand. Prices are eu-west-1, from the AWS Pricing API and Spot price history on 2026-10-07; the reasoning is [ADR 0010](adr/0010-spot-host-in-an-auto-scaling-group.md). Month-to-date cost, as Cost Explorer reports it for the `project=livedemos` tag, is on the Ops tab (`/v1/ops.json`).
 
+Measured from 14 to 20 October 2026: $0.18 a day, $5.57 for an average month ([benchmarks](benchmarks.md#cost)). EBS and the IPv4 address came in as estimated. S3 didn't: about 23 cents a month, not 1 cent, because the fallback snapshot's write every 60 s is 1,440 PUT requests a day.
+
 **The archive, estimated 2026-10-06, a lower bound.** Production kept 9,302 edits an hour over the previous 24 hours. Its first 30 archive files held 270,562 edits in 13.3 MB: 49 bytes an edit with zstd. That's about 0.46 MB an hour, 11 MB a day, 0.33 GB a month, in 730 files. eu-west-1 list prices from the AWS Pricing API:
 
 | Item | Price | A month, once a year is stored |
