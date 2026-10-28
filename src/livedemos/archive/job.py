@@ -145,9 +145,11 @@ class Archiver:
             },
         )
         in_file = await self._file_count(url)
+        # Page sets first: once the count is recorded the hour isn't due again, so a page
+        # fill that failed after it would never be retried.
+        await pages.add_from_raw_hour(self._ch, hour_s)
         # Always the truth, so a later run compares against what the file really holds.
         await self._record(hour_s, in_file)
-        await pages.add_from_raw_hour(self._ch, hour_s)
         if in_file < floor and not manual:
             # Rows vanished between the count and the write (deleted by hand: the hours
             # considered are inside retention). The previous version is in the bucket.

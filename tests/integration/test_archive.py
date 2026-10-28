@@ -125,15 +125,20 @@ async def test_an_hours_last_half_second_is_archived(
     """A part of its own that starts in the hour's last second. Bounds in whole seconds let
     ClickHouse's min-max index skip that part, so the file lacked the row and the planner,
     which counts it, asked for the hour every run (seen on 21 and 25 Oct 2026)."""
-    await edits.insert(
-        "wiki_edits", rows(1, start=at(H0 + HOUR_S - 1) + timedelta(milliseconds=455))
-    )
-    archiver = Archiver(settings, edits)
+    # No merges: merged into the hour's other part, the row's part no longer starts late.
+    await edits.execute("SYSTEM STOP MERGES wiki_edits")
+    try:
+        await edits.insert(
+            "wiki_edits", rows(1, start=at(H0 + HOUR_S - 1) + timedelta(milliseconds=455))
+        )
+        archiver = Archiver(settings, edits)
 
-    results = await archiver.run_once(NOW)
-    assert (H0, "written", 51) in [(r.hour_s, r.result, r.rows) for r in results]
-    assert await file_count(edits, settings, H0) == 51
-    assert await archiver.run_once(NOW) == []
+        results = await archiver.run_once(NOW)
+        assert (H0, "written", 51) in [(r.hour_s, r.result, r.rows) for r in results]
+        assert await file_count(edits, settings, H0) == 51
+        assert await archiver.run_once(NOW) == []
+    finally:
+        await edits.execute("SYSTEM START MERGES wiki_edits")
 
 
 async def test_a_file_is_never_replaced_by_one_with_fewer_rows(
