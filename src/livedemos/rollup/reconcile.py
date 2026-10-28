@@ -36,8 +36,8 @@ SELECT toUnixTimestamp(minute) AS minute_s, lang, raw, rolled
 FROM (
     SELECT toStartOfMinute(event_time) AS minute, lang, count() AS raw
     FROM wiki_edits
-    WHERE event_time >= fromUnixTimestamp({from_s:Int64})
-      AND event_time < fromUnixTimestamp({to_s:Int64})
+    WHERE event_time >= fromUnixTimestamp64Milli({from_s:Int64} * 1000)
+      AND event_time < fromUnixTimestamp64Milli({to_s:Int64} * 1000)
     GROUP BY minute, lang
 ) AS r
 FULL OUTER JOIN (

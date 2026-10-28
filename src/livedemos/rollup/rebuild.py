@@ -103,8 +103,8 @@ async def _rebuild(
             INSERT INTO wiki_edits_per_minute_staging ({_COLUMNS})
             SELECT toStartOfMinute(event_time) AS minute, lang, count(), countIf(is_bot)
             FROM {source}
-            WHERE event_time >= fromUnixTimestamp({{from_s:Int64}})
-              AND event_time < fromUnixTimestamp({{to_s:Int64}})
+            WHERE event_time >= fromUnixTimestamp64Milli({{from_s:Int64}} * 1000)
+              AND event_time < fromUnixTimestamp64Milli({{to_s:Int64}} * 1000)
             GROUP BY minute, lang
             """,
             params={

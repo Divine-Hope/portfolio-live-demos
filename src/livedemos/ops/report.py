@@ -40,7 +40,7 @@ SELECT
     quantileExact(0.5)(dateDiff('millisecond', event_time, ingested_at)) AS p50_ms,
     quantileExact(0.95)(dateDiff('millisecond', event_time, ingested_at)) AS p95_ms
 FROM wiki_edits
-WHERE ingested_at > now() - toIntervalSecond({window_s:UInt32})
+WHERE ingested_at > now64(3) - toIntervalSecond({window_s:UInt32})
 """
 
 # The newest committed row's bookmark: max(ingest_seq) from the seq_max projection, then a
@@ -56,7 +56,7 @@ LIMIT 1
 RECONNECTS = """
 SELECT reason, count() AS n
 FROM ingest_reconnects
-WHERE at > now() - toIntervalSecond({window_s:UInt32})
+WHERE at > now64(3) - toIntervalSecond({window_s:UInt32})
 GROUP BY reason
 ORDER BY n DESC, reason
 """
@@ -86,7 +86,7 @@ SELECT
     reason,
     count() OVER () AS total
 FROM ingest_gaps
-WHERE gap_to > now() - toIntervalDay({days:UInt16})
+WHERE gap_to > now64(3) - toIntervalDay({days:UInt16})
 ORDER BY gap_from DESC
 LIMIT {limit:UInt16}
 """
