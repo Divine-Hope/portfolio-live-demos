@@ -38,9 +38,12 @@ _COLUMNS = """
 # What the rollup rebuild reads back. Naming the schema skips inferring it from every file.
 READ_SCHEMA = "event_time DateTime64(3, 'UTC'), lang String, is_bot Bool"
 _TIME_SCHEMA = "event_time DateTime64(3, 'UTC')"
+# Bounds on event_time are DateTime64 too. Against a whole-second DateTime, ClickHouse's
+# min-max index reads `< 00:00:00` as `<= 23:59:59` and skips a part that starts at
+# 23:59:59.4, so those rows were left out of the hour.
 _HOUR_RANGE = (
-    "event_time >= fromUnixTimestamp({from_s:Int64}) "
-    "AND event_time < fromUnixTimestamp({to_s:Int64})"
+    "event_time >= fromUnixTimestamp64Milli({from_s:Int64} * 1000) "
+    "AND event_time < fromUnixTimestamp64Milli({to_s:Int64} * 1000)"
 )
 
 Result = Literal["written", "mismatch", "error"]

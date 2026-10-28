@@ -128,8 +128,8 @@ async def add_from_raw_hour(ch: Warehouse, hour_s: int) -> None:
         ch,
         source="wiki_edits",
         where=(
-            "event_time >= fromUnixTimestamp({from_s:Int64}) "
-            "AND event_time < fromUnixTimestamp({to_s:Int64})"
+            "event_time >= fromUnixTimestamp64Milli({from_s:Int64} * 1000) "
+            "AND event_time < fromUnixTimestamp64Milli({to_s:Int64} * 1000)"
         ),
         params={"from_s": hour_s, "to_s": hour_s + HOUR_S},
     )

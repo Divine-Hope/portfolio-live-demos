@@ -158,7 +158,8 @@ async def _finish_raw(ch: ClickHouse, settings: ArchiveSettings, *, now: datetim
     await require_ingest_stopped(ch, quiet=timedelta(0))
     for table, column in (("wiki_edits", "event_time"), ("wiki_edits_per_minute", "minute")):
         await ch.execute(
-            f"ALTER TABLE {table} DELETE WHERE {column} >= fromUnixTimestamp({{from_s:Int64}}) "
+            f"ALTER TABLE {table} DELETE "
+            f"WHERE {column} >= fromUnixTimestamp64Milli({{from_s:Int64}} * 1000) "
             "SETTINGS mutations_sync = 1",
             params={"from_s": raw_from_s},
         )
@@ -168,7 +169,7 @@ async def _finish_raw(ch: ClickHouse, settings: ArchiveSettings, *, now: datetim
 async def _file_rows(ch: ClickHouse, settings: ArchiveSettings, hours: list[int]) -> int:
     result = await ch.query(
         f"SELECT count() AS n FROM {s3_function(settings, 'Parquet', _RESTORE_SCHEMA)} "
-        "WHERE event_time >= fromUnixTimestamp({from_s:Int64})",
+        "WHERE event_time >= fromUnixTimestamp64Milli({from_s:Int64} * 1000)",
         params={"url": days_glob(settings.url, hours), "from_s": hours[0]},
         settings={**S3_SETTINGS, "max_execution_time": "600"},
     )
@@ -194,7 +195,7 @@ async def _restore_raw(ch: ClickHouse, settings: ArchiveSettings, hours: list[in
         SELECT toUUID(event_id), event_time, ingested_at, wiki, lang, type, namespace, title,
                is_bot, '', toUInt64(toUnixTimestamp64Nano(ingested_at))
         FROM {s3_function(settings, "Parquet", _RESTORE_SCHEMA)}
-        WHERE event_time >= fromUnixTimestamp({{from_s:Int64}})
+        WHERE event_time >= fromUnixTimestamp64Milli({{from_s:Int64}} * 1000)
         """,
         params={"url": days_glob(settings.url, hours), "from_s": hours[0]},
         settings={**REBUILD_INSERT_SETTINGS, **S3_SETTINGS},
