@@ -130,6 +130,13 @@ class Archiver:
             # may have written more since (ADR 0010).
             in_file = await self._checked_count(hour_s)
             if raw_before <= in_file:
+                # The hour stops being due once this is recorded, and its old filled marker
+                # hides it from _complete_unfilled: an earlier rewrite whose page fill
+                # failed would never be finished. Fill now, from the fuller source.
+                if raw_before < in_file:
+                    await pages.add_from_file(self._ch, self._settings, hour_s)
+                else:
+                    await pages.add_from_raw_hour(self._ch, hour_s)
                 await self._record(hour_s, in_file)
                 raise FewerRows(f"{raw_before} raw rows, the file has {in_file}; not rewritten")
         url = hour_url(self._settings.url, hour_s)

@@ -60,6 +60,17 @@ async def edits(ch: ClickHouse) -> ClickHouse:
     return ch
 
 
+def titled(start: datetime, title: str) -> list[dict[str, Any]]:
+    """One edit with a title no other row has, so its page set shows whether it arrived."""
+    return [{**rows(1, start=start, first_seq=900)[0], "title": title}]
+
+
+async def clear_pages(ch: ClickHouse) -> None:
+    """Page sets as if the view's blocks were lost: only a fill from raw or a file restores them."""
+    for table in ("wiki_pages_per_minute", "wiki_pages_filled"):
+        await ch.execute(f"TRUNCATE TABLE {table}")
+
+
 async def scalar(ch: ClickHouse, sql: str) -> int:
     return int(next(iter((await ch.query(sql)).rows[0].values())))
 
@@ -129,14 +140,17 @@ async def test_an_hours_last_half_second_is_archived(
     await edits.execute("SYSTEM STOP MERGES wiki_edits")
     try:
         await edits.insert(
-            "wiki_edits", rows(1, start=at(H0 + HOUR_S - 1) + timedelta(milliseconds=455))
+            "wiki_edits", titled(at(H0 + HOUR_S - 1) + timedelta(milliseconds=455), "Late")
         )
+        expected = await pages_by_hour(edits, {H0})
+        await clear_pages(edits)
         archiver = Archiver(settings, edits)
 
         results = await archiver.run_once(NOW)
         assert (H0, "written", 51) in [(r.hour_s, r.result, r.rows) for r in results]
         assert await file_count(edits, settings, H0) == 51
         assert await archiver.run_once(NOW) == []
+        assert await pages_by_hour(edits, {H0}) == expected
     finally:
         await edits.execute("SYSTEM START MERGES wiki_edits")
 
@@ -333,6 +347,37 @@ async def test_the_archive_loop_completes_an_hour_whose_page_sets_failed(
     assert await pages_by_hour(edits, written) == before
     filled = await edits.query("SELECT DISTINCT toUnixTimestamp(hour) AS h FROM wiki_pages_filled")
     assert {int(r["h"]) for r in filled.rows} >= written
+
+
+async def test_a_rewrite_whose_page_fill_failed_is_filled_on_the_next_run(
+    edits: ClickHouse, settings: ArchiveSettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A late row: the rewrite reaches the file, then its page fill fails. The next run
+    finds the file already complete and the hour's old filled marker in place, so only
+    archive_hour itself can fill the late row's page (BPL-161)."""
+    archiver = Archiver(settings, edits)
+    await archiver.run_once(NOW)
+    await edits.insert("wiki_edits", titled(at(H0 + 1800), "Late"))
+    expected = await pages_by_hour(edits, {H0})
+    # The view's block for the late row was lost; the hour's filled marker stays.
+    await edits.execute(
+        "ALTER TABLE wiki_pages_per_minute DELETE WHERE toStartOfHour(minute) = "
+        "fromUnixTimestamp({h:Int64}) SETTINGS mutations_sync = 1",
+        params={"h": H0},
+    )
+
+    async def fails(*_: object) -> None:
+        raise RuntimeError("page fill failed")
+
+    with monkeypatch.context() as m:
+        m.setattr(pages, "add_from_raw_hour", fails)
+        results = await archiver.run_once(NOW)
+    assert [(r.hour_s, r.result) for r in results] == [(H0, "error")]
+    assert await file_count(edits, settings, H0) == 51  # the file was written
+
+    assert [r.result for r in await archiver.run_once(NOW)] == ["error"]  # FewerRows
+    assert await archiver.run_once(NOW) == []
+    assert await pages_by_hour(edits, {H0}) == expected
 
 
 async def test_an_adopted_file_with_more_rows_completes_page_sets_from_the_file(
