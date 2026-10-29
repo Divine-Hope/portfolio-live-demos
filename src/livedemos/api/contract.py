@@ -117,7 +117,8 @@ FreshnessReport = TypedDict(
     {
         "target": float,
         "threshold_s": float,
-        "window_days": int,
+        "month": str,  # the UTC calendar month measured, "2026-10"
+        "window_days": int,  # days in that month
         "from": str | None,  # None before the first sample
         "to": str | None,
         "minutes": int,
@@ -126,9 +127,9 @@ FreshnessReport = TypedDict(
         "unmeasured": int,  # no sample: counted against the SLO
         "ratio": float | None,
         "met": bool | None,
-        "budget_minutes": int,
+        "budget_minutes": int,  # for the whole month
         "budget_used": int,
-        "full_window": bool,  # False while measuring started less than window_days ago
+        "full_window": bool,  # False if measuring started after the month did
     },
 )
 

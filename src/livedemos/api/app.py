@@ -100,7 +100,6 @@ def create_app(
         policy = report.Policy(
             threshold_s=ops_config.slo_threshold_s,
             target=ops_config.slo_target,
-            days=ops_config.slo_days,
             stale_after_s=settings.stale_after_s,
         )
         app.state.services = Services(

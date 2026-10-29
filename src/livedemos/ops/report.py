@@ -225,8 +225,7 @@ class Policy:
     """What the report is judged against."""
 
     threshold_s: float  # freshness: the newest event younger than this
-    target: float  # the SLO: this share of minutes fresh
-    days: int  # over this many days
+    target: float  # the SLO: this share of minutes fresh, each calendar month
     stale_after_s: float  # older newest event: ingest isn't live
 
 
@@ -255,9 +254,7 @@ async def collect(db: Queryable, *, now: float, policy: Policy) -> Rows:
         db.query(HEAD),
     )
     first_ms = int(first.rows[0]["first_ms"]) if first.rows and int(first.rows[0]["n"]) else None
-    win = slo.window(
-        now_s=now, first_sample_s=None if first_ms is None else first_ms / 1000, days=policy.days
-    )
+    win = slo.window(now_s=now, first_sample_s=None if first_ms is None else first_ms / 1000)
     freshness = None
     if win is not None:
         counts = await db.query(
@@ -270,7 +267,6 @@ async def collect(db: Queryable, *, now: float, policy: Policy) -> Rows:
             sampled=int(row["sampled"]),
             fresh=int(row["fresh"]),
             target=policy.target,
-            days=policy.days,
         )
     figure, latest = split_cost(cost.rows[0] if cost.rows else None)
     return Rows(
@@ -295,7 +291,8 @@ def assemble(now: float, rows: Rows, policy: Policy) -> OpsPayload:
         rows.cost,
         rows.head,
     )
-    days, target, threshold_s = policy.days, policy.target, policy.threshold_s
+    target, threshold_s = policy.target, policy.threshold_s
+    month_s, month_days = slo.month(now)
     stale_after_s = policy.stale_after_s
     events = int(lag["events"]) if lag else 0
     by_reason = {str(r["reason"]): int(r["n"]) for r in reconnects}
@@ -303,7 +300,8 @@ def assemble(now: float, rows: Rows, policy: Policy) -> OpsPayload:
     fresh_report: FreshnessReport = {
         "target": target,
         "threshold_s": threshold_s,
-        "window_days": days,
+        "month": datetime.fromtimestamp(month_s, UTC).strftime("%Y-%m"),
+        "window_days": month_days,
         "from": None,
         "to": None,
         "minutes": 0,
@@ -312,7 +310,7 @@ def assemble(now: float, rows: Rows, policy: Policy) -> OpsPayload:
         "unmeasured": 0,
         "ratio": None,
         "met": None,
-        "budget_minutes": slo.budget_minutes(days=days, target=target),
+        "budget_minutes": slo.budget_minutes(days=month_days, target=target),
         "budget_used": 0,
         "full_window": False,
     }
@@ -329,7 +327,7 @@ def assemble(now: float, rows: Rows, policy: Policy) -> OpsPayload:
                 "met": freshness.met,
                 "budget_minutes": freshness.budget_minutes,
                 "budget_used": freshness.budget_used,
-                "full_window": freshness.window.is_full(days),
+                "full_window": freshness.window.is_full,
             }
         )
 

@@ -108,7 +108,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
             },
         ],
     )
-    policy = report.Policy(threshold_s=60, target=0.99, days=30, stale_after_s=60)
+    policy = report.Policy(threshold_s=60, target=0.99, stale_after_s=60)
     payload = await ops.OpsService(ch, policy=policy, ttl_s=60, error_cooldown_s=5).build()
     assert payload["ingest"]["lag_ms"]["events"] == 30
     assert payload["ingest"]["lag_ms"]["p95"] is not None
@@ -124,7 +124,7 @@ async def test_the_whole_payload_builds_from_real_tables(ch: ClickHouse) -> None
     assert payload["ingest"]["newest_event_at"] is not None
 
 
-POLICY = report.Policy(threshold_s=60, target=0.999, days=30, stale_after_s=60)
+POLICY = report.Policy(threshold_s=60, target=0.999, stale_after_s=60)
 
 
 def service(ch: ClickHouse) -> ops.OpsService:

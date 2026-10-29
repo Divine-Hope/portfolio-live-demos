@@ -137,7 +137,7 @@ The payload carries `stale_after_s`, so the API and the widget can't disagree ab
 
 Every number on the Ops tab comes from ClickHouse at request time, none from copy.
 
-The freshness SLO is measured by ClickHouse itself: a refreshable materialized view samples the newest event's age once a minute (`freshness_samples`, migration 0005), so a sample doesn't depend on ingest or the API. A minute is fresh if every sample in it was under 60 s, stale if not, and unmeasured if it has no sample (ClickHouse down, host being replaced). Unmeasured minutes count against the SLO. The window is the last 30 days of whole minutes, starting no earlier than the first whole minute measured; `full_window` says whether it covers all 30 days. The maths is `ops/slo.py`, tested in `tests/unit/test_slo.py`.
+The freshness SLO is measured by ClickHouse itself: a refreshable materialized view samples the newest event's age once a minute (`freshness_samples`, migration 0005), so a sample doesn't depend on ingest or the API. A minute is fresh if every sample in it was under 60 s, stale if not, and unmeasured if it has no sample (ClickHouse down, host being replaced). Unmeasured minutes count against the SLO. The window is the current UTC calendar month to date in whole minutes, starting no earlier than the first whole minute measured; `full_window` says whether it covers the whole month so far. A month is judged on its own, so an outage on the 26th stops counting on the 1st. The error budget is for the whole month from the first day, so it doesn't shrink or grow as the month goes on. The maths is `ops/slo.py`, tested in `tests/unit/test_slo.py`.
 
 Ingest lag covers every row stored in the last hour, replays of old events included: after an outage, that's when lag matters. A minmax index on `ingested_at` keeps it from reading the week.
 
@@ -145,7 +145,7 @@ Ingest records each reconnect in `ingest_reconnects`, from a task of its own wit
 
 The cost is asked of Cost Explorer (`GetCostAndUsage`) once per UTC day for the month so far, filtered by the `project=livedemos` tag, by the archive service, which runs only on the host holding the Elastic IP. "Once" has to survive crashes, a replacement host and two hosts overlapping, so before asking it claims the day with a conditional write to the archive bucket (`ops/cost/YYYY-MM-DD.json`, `If-None-Match: *`): only one caller can create it. The winner asks and writes the answer into the same object; anyone else, or a new host later that day, copies it from there. A claim with no answer means no new figure that day, never a second call; so does a claim that spans midnight UTC. An answer that couldn't be saved is kept in memory and saved on later runs. Only this month's figure is served, with the date fetched and the currency AWS reports. The host role allows that one Cost Explorer action, and reads and writes under `ops/cost/` only.
 
-The samples and reconnects live on the host's disk and aren't archived, so a rebuilt host starts them again, and `full_window` goes back to false until 30 days have passed.
+The samples and reconnects live on the host's disk and aren't archived, so a rebuilt host starts them again, and `full_window` stays false until the next month starts.
 
 ### Widget (`web/embed/wikipedia/`)
 
