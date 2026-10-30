@@ -323,7 +323,7 @@
               ],
               "query": []
             },
-            "description": "What the Ops tab shows: ingest lag p50 and p95 over the last hour, the resume bookmark, reconnects in the last 24 hours by reason, the 30-day freshness SLO, recorded gaps, and month-to-date AWS cost from Cost Explorer. Rebuilt at most once a minute."
+            "description": "What the Ops tab shows: ingest lag p50 and p95 over the last hour, the resume bookmark, reconnects in the last 24 hours by reason, the month-to-date freshness SLO, recorded gaps, and month-to-date AWS cost from Cost Explorer. Rebuilt at most once a minute."
           },
           "event": [
             {

@@ -43,7 +43,7 @@ def test_an_unexpected_bookmark_is_left_out_rather_than_guessed(sse_id: str) -> 
     assert report.shorten_bookmark(sse_id) is None
 
 
-POLICY = report.Policy(threshold_s=60.0, target=0.99, days=30, stale_after_s=60.0)
+POLICY = report.Policy(threshold_s=60.0, target=0.99, stale_after_s=60.0)
 
 
 def empty_assemble(now: float = 1_791_500_000.0, **rows: Any) -> Any:
@@ -58,6 +58,7 @@ def test_nothing_measured_yet_is_null_not_zero() -> None:
     assert payload["ingest"]["bookmark"] is None
     assert payload["freshness"]["ratio"] is None
     assert payload["freshness"]["from"] is None
+    assert payload["freshness"]["month"] == "2026-10"
     assert payload["cost"] is None
     assert payload["cost_check"] == {"today": "pending", "last_attempt_at": None}
     assert payload["ingest"]["state"] == "empty"
@@ -117,12 +118,13 @@ def test_cost_today_judges_only_todays_attempt(latest: dict[str, int] | None, to
 
 
 def test_assemble_reports_every_number_it_was_given() -> None:
-    win = slo.Window(start_s=1_791_496_400, end_s=1_791_500_000)
+    win = slo.window(now_s=1_791_500_000, first_sample_s=1_791_496_380)  # an hour
+    assert win is not None
     payload = empty_assemble(
         lag={"events": 120, "p50_ms": 900, "p95_ms": 2_400},
         sse_id=REAL_ID,
         reconnects=[{"reason": "idle", "n": 3}, {"reason": "eof", "n": 1}],
-        freshness=slo.summarise(win=win, sampled=58, fresh=57, target=0.99, days=30),
+        freshness=slo.summarise(win=win, sampled=58, fresh=57, target=0.99),
         gaps=[{"from_ms": 1_000_000, "to_ms": 1_090_500, "reason": "retention", "total": 21}],
         cost={
             "fetched_ms": 1_791_498_000_000,
@@ -147,6 +149,8 @@ def test_assemble_reports_every_number_it_was_given() -> None:
     assert payload["gaps"]["recent"][0]["duration_s"] == 90
     assert payload["gaps"]["total"] == 21  # more than the list holds: the page can say so
     assert fresh["full_window"] is False
+    assert (fresh["month"], fresh["window_days"]) == ("2026-10", 31)
+    assert fresh["budget_minutes"] == 446  # 1% of October, though only an hour was measured
     assert payload["cost"]["amount"] == "0.1977203052"
     assert payload["cost"]["currency"] == "USD"
     assert payload["cost"]["fetched_at"] == "2026-10-08T22:20:00.000Z"

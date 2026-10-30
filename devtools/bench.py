@@ -118,7 +118,7 @@ async def fill(ch: ClickHouse, *, days: int, rate: int, now: datetime) -> int:
     return total
 
 
-# 30 days of per-minute freshness samples, the Ops tab's full SLO window. A few stale ones.
+# 30 days of per-minute freshness samples, about a full month of the SLO window. A few stale ones.
 _FILL_SAMPLES = """
 INSERT INTO freshness_samples (minute, sampled_at, age_s)
 SELECT m, m + toIntervalMillisecond(5), if(number % 500 = 0, 90.0, 2.5)
@@ -234,7 +234,7 @@ async def measure(ch: ClickHouse, case: Case, *, runs: int) -> Result:
 
 async def ops_build(ch: ClickHouse, *, runs: int) -> tuple[float, float]:
     """The whole Ops payload, its queries at once, as the API builds it."""
-    policy = report.Policy(threshold_s=60, target=0.999, days=30, stale_after_s=60)
+    policy = report.Policy(threshold_s=60, target=0.999, stale_after_s=60)
     service = ops.OpsService(WithReaderLimits(ch), policy=policy, ttl_s=60, error_cooldown_s=5)
     timings = []
     for _ in range(runs):

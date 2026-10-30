@@ -77,7 +77,7 @@ No internet, or don't want to hit Wikimedia? `make up-offline` runs the same sta
 |---|---|
 | `/v1/wikipedia/live.json` | Everything the widget shows. Rebuilt every second. |
 | `/v1/wikipedia/activity?lang=en,pt&window=1h` | An ad hoc query with ClickHouse's own timing. `window` is `5m`, `1h`, `24h`, `3d` or `7d`. |
-| `/v1/ops.json` | How the pipeline is doing: ingest lag, bookmark, reconnects, 30-day freshness SLO, gaps, month-to-date AWS cost |
+| `/v1/ops.json` | How the pipeline is doing: ingest lag, bookmark, reconnects, month-to-date freshness SLO, gaps, month-to-date AWS cost |
 | `/embed/wikipedia/?lang=all&theme=dark` | The embeddable widget |
 | `/healthz`, `/readyz`, `/metrics` | Liveness, readiness and Prometheus metrics (`/metrics` isn't public in production) |
 
@@ -128,7 +128,7 @@ Python 3.12, asyncio, httpx, FastAPI. ClickHouse 26.8 LTS. Plain HTML, CSS and J
 ## What I'd do next
 
 - **A second dataset**, Bitcoin from mempool.space, on the same platform. It tests whether the platform is general or just shaped around Wikipedia.
-- **Keep the Ops history across a host rebuild.** The freshness samples and reconnects live on the host's disk; archiving them like the edits would make the 30-day SLO survive a replacement.
+- **Keep the Ops history across a host rebuild.** The freshness samples and reconnects live on the host's disk; archiving them like the edits would make the month's SLO survive a replacement.
 - **TLS from CloudFront to the host.** Today that hop is plain HTTP, guarded by a secret header and CloudFront-only firewall rules ([why](docs/architecture.md#security)).
 - **Find out why ClickHouse's memory grows**, before it reaches its limit. The week above shows the growth; it doesn't explain it.
 - **A month of production numbers.** Freshness over 30 days, merges through a TTL drop, and the first full AWS bill.
