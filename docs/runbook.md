@@ -170,13 +170,15 @@ aws ssm put-parameter --profile livedemos --region eu-west-1 --overwrite \
 
 The next deploy (or re-running the last one) puts it in the host's `.env`. To rotate it, do the same with a new token, then delete the old one in Grafana Cloud.
 
+**Shared stack:** other projects (Desk) send to the same stack, so every series and log line from here carries `project="livedemos"`, `host="livedemos"` and `env="prod"`, plus `service` (ingest, api, archive, clickhouse, node, cadvisor) and `job="livedemos/<service>"`. Every dashboard query and alert selects `project="livedemos"`. Our dashboard and rules live in the folder "Live Demos".
+
 **Dashboard and alert rules:** "Live demos: pipeline" and the rule group `livedemos` are code. Change `deploy/grafana/build_dashboard.py` or `build_alerts.py`, run it, commit both files, then load them with a service account token (Editor role, made for the occasion): `GRAFANA_URL=https://<stack>.grafana.net GRAFANA_TOKEN=... uv run python deploy/grafana/load.py`.
 
 Set once by hand, in Alerting: the email contact point `livedemos-email` (the budget address; kept out of this repo) and a notification policy route `project = livedemos` to it, grouped by `alertname`, repeating every 4 hours.
 
-**Outside-in check:** Testing & synthetics > Synthetics, `livedemos-live-json`, as in `deploy/grafana/synthetic-check.json`: once a minute from London, failing unless `live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure. About 44,000 runs a month, inside the free tier's 100,000.
+**Outside-in check:** Testing & synthetics > Synthetics, `livedemos/live-json` with the label `project=livedemos` (it shows up as `label_project`), as in `deploy/grafana/synthetic-check.json`: once a minute from London, failing unless `live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure. About 44,000 runs a month, inside the free tier's 100,000.
 
-**Logs:** Explore, Loki, `{host="livedemos", service="ingest"}`; add `| json` to filter on fields, such as `| json | level="error"`.
+**Logs:** Explore, Loki, `{project="livedemos", service="ingest"}`; add `| json` to filter on fields, such as `| json | level="error"`.
 
 **Is Alloy healthy?** `docker compose -f compose.yaml -f compose.prod.yaml logs --tail 50 alloy`. A 401 means the token is wrong or missing.
 

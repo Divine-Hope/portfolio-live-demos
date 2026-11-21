@@ -8,6 +8,14 @@
 // Everything is scraped once a minute: the free tier counts active series at one sample
 // a minute, and every alert here works on 5-minute windows. Labels stay bounded: services,
 // routes, outcomes and a short list of ClickHouse and host metrics, never titles or IPs.
+//
+// The Grafana stack is shared with other projects, so every series and log line says whose
+// it is (the same convention in each project's Alloy):
+//   project  the product: livedemos            (external label)
+//   host     the machine: livedemos            (external label)
+//   env      prod                              (external label)
+//   service  the component: ingest, api, archive, clickhouse, node, cadvisor
+//   job      <project>/<service>, e.g. livedemos/api, so no two projects share a job
 
 prometheus.remote_write "cloud" {
 	endpoint {
@@ -19,7 +27,9 @@ prometheus.remote_write "cloud" {
 		}
 	}
 	external_labels = {
-		host = "livedemos",
+		project = "livedemos",
+		host    = "livedemos",
+		env     = "prod",
 	}
 }
 
@@ -33,15 +43,17 @@ loki.write "cloud" {
 		}
 	}
 	external_labels = {
-		host = "livedemos",
+		project = "livedemos",
+		host    = "livedemos",
+		env     = "prod",
 	}
 }
 
 prometheus.scrape "app" {
 	targets = [
-		{"__address__" = "ingest:9101", "job" = "ingest"},
-		{"__address__" = "api:8000", "job" = "api"},
-		{"__address__" = "archive:9102", "job" = "archive"},
+		{"__address__" = "ingest:9101", "job" = "livedemos/ingest", "service" = "ingest"},
+		{"__address__" = "api:8000", "job" = "livedemos/api", "service" = "api"},
+		{"__address__" = "archive:9102", "job" = "livedemos/archive", "service" = "archive"},
 	]
 	scrape_interval = "60s"
 	forward_to      = [prometheus.relabel.app.receiver]
@@ -60,7 +72,7 @@ prometheus.relabel "app" {
 // ClickHouse exposes about 3,000 series; these keep about 40.
 
 prometheus.scrape "clickhouse" {
-	targets         = [{"__address__" = "clickhouse:9363", "job" = "clickhouse"}]
+	targets         = [{"__address__" = "clickhouse:9363", "job" = "livedemos/clickhouse", "service" = "clickhouse"}]
 	scrape_interval = "60s"
 	forward_to      = [prometheus.relabel.clickhouse.receiver]
 }
@@ -101,7 +113,12 @@ prometheus.scrape "host" {
 prometheus.relabel "host" {
 	rule {
 		target_label = "job"
-		replacement  = "host"
+		replacement  = "livedemos/node"
+	}
+
+	rule {
+		target_label = "service"
+		replacement  = "node"
 	}
 
 	// The container's hostname otherwise, which changes whenever Alloy is recreated.
@@ -140,6 +157,11 @@ prometheus.relabel "containers" {
 	}
 
 	rule {
+		target_label = "job"
+		replacement  = "livedemos/cadvisor"
+	}
+
+	rule {
 		regex  = "id|image|name|container_label_com_docker_compose_service"
 		action = "labeldrop"
 	}
@@ -167,6 +189,12 @@ discovery.relabel "logs" {
 	rule {
 		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
 		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["service"]
+		target_label  = "job"
+		replacement   = "livedemos/$1"
 	}
 
 	// Not Alloy's own logs: a push error it logs would be shipped, fail, and be logged again.

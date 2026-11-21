@@ -26,7 +26,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "max(timestamp(ingest_last_event_timestamp_seconds) - ingest_last_event_timestamp_seconds)",
+            "expr": "max(timestamp(ingest_last_event_timestamp_seconds{project=\"livedemos\"}) - ingest_last_event_timestamp_seconds{project=\"livedemos\"})",
             "instant": true,
             "range": false
           }
@@ -76,7 +76,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "min by (job) (up{job=~\"ingest|api|archive|clickhouse\"})",
+            "expr": "min by (job) (up{project=\"livedemos\", job=~\"livedemos/(ingest|api|archive|clickhouse)\"})",
             "instant": true,
             "range": false
           }
@@ -126,7 +126,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "max by (service) (container_memory_working_set_bytes / container_spec_memory_limit_bytes)",
+            "expr": "max by (service) (container_memory_working_set_bytes{project=\"livedemos\"} / container_spec_memory_limit_bytes{project=\"livedemos\"})",
             "instant": true,
             "range": false
           }
@@ -176,7 +176,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "increase(node_vmstat_oom_kill[10m])",
+            "expr": "increase(node_vmstat_oom_kill{project=\"livedemos\"}[10m])",
             "instant": true,
             "range": false
           }
@@ -226,7 +226,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "rate(node_vmstat_pswpin[5m])",
+            "expr": "rate(node_vmstat_pswpin{project=\"livedemos\"}[5m])",
             "instant": true,
             "range": false
           }
@@ -276,7 +276,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes) / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
+            "expr": "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes{project=\"livedemos\"}) / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes{project=\"livedemos\"})",
             "instant": true,
             "range": false
           }
@@ -326,7 +326,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "sum(rate(api_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(api_requests_total[5m])), 1e-9)",
+            "expr": "sum(rate(api_requests_total{project=\"livedemos\", status=~\"5..\"}[5m])) / clamp_min(sum(rate(api_requests_total{project=\"livedemos\"}[5m])), 1e-9)",
             "instant": true,
             "range": false
           }
@@ -376,7 +376,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "time() - max(archive_newest_hour_timestamp_seconds)",
+            "expr": "time() - max(archive_newest_hour_timestamp_seconds{project=\"livedemos\"})",
             "instant": true,
             "range": false
           }
@@ -426,7 +426,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "min(probe_success{job=\"livedemos-live-json\"})",
+            "expr": "min(probe_success{label_project=\"livedemos\", job=\"livedemos/live-json\"})",
             "instant": true,
             "range": false
           }

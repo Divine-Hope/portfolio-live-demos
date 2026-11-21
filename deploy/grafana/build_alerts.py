@@ -4,6 +4,8 @@
 
 Each rule is a PromQL value and a threshold. Every rule carries `project=livedemos`, which
 the notification policy routes to the email contact point, and links its runbook entry.
+The stack is shared with other projects, so every query selects `project="livedemos"`
+(set by deploy/alloy/config.alloy), and jobs are namespaced `livedemos/<service>`.
 docs/runbook.md ("Grafana Cloud") says how to load the group into the stack.
 """
 
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 PROM_UID = "${prometheus}"  # replaced with the stack's Prometheus data source uid on load
+P = 'project="livedemos"'
 RUNBOOK = "https://github.com/Divine-Hope/portfolio-live-demos/blob/main/docs/runbook.md"
 
 
@@ -70,7 +73,8 @@ RULES = [
         "Ingest stalled",
         # Age at scrape time, not now: scrapes are a minute apart, so time() minus the
         # value would read up to 60 s even when nothing is wrong.
-        "max(timestamp(ingest_last_event_timestamp_seconds) - ingest_last_event_timestamp_seconds)",
+        f"max(timestamp(ingest_last_event_timestamp_seconds{{{P}}})"
+        f" - ingest_last_event_timestamp_seconds{{{P}}})",
         "gt",
         60,
         pending="5m",
@@ -80,7 +84,7 @@ RULES = [
     rule(
         "ld-target-down",
         "No data from a service",
-        'min by (job) (up{job=~"ingest|api|archive|clickhouse"})',
+        f'min by (job) (up{{{P}, job=~"livedemos/(ingest|api|archive|clickhouse)"}})',
         "lt",
         1,
         pending="5m",
@@ -91,7 +95,8 @@ RULES = [
     rule(
         "ld-container-memory",
         "Container near its memory limit",
-        "max by (service) (container_memory_working_set_bytes / container_spec_memory_limit_bytes)",
+        f"max by (service) (container_memory_working_set_bytes{{{P}}}"
+        f" / container_spec_memory_limit_bytes{{{P}}})",
         "gt",
         0.85,
         pending="5m",
@@ -100,7 +105,7 @@ RULES = [
     rule(
         "ld-oom-kill",
         "OOM kill",
-        "increase(node_vmstat_oom_kill[10m])",
+        f"increase(node_vmstat_oom_kill{{{P}}}[10m])",
         "gt",
         0,
         pending="0s",
@@ -109,7 +114,7 @@ RULES = [
     rule(
         "ld-swap-in",
         "Host swapping in",
-        "rate(node_vmstat_pswpin[5m])",
+        f"rate(node_vmstat_pswpin{{{P}}}[5m])",
         "gt",
         100,
         pending="10m",
@@ -119,8 +124,8 @@ RULES = [
     rule(
         "ld-disk",
         "Disk over 80%",
-        "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes)"
-        " / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
+        f"max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes{{{P}}})"
+        f" / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes{{{P}}})",
         "gt",
         0.8,
         pending="5m",
@@ -129,8 +134,8 @@ RULES = [
     rule(
         "ld-api-5xx",
         "API 5xx over 1%",
-        'sum(rate(api_requests_total{status=~"5.."}[5m]))'
-        " / clamp_min(sum(rate(api_requests_total[5m])), 1e-9)",
+        f'sum(rate(api_requests_total{{{P}, status=~"5.."}}[5m]))'
+        f" / clamp_min(sum(rate(api_requests_total{{{P}}}[5m])), 1e-9)",
         "gt",
         0.01,
         pending="10m",
@@ -140,7 +145,7 @@ RULES = [
     rule(
         "ld-archive-stale",
         "Archive behind",
-        "time() - max(archive_newest_hour_timestamp_seconds)",
+        f"time() - max(archive_newest_hour_timestamp_seconds{{{P}}})",
         "gt",
         3 * 3600,
         pending="15m",
@@ -149,7 +154,9 @@ RULES = [
     rule(
         "ld-live-json-check",
         "live.json check failing",
-        'min(probe_success{job="livedemos-live-json"})',
+        # Synthetic Monitoring writes this series itself, so it carries none of Alloy's
+        # labels; the check's custom label `project` arrives as `label_project`.
+        'min(probe_success{label_project="livedemos", job="livedemos/live-json"})',
         "lt",
         1,
         pending="3m",

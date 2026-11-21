@@ -51,7 +51,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(api_last_event_age_seconds)",
+          "expr": "max(api_last_event_age_seconds{project=\"livedemos\"})",
           "legendFormat": "age",
           "datasource": {
             "type": "prometheus",
@@ -84,7 +84,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(ingest_lag_seconds)",
+          "expr": "max(ingest_lag_seconds{project=\"livedemos\"})",
           "legendFormat": "lag",
           "datasource": {
             "type": "prometheus",
@@ -117,7 +117,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(ingest_events_total[5m]))",
+          "expr": "sum by (outcome) (rate(ingest_events_total{project=\"livedemos\"}[5m]))",
           "legendFormat": "{{outcome}}",
           "datasource": {
             "type": "prometheus",
@@ -150,7 +150,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(ingest_insert_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(ingest_insert_seconds_bucket{project=\"livedemos\"}[5m])))",
           "legendFormat": "p50",
           "datasource": {
             "type": "prometheus",
@@ -159,7 +159,7 @@
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(ingest_insert_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(ingest_insert_seconds_bucket{project=\"livedemos\"}[5m])))",
           "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
@@ -192,7 +192,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (reason) (increase(ingest_reconnects_total[1h]))",
+          "expr": "sum by (reason) (increase(ingest_reconnects_total{project=\"livedemos\"}[1h]))",
           "legendFormat": "{{reason}}",
           "datasource": {
             "type": "prometheus",
@@ -225,7 +225,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(api_snapshot_build_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(api_snapshot_build_seconds_bucket{project=\"livedemos\"}[5m])))",
           "legendFormat": "p50",
           "datasource": {
             "type": "prometheus",
@@ -234,7 +234,7 @@
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(api_snapshot_build_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(api_snapshot_build_seconds_bucket{project=\"livedemos\"}[5m])))",
           "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
@@ -267,7 +267,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(api_request_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, route) (rate(api_request_seconds_bucket{project=\"livedemos\"}[5m])))",
           "legendFormat": "{{route}}",
           "datasource": {
             "type": "prometheus",
@@ -300,7 +300,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status) (rate(api_requests_total[5m]))",
+          "expr": "sum by (status) (rate(api_requests_total{project=\"livedemos\"}[5m]))",
           "legendFormat": "{{status}}",
           "datasource": {
             "type": "prometheus",
@@ -333,7 +333,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (service) (container_memory_working_set_bytes)",
+          "expr": "max by (service) (container_memory_working_set_bytes{project=\"livedemos\"})",
           "legendFormat": "{{service}}",
           "datasource": {
             "type": "prometheus",
@@ -342,7 +342,7 @@
         },
         {
           "refId": "B",
-          "expr": "max by (service) (container_spec_memory_limit_bytes)",
+          "expr": "max by (service) (container_spec_memory_limit_bytes{project=\"livedemos\"})",
           "legendFormat": "{{service}} limit",
           "datasource": {
             "type": "prometheus",
@@ -375,7 +375,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "node_memory_MemAvailable_bytes",
+          "expr": "node_memory_MemAvailable_bytes{project=\"livedemos\"}",
           "legendFormat": "available",
           "datasource": {
             "type": "prometheus",
@@ -384,7 +384,7 @@
         },
         {
           "refId": "B",
-          "expr": "node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes",
+          "expr": "node_memory_SwapTotal_bytes{project=\"livedemos\"} - node_memory_SwapFree_bytes{project=\"livedemos\"}",
           "legendFormat": "swap used",
           "datasource": {
             "type": "prometheus",
@@ -393,7 +393,7 @@
         },
         {
           "refId": "C",
-          "expr": "increase(node_vmstat_oom_kill[1h]) * 1e6",
+          "expr": "increase(node_vmstat_oom_kill{project=\"livedemos\"}[1h]) * 1e6",
           "legendFormat": "OOM kills in the last hour (x 1e6)",
           "datasource": {
             "type": "prometheus",
@@ -426,7 +426,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes) / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
+          "expr": "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes{project=\"livedemos\"}) / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes{project=\"livedemos\"})",
           "legendFormat": "/",
           "datasource": {
             "type": "prometheus",
@@ -459,7 +459,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(archive_hours_behind)",
+          "expr": "max(archive_hours_behind{project=\"livedemos\"})",
           "legendFormat": "hours behind",
           "datasource": {
             "type": "prometheus",
@@ -468,7 +468,7 @@
         },
         {
           "refId": "B",
-          "expr": "time() - max(archive_newest_hour_timestamp_seconds)",
+          "expr": "time() - max(archive_newest_hour_timestamp_seconds{project=\"livedemos\"})",
           "legendFormat": "newest hour age (s)",
           "datasource": {
             "type": "prometheus",
@@ -503,7 +503,7 @@
             "type": "loki",
             "uid": "${loki}"
           },
-          "expr": "{host=\"livedemos\", level=~\"warning|error|critical\"}"
+          "expr": "{project=\"livedemos\", level=~\"warning|error|critical\"}"
         }
       ],
       "id": 13
