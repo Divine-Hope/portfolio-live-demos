@@ -4,6 +4,9 @@
 
 Kept as code so every panel is reviewed like any other change. The JSON is committed too,
 so it can be imported from scratch (Dashboards > New > Import) without running this.
+
+The stack is shared with other projects, so every query selects `project="livedemos"`
+(deploy/alloy/config.alloy sets it on every series and log line).
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from typing import Any
 
 PROM = {"type": "prometheus", "uid": "${prometheus}"}
 LOKI = {"type": "loki", "uid": "${loki}"}
+P = 'project="livedemos"'
 
 
 def panel(
@@ -44,7 +48,7 @@ def panel(
 
 def quantiles(bucket: str) -> list[tuple[str, str]]:
     return [
-        (f"histogram_quantile({q}, sum by (le) (rate({bucket}[5m])))", f"p{int(q * 100)}")
+        (f"histogram_quantile({q}, sum by (le) (rate({bucket}{{{P}}}[5m])))", f"p{int(q * 100)}")
         for q in (0.5, 0.95)
     ]
 
@@ -52,7 +56,7 @@ def quantiles(bucket: str) -> list[tuple[str, str]]:
 PANELS = [
     panel(
         "Freshness: age of the newest event in the snapshot",
-        [("max(api_last_event_age_seconds)", "age")],
+        [(f"max(api_last_event_age_seconds{{{P}}})", "age")],
         unit="s",
         x=0,
         y=0,
@@ -60,14 +64,14 @@ PANELS = [
     ),
     panel(
         "Ingest lag: commit time minus event time",
-        [("max(ingest_lag_seconds)", "lag")],
+        [(f"max(ingest_lag_seconds{{{P}}})", "lag")],
         unit="s",
         x=12,
         y=0,
     ),
     panel(
         "Events by outcome (per second)",
-        [("sum by (outcome) (rate(ingest_events_total[5m]))", "{{outcome}}")],
+        [(f"sum by (outcome) (rate(ingest_events_total{{{P}}}[5m]))", "{{outcome}}")],
         unit="ops",
         x=0,
         y=8,
@@ -81,7 +85,7 @@ PANELS = [
     ),
     panel(
         "Stream reconnects by reason (per hour)",
-        [("sum by (reason) (increase(ingest_reconnects_total[1h]))", "{{reason}}")],
+        [(f"sum by (reason) (increase(ingest_reconnects_total{{{P}}}[1h]))", "{{reason}}")],
         x=0,
         y=16,
     ),
@@ -97,7 +101,7 @@ PANELS = [
         [
             (
                 "histogram_quantile(0.95,"
-                " sum by (le, route) (rate(api_request_seconds_bucket[5m])))",
+                f" sum by (le, route) (rate(api_request_seconds_bucket{{{P}}}[5m])))",
                 "{{route}}",
             )
         ],
@@ -108,7 +112,7 @@ PANELS = [
     ),
     panel(
         "API responses by status (per second)",
-        [("sum by (status) (rate(api_requests_total[5m]))", "{{status}}")],
+        [(f"sum by (status) (rate(api_requests_total{{{P}}}[5m]))", "{{status}}")],
         unit="reqps",
         x=12,
         y=24,
@@ -116,8 +120,8 @@ PANELS = [
     panel(
         "Memory per container, and its limit",
         [
-            ("max by (service) (container_memory_working_set_bytes)", "{{service}}"),
-            ("max by (service) (container_spec_memory_limit_bytes)", "{{service}} limit"),
+            (f"max by (service) (container_memory_working_set_bytes{{{P}}})", "{{service}}"),
+            (f"max by (service) (container_spec_memory_limit_bytes{{{P}}})", "{{service}} limit"),
         ],
         unit="bytes",
         x=0,
@@ -126,9 +130,15 @@ PANELS = [
     panel(
         "Host memory, swap and OOM kills",
         [
-            ("node_memory_MemAvailable_bytes", "available"),
-            ("node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes", "swap used"),
-            ("increase(node_vmstat_oom_kill[1h]) * 1e6", "OOM kills in the last hour (x 1e6)"),
+            (f"node_memory_MemAvailable_bytes{{{P}}}", "available"),
+            (
+                f"node_memory_SwapTotal_bytes{{{P}}} - node_memory_SwapFree_bytes{{{P}}}",
+                "swap used",
+            ),
+            (
+                f"increase(node_vmstat_oom_kill{{{P}}}[1h]) * 1e6",
+                "OOM kills in the last hour (x 1e6)",
+            ),
         ],
         unit="bytes",
         x=12,
@@ -138,8 +148,8 @@ PANELS = [
         "Disk used (the root disk, where ClickHouse keeps its data)",
         [
             (
-                "max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes)"
-                " / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes)",
+                f"max(ClickHouseAsyncMetrics_FilesystemMainPathUsedBytes{{{P}}})"
+                f" / max(ClickHouseAsyncMetrics_FilesystemMainPathTotalBytes{{{P}}})",
                 "/",
             )
         ],
@@ -150,8 +160,8 @@ PANELS = [
     panel(
         "Archive: hours behind, and age of the newest archived hour",
         [
-            ("max(archive_hours_behind)", "hours behind"),
-            ("time() - max(archive_newest_hour_timestamp_seconds)", "newest hour age (s)"),
+            (f"max(archive_hours_behind{{{P}}})", "hours behind"),
+            (f"time() - max(archive_newest_hour_timestamp_seconds{{{P}}})", "newest hour age (s)"),
         ],
         x=12,
         y=40,
@@ -166,7 +176,7 @@ PANELS = [
             {
                 "refId": "A",
                 "datasource": LOKI,
-                "expr": '{host="livedemos", level=~"warning|error|critical"}',
+                "expr": f'{{{P}, level=~"warning|error|critical"}}',
             }
         ],
     },
