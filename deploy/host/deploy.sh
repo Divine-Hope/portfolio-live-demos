@@ -12,13 +12,15 @@ main() {
     return 2
   fi
   cd /opt/livedemos
-  # ClickHouse reads clickhouse/ through a bind mount, so `up -d` won't restart it when
-  # only those files change. Compare the directory's git tree before and after.
-  local ch_before ch_after
+  # ClickHouse and Alloy read their config through bind mounts, so `up -d` won't restart
+  # them when only those files change. Compare each directory's git tree before and after.
+  local ch_before ch_after alloy_before alloy_after
   ch_before=$(git rev-parse --quiet HEAD:clickhouse 2>/dev/null || true)
+  alloy_before=$(git rev-parse --quiet HEAD:deploy/alloy 2>/dev/null || true)
   git fetch --quiet --depth 1 origin "$sha"
   git checkout --quiet --force "$sha"
   ch_after=$(git rev-parse HEAD:clickhouse)
+  alloy_after=$(git rev-parse HEAD:deploy/alloy)
 
   # Host upkeep (security updates). A failure here mustn't block shipping the app.
   deploy/host/harden.sh || echo "WARNING: host upkeep failed; see the output above" >&2
@@ -35,6 +37,10 @@ main() {
   if [[ $ch_before != "$ch_after" ]]; then
     echo "clickhouse/ changed; restarting clickhouse to load it"
     "${compose[@]}" restart clickhouse
+  fi
+  if [[ $alloy_before != "$alloy_after" ]]; then
+    echo "deploy/alloy changed; restarting alloy to load it"
+    "${compose[@]}" restart alloy
   fi
   docker image prune --force --filter "until=168h" >/dev/null
   echo "deployed $sha"
