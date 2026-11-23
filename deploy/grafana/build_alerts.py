@@ -155,8 +155,8 @@ RULES = [
         "ld-live-json-check",
         "live.json check failing",
         # Synthetic Monitoring writes this series itself, so it carries none of Alloy's
-        # labels; the check's custom label `project` arrives as `label_project`.
-        'min(probe_success{label_project="livedemos", job="livedemos/live-json"})',
+        # labels; the check's custom label `project` arrives as `project`.
+        'min(probe_success{project="livedemos", job="livedemos/live-json"})',
         "lt",
         1,
         pending="3m",

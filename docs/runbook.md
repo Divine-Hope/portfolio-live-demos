@@ -176,7 +176,7 @@ The next deploy (or re-running the last one) puts it in the host's `.env`. To ro
 
 Set once by hand, in Alerting: the email contact point `livedemos-email` (the budget address; kept out of this repo) and a notification policy route `project = livedemos` to it, grouped by `alertname`, repeating every 4 hours.
 
-**Outside-in check:** Testing & synthetics > Synthetics, `livedemos/live-json` with the label `project=livedemos` (it shows up as `label_project`), as in `deploy/grafana/synthetic-check.json`: once a minute from London, failing unless `live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure. About 44,000 runs a month, inside the free tier's 100,000.
+**Outside-in check:** Testing & synthetics > Synthetics, `livedemos/live-json` with the label `project=livedemos` (it shows up as `project` on `probe_success`), as in `deploy/grafana/synthetic-check.json`: once a minute from London, failing unless `live.json` answers 200 with `"status":"live"`, so the fallback copy counts as a failure. About 44,000 runs a month, inside the free tier's 100,000.
 
 **Logs:** Explore, Loki, `{project="livedemos", service="ingest"}`; add `| json` to filter on fields, such as `| json | level="error"`.
 
