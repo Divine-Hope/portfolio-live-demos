@@ -426,7 +426,7 @@
           },
           "model": {
             "refId": "A",
-            "expr": "min(probe_success{label_project=\"livedemos\", job=\"livedemos/live-json\"})",
+            "expr": "min(probe_success{project=\"livedemos\", job=\"livedemos/live-json\"})",
             "instant": true,
             "range": false
           }
